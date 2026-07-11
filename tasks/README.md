@@ -55,6 +55,19 @@ foundational (набор scope в поиске + идентичность про
 | 5.3 Подкоманда `memoryd init` (скаффолдинг) | [5.3-init-scaffold.md](5.3-init-scaffold.md) | ✅ выполнена |
 | 5.4 `init`: генерация скила + интерактивный сетап | [5.4-init-interactive-skills.md](5.4-init-interactive-skills.md) | ✅ выполнена |
 
+## Этап 6 — Web-морда (read-only viewer)
+
+Просмотр содержимого памяти в браузере. Форма — подкоманда `memoryd web` (HTTP поверх
+общего файла БД, read-only), фронтенд на Tailwind (CDN), поиск v1 — лексический (FTS5).
+6.1 — foundational (read-методы store), выполнять первой; 6.3 — после фиксации контракта
+API из 6.2.
+
+| Задача | Файл | Статус |
+|--------|------|--------|
+| 6.1 Read-only query-слой в Store | [6.1-store-read-api.md](6.1-store-read-api.md) | ⏳ ожидает |
+| 6.2 Подкоманда `memoryd web` (HTTP + JSON API) | [6.2-memoryd-web-server.md](6.2-memoryd-web-server.md) | ⏳ ожидает |
+| 6.3 Frontend web-морды (Tailwind CDN) | [6.3-web-frontend-tailwind.md](6.3-web-frontend-tailwind.md) | ⏳ ожидает |
+
 ## Общие требования ко всем задачам
 
 - Сборка/тесты только с флагами: `CGO_ENABLED=1 go build -tags sqlite_fts5 ./...`,
