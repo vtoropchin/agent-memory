@@ -35,7 +35,21 @@ func buildInstructions(scope config.ScopeConfig) string {
 	fmt.Fprintf(&b, "Дефолты этого инстанса (project=%q):\n", scope.Project)
 	fmt.Fprintf(&b, "- memory_save без scope сохраняет в %q.\n", saveScope)
 	fmt.Fprintf(&b, "- memory_recall без scope/scopes ищет в %s.\n", strings.Join(recallScopes, ", "))
-	b.WriteString("- Общие для всех проектов факты сохраняй явно в scope \"user:*\".\n")
+	// Совет про общий слой выводим из scope.Shared, а не из литерала "user:*",
+	// чтобы он был согласован с реально показанными recall-scope при нестандартном
+	// [scope] shared. Пустой Shared → общего слоя у инстанса нет, строку не печатаем.
+	switch len(scope.Shared) {
+	case 0:
+		// нет общего слоя — совета про общий scope нет
+	case 1:
+		fmt.Fprintf(&b, "- Общие для всех проектов факты сохраняй явно в scope %q.\n", scope.Shared[0])
+	default:
+		quoted := make([]string, len(scope.Shared))
+		for i, s := range scope.Shared {
+			quoted[i] = fmt.Sprintf("%q", s)
+		}
+		fmt.Fprintf(&b, "- Общие факты сохраняй явно в один из общих scope: %s.\n", strings.Join(quoted, ", "))
+	}
 
 	return b.String()
 }
