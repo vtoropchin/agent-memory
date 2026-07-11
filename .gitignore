@@ -1,3 +1,5 @@
 .idea
 graphify-out
 .env
+bin/
+.agentmemory/

@@ -1,0 +1,40 @@
+# Конфиг догфудинга AgentMemory (DESIGN.md §14 Этап 5, задача 5.2).
+#
+# Проект AgentMemory ведёт свою собственную память в memoryd. Claude Code
+# поднимает сервер `agentmemory` из .mcp.json в корне репо и передаёт ему этот
+# файл флагом -config. Схема полей — см. config.example.toml и DESIGN.md §13.
+
+[store]
+# Общий файл БД на ВСЕ проекты (DESIGN.md §2.1: один файл, изоляция через scope).
+# Путь НЕ repo-local — так работает общий слой user:* между проектами. Каталог
+# ~/.agentmemory создаётся автоматически при первом старте (store.Open).
+path = "~/.agentmemory/memory.db"
+
+[embedder]
+# Локальный ollama + bge-m3 (dim определяется автоматически пробным эмбеддингом).
+# Если ollama недоступен — memoryd стартует, recall падает на чистый FTS5 (§15).
+provider = "ollama"
+base_url = "http://localhost:11434"
+model    = "bge-m3"
+
+[reasoner]
+# DeepSeek chat: ключ берётся из env DEEPSEEK_API_KEY (пробрасывается через
+# .mcp.json), а не из этого файла. Пустой ключ → деградация до noop (§15):
+# recall без суммаризации, консолидация недоступна — но память работает.
+provider = "deepseek"
+model    = "deepseek-chat"
+
+[recall]
+default_token_budget = 800
+weights = { relevance = 1.0, importance = 0.5, recency = 0.4, access = 0.2 }
+
+[maint]
+decay_interval    = "24h"
+consolidate_after = "168h"                 # неделя episodic → semantic
+
+[scope]
+# Идентичность инстанса (MP-1/MP-2): домашнее пространство project:agentmemory,
+# поверх него в recall всегда добавляется общий слой user:*. memory_save без
+# явного scope пишет в project:agentmemory; общие привычки — явно scope="user:*".
+project = "agentmemory"
+shared  = ["user:*"]
