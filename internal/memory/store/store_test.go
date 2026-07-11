@@ -28,6 +28,8 @@ func newID(t *testing.T) string {
 
 func strPtr(s string) *string { return &s }
 
+func int64Ptr(v int64) *int64 { return &v }
+
 func TestPutGetRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -552,6 +554,105 @@ func TestListEpisodicForConsolidation(t *testing.T) {
 		got, err := s.ListEpisodicForConsolidation(ctx, 1, 0)
 		if err != nil {
 			t.Fatalf("ListEpisodicForConsolidation: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("got = %+v, want пусто", got)
+		}
+	})
+}
+
+func TestListEpisodicForDecay(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	const threshold = int64(1000)
+
+	// давно не трогали, обращений не было — попадает, дата сравнения = created_at.
+	staleNoAccess := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: staleNoAccess, Kind: memory.KindEpisodic, Scope: "a", Content: "давно не трогали",
+		CreatedAt: 100, UpdatedAt: 100,
+	}); err != nil {
+		t.Fatalf("Put staleNoAccess: %v", err)
+	}
+
+	// последнее обращение раньше threshold, хотя создана позже — попадает, дата
+	// сравнения = accessed_at, а не created_at.
+	staleAccessed := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: staleAccessed, Kind: memory.KindEpisodic, Scope: "a", Content: "давно доступалось",
+		CreatedAt: 300, UpdatedAt: 300, AccessedAt: int64Ptr(200),
+	}); err != nil {
+		t.Fatalf("Put staleAccessed: %v", err)
+	}
+
+	// недавно обращались (Touch) — не должна попасть, хотя создана давно.
+	recentlyTouched := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: recentlyTouched, Kind: memory.KindEpisodic, Scope: "a", Content: "недавно трогали",
+		CreatedAt: 50, UpdatedAt: 50, AccessedAt: int64Ptr(threshold),
+	}); err != nil {
+		t.Fatalf("Put recentlyTouched: %v", err)
+	}
+
+	// semantic (даже старая, без обращений) — не должна попасть (§2: не устаревает).
+	semID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: semID, Kind: memory.KindSemantic, Scope: "a", Content: "старый факт",
+		CreatedAt: 50, UpdatedAt: 50,
+	}); err != nil {
+		t.Fatalf("Put semantic: %v", err)
+	}
+
+	// superseded episodic (даже старая) — не должна попасть.
+	supersededID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: supersededID, Kind: memory.KindEpisodic, Scope: "a", Content: "заменённое",
+		CreatedAt: 60, UpdatedAt: 60,
+	}); err != nil {
+		t.Fatalf("Put superseded source: %v", err)
+	}
+	if err := s.Supersede(ctx, supersededID, staleNoAccess); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	t.Run("выбирает записи без недавних обращений, сортирует по дате по возрастанию", func(t *testing.T) {
+		got, err := s.ListEpisodicForDecay(ctx, threshold, 0)
+		if err != nil {
+			t.Fatalf("ListEpisodicForDecay: %v", err)
+		}
+		wantIDs := []string{staleNoAccess, staleAccessed}
+		if len(got) != len(wantIDs) {
+			t.Fatalf("len = %d, want %d (got: %+v)", len(got), len(wantIDs), got)
+		}
+		for i, id := range wantIDs {
+			if got[i].Id != id {
+				t.Errorf("got[%d].Id = %q, want %q", i, got[i].Id, id)
+			}
+		}
+		// Tags/Links намеренно не подгружаются этим методом.
+		if got[0].Tags != nil {
+			t.Errorf("got[0].Tags = %v, want nil (Tags не загружаются этим методом)", got[0].Tags)
+		}
+	})
+
+	t.Run("limit ограничивает выборку", func(t *testing.T) {
+		got, err := s.ListEpisodicForDecay(ctx, threshold, 1)
+		if err != nil {
+			t.Fatalf("ListEpisodicForDecay: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1", len(got))
+		}
+		if got[0].Id != staleNoAccess {
+			t.Errorf("got[0].Id = %q, want %q", got[0].Id, staleNoAccess)
+		}
+	})
+
+	t.Run("слишком ранний порог даёт пустой результат", func(t *testing.T) {
+		got, err := s.ListEpisodicForDecay(ctx, 1, 0)
+		if err != nil {
+			t.Fatalf("ListEpisodicForDecay: %v", err)
 		}
 		if len(got) != 0 {
 			t.Fatalf("got = %+v, want пусто", got)

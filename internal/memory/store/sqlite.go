@@ -818,3 +818,41 @@ func (s *sqliteStore) ListEpisodicForConsolidation(ctx context.Context, olderTha
 	}
 	return episodes, rows.Err()
 }
+
+// ListEpisodicForDecay возвращает episodic-записи без superseded_by, у которых
+// COALESCE(accessed_at, created_at) < notAccessedSince — т.е. с момента последнего
+// обращения (а если обращений не было — с момента создания) прошло достаточно
+// времени (DESIGN.md §11). Отсортированы по той же дате по возрастанию (старые
+// первыми), limit <= 0 означает без ограничения.
+//
+// Как и ListEpisodicForConsolidation, Tags/Links здесь не подгружаются — потребитель
+// (maint.Decayer) использует только Id/Importance/CreatedAt/AccessedAt.
+func (s *sqliteStore) ListEpisodicForDecay(ctx context.Context, notAccessedSince int64, limit int) ([]memory.Memory, error) {
+	query := `
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source
+		FROM memories
+		WHERE kind = ? AND superseded_by IS NULL AND COALESCE(accessed_at, created_at) < ?
+		ORDER BY COALESCE(accessed_at, created_at)
+	`
+	args := []any{string(memory.KindEpisodic), notAccessedSince}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("выборка episodic для decay: %w", err)
+	}
+	defer rows.Close()
+
+	var episodes []memory.Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("сканирование episodic для decay: %w", err)
+		}
+		episodes = append(episodes, m)
+	}
+	return episodes, rows.Err()
+}

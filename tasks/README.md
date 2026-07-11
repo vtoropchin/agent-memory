@@ -42,7 +42,7 @@ foundational (набор scope в поиске + идентичность про
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| 4.1 Decay | [4.1-decay.md](4.1-decay.md) | ⏳ |
+| 4.1 Decay | [4.1-decay.md](4.1-decay.md) | ✅ выполнена |
 | 4.2 Dedup-sweep | [4.2-dedup-sweep.md](4.2-dedup-sweep.md) | ⏳ |
 | 4.3 Планировщик джобов | [4.3-scheduler.md](4.3-scheduler.md) | ⏳ ожидает 4.1, 4.2 |
 

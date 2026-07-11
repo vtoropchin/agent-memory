@@ -186,6 +186,7 @@ type Store interface {
     Touch(ctx context.Context, id string) error                                    // accessed_at++, access_count++
     // maintenance-выборки (§11); Tags/Links не заполняются
     ListEpisodicForConsolidation(ctx context.Context, olderThan int64, limit int) ([]Memory, error)
+    ListEpisodicForDecay(ctx context.Context, notAccessedSince int64, limit int) ([]Memory, error)
     // reindex-поддержка
     EmbedMeta(ctx context.Context) (model string, dim int, err error)
     ResetVectorIndex(ctx context.Context, model string, dim int) error

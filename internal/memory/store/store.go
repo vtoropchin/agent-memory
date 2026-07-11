@@ -36,4 +36,11 @@ type Store interface {
 	// created_at — для группировки consolidation-джобом (DESIGN.md §11). limit <= 0
 	// означает без ограничения.
 	ListEpisodicForConsolidation(ctx context.Context, olderThan int64, limit int) ([]memory.Memory, error)
+	// ListEpisodicForDecay возвращает episodic-записи без superseded_by, к которым не
+	// обращались долго: COALESCE(accessed_at, created_at) < notAccessedSince —
+	// то есть время последнего обращения, а при его отсутствии время создания
+	// (DESIGN.md §11, §4: accessed_at/access_count — сигналы decay). Отсортированы по
+	// этой же дате по возрастанию (самые старые первыми) — decay-джоб обрабатывает их
+	// в этом порядке. limit <= 0 означает без ограничения.
+	ListEpisodicForDecay(ctx context.Context, notAccessedSince int64, limit int) ([]memory.Memory, error)
 }
