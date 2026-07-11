@@ -270,6 +270,18 @@ func isNearDuplicate(normNew, normOld string) bool {
 	return hammingDistance(simhash64(normNew), simhash64(normOld)) <= simhashDistanceThreshold
 }
 
+// IsNearDuplicate экспортирует то же правило «дублирования» контента, которое
+// write path использует при вставке (см. isNearDuplicate выше), для повторного
+// использования вне пакета — в частности, dedup-sweep джобом (DESIGN.md §11,
+// internal/memory/maint/dedup.go), который ретроактивно чистит почти-дубли,
+// накопившиеся в обход write path (импорт, консолидация, правки content).
+// Принимает СЫРОЙ (ненормализованный) content обеих записей: нормализация и расчёт
+// SimHash делаются внутри той же логикой, что и при записи, — вызывающий код не
+// дублирует ни normalizeContent, ни порог simhashDistanceThreshold.
+func IsNearDuplicate(a, b string) bool {
+	return isNearDuplicate(normalizeContent(a), normalizeContent(b))
+}
+
 // reinforce усиливает существующую запись вместо вставки дубля: объединяет теги
 // (union), поднимает importance до максимума старого/нового, обновляет updated_at
 // и вызывает Touch (accessed_at/access_count) — сигнал повторного использования факта.

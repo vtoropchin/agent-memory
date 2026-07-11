@@ -249,6 +249,39 @@ stdio: save→recall, деградация без ключа (Noop + warning, st
 после финализации этапа.
 
 **Сделано на Этапе 4** (по задачам tasks/4.x):
+- **4.2 (Dedup-sweep)** ✅ — ретроактивная чистка почти-дублей. Новый пакетный тип
+  `maint.DedupSweeper{store}` + `NewDedupSweeper(s)`; единственная точка входа
+  `Sweep(ctx) (DedupResult{Scanned,Superseded}, error)` в `internal/memory/maint/dedup.go`.
+  Из пакета `write` экспортирована ОБёртка `write.IsNearDuplicate(a, b string) bool`
+  (принимает СЫРОЙ content, внутри `normalizeContent`+приватный `isNearDuplicate` — SimHash/порог
+  `simhashDistanceThreshold` не задублированы, логика write не менялась). Логика Sweep:
+  `AllForReindex` (все живые) → группировка по паре **(Scope, Kind)** через `map[dedupGroupKey]
+  []Memory` (порядок групп на результат не влияет — группы независимы) → внутри группы записи
+  сортируются по (CreatedAt, Id) для детерминизма → O(n²) попарное сравнение по content через
+  `write.IsNearDuplicate`. **Ключевое (по итогам арх-ревью):** группировка по (Scope, Kind), а НЕ
+  только по Scope — консистентно с write path (`dedup()` фильтрует `SearchLexical` по `Kinds:
+  [kind]`): запись одного Kind никогда не supersede'ит запись другого Kind в том же scope, даже
+  при идентичном content (episodic-наблюдение и semantic-факт — легитимно разные сущности).
+  Выживает бо́льшая `Importance`, при равенстве — новее по `CreatedAt` (`pickDedupWinner`), при
+  полном равенстве — детерминированный тай-брейк в пользу «чемпиона». `sweepGroup`: members[i] —
+  «чемпион», каждый непроигравший j>i сравнивается с ним; проигравший → `Supersede(loser,winner)`
+  + `processed[loser]=true` (больше не участвует ни как чемпион, ни как претендент), чемпион при
+  необходимости переключается на победителя — цепочка похожих сходится к одной выжившей за проход.
+  Деградация §15: ошибка `Supersede` на паре → `log.Printf` + продолжение; наружу только ошибка
+  `AllForReindex`. **Проверено (факты):** `CGO_ENABLED=1 go build/vet/test -tags sqlite_fts5
+  -count=1 ./...` — всё зелёное (10 пакетов; maint — 7 dedup-тестов поверх ЖИВОГО sqlite-store:
+  supersede в пользу важного/нового, тай-брейк по CreatedAt, НЕ дедупит разные scope, НЕ дедупит
+  разные Kind в одном scope, цепочка из трёх → одна выжившая, непохожие не трогаются, повторный
+  Sweep идемпотентен — 0 новых supersede). Арх-ревью go-reviewer — соответствует §11/§7.2/§6/§9/§15;
+  единственное отклонение (группировка только по Scope) устранено доработкой (→ Scope+Kind). Code
+  review high (3 finder-угла) — **0 корректностных багов** (порядок аргументов Supersede,
+  детерминизм champion-switch и тай-брейка, edge-кейсы пустого/одиночного входа — доказаны чистыми).
+  Симплификация: схлопнул группировку с (упорядоч. слайс + idx-map + мёртвые поля `dedupGroup.scope/
+  kind`) до `map[dedupGroupKey][]Memory`; повторный пересчёт SimHash в O(n²) оставлен осознанно
+  (инкапсуляция simhash в write, фоновый нечастый джоб). **Verify неприменим:** dedup не подключён
+  к рантайму (планировщик/wiring — 4.3), покрыт интеграц. тестами. **Границы:** `cmd/memoryd`,
+  `config`, `mcp`, `recall`, `embed`, `store` не тронуты (store — только вызовы `AllForReindex`/
+  `Supersede`); в `write` — только новый экспорт-обёртка.
 - **4.1 (Decay)** ✅ — `Store.ListEpisodicForDecay(notAccessedSince, limit)` (episodic без
   `superseded_by`, `COALESCE(accessed_at, created_at) < notAccessedSince`, сортировка по этой
   дате ↑, `limit<=0` без лимита; Tags/Links не грузятся — как у ListEpisodicForConsolidation;
@@ -266,11 +299,11 @@ stdio: save→recall, деградация без ключа (Noop + warning, st
   в листинг Store); /code-review (high) — багов нет; /simplify — код чист, правок нет. `verify`
   неприменим: decay ещё не подключён к рантайму (планировщик/wiring — 4.3), покрыт юнит-тестами.
 
-**Следующий шаг:** 4.1 закрыта. Открыты и разблокированы: **4.2 (Dedup-sweep)** — независима,
-можно сразу; **4.3 (Планировщик джобов)** ждёт 4.2 (4.1 готова), туда же подключится
-периодический `Decayer`/`Consolidator`/`Reindexer` и `NewDecayer`. Параллельно — **Этап 5:
-5.1 (импортёр файловой памяти)** разблокирован, **5.2** ждёт 5.1. Порядок — tasks/README.md.
-ollama+bge-m3 у пользователя есть.
+**Следующий шаг:** 4.1 и 4.2 закрыты — весь maint-слой (Decay/Consolidate/Reindex/DedupSweep)
+готов как пакетные типы. Разблокирована **4.3 (Планировщик джобов)** — обе её зависимости (4.1,
+4.2) готовы; туда подключится периодический прогон `Decayer`/`Consolidator`/`Reindexer`/
+`DedupSweeper` (+ дефолты порогов decay). Параллельно — **Этап 5: 5.1 (импортёр файловой памяти)**
+разблокирован, **5.2** ждёт 5.1. Порядок — tasks/README.md. ollama+bge-m3 у пользователя есть.
 
 **Как применять:** обновляй этот файл по мере закрытия задач/этапов. Отмечай, что реально
 собрано/протестировано/запущено (с фактами), а не только «сделано».
