@@ -58,7 +58,8 @@ foundational (набор scope в поиске + идентичность про
 ## Этап 6 — Web-морда (read-only viewer)
 
 Просмотр содержимого памяти в браузере. Форма — подкоманда `memoryd web` (HTTP поверх
-общего файла БД, read-only), фронтенд на Tailwind (CDN), поиск v1 — лексический (FTS5).
+общего файла БД, read-only), фронтенд на Tailwind (бандл внутри бинаря, не CDN — решение
+пользователя), поиск v1 — лексический (FTS5).
 6.1 — foundational (read-методы store), выполнять первой; 6.3 — после фиксации контракта
 API из 6.2.
 
@@ -66,7 +67,7 @@ API из 6.2.
 |--------|------|--------|
 | 6.1 Read-only query-слой в Store | [6.1-store-read-api.md](6.1-store-read-api.md) | ✅ выполнена |
 | 6.2 Подкоманда `memoryd web` (HTTP + JSON API) | [6.2-memoryd-web-server.md](6.2-memoryd-web-server.md) | ✅ выполнена |
-| 6.3 Frontend web-морды (Tailwind CDN) | [6.3-web-frontend-tailwind.md](6.3-web-frontend-tailwind.md) | ⏳ ожидает |
+| 6.3 Frontend web-морды (Tailwind bundled) | [6.3-web-frontend-tailwind.md](6.3-web-frontend-tailwind.md) | ✅ выполнена |
 
 ## Общие требования ко всем задачам
 

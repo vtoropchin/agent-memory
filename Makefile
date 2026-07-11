@@ -1,4 +1,4 @@
-.PHONY: build test run web import install uninstall bin/memoryd
+.PHONY: build test run web web-css import install uninstall bin/memoryd
 
 # mattn/go-sqlite3 требует CGO и тег sqlite_fts5 для поддержки полнотекстового поиска FTS5.
 
@@ -46,6 +46,35 @@ run:
 # go run, напр.: CGO_ENABLED=1 go run -tags sqlite_fts5 ./cmd/memoryd web -db ./memory.db
 web:
 	CGO_ENABLED=1 go run -tags sqlite_fts5 ./cmd/memoryd web
+
+# web-css собирает cmd/memoryd/web/tailwind.css из cmd/memoryd/tailwind.input.css
+# standalone-бинарём Tailwind CLI (задача 6.3, DESIGN.md §12, Этап 6) — без Node/npm.
+# Tailwind встраивается в бинарь memoryd (не CDN): результат коммитится в git и
+# раздаётся как обычная статика вместе с index.html/app.js. Бинарь Tailwind CLI
+# качается один раз в bin/tailwindcss (bin/ в .gitignore, цель идемпотентна).
+TAILWIND_VERSION = v4.3.2
+TAILWIND_BIN = bin/tailwindcss
+
+web-css:
+	@os_arch="$$(uname -s)-$$(uname -m)"; \
+	case "$$os_arch" in \
+	  Darwin-arm64) asset=macos-arm64 ;; \
+	  Darwin-x86_64) asset=macos-x64 ;; \
+	  Linux-aarch64|Linux-arm64) asset=linux-arm64 ;; \
+	  Linux-x86_64) asset=linux-x64 ;; \
+	  *) echo "неподдерживаемая ОС/архитектура для standalone Tailwind CLI: $$os_arch"; exit 1 ;; \
+	esac; \
+	if [ -x "$(TAILWIND_BIN)" ]; then \
+	  echo "Tailwind CLI уже скачан: $(TAILWIND_BIN)"; \
+	else \
+	  echo "качаю Tailwind CLI $(TAILWIND_VERSION) ($$asset)..."; \
+	  mkdir -p bin; \
+	  curl -fL -o "$(TAILWIND_BIN)" "https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/tailwindcss-$$asset"; \
+	  chmod +x "$(TAILWIND_BIN)"; \
+	fi
+	@echo "собираю cmd/memoryd/web/tailwind.css..."
+	"$(TAILWIND_BIN)" -i cmd/memoryd/tailwind.input.css -o cmd/memoryd/web/tailwind.css --minify
+	@echo "готово: cmd/memoryd/web/tailwind.css"
 
 # import переносит файловую память (.claude/memory/) в SQLite-хранилище memoryd
 # (DESIGN.md §14 Этап 5). Доп. флаги (-dir/-db/-scope/-dry-run) — напрямую через
