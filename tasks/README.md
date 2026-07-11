@@ -50,8 +50,8 @@ foundational (набор scope в поиске + идентичность про
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| 5.1 Импортёр файловой памяти | [5.1-import-file-memory.md](5.1-import-file-memory.md) | ⏳ |
-| 5.2 Подключение memoryd к проекту | [5.2-connect-memoryd.md](5.2-connect-memoryd.md) | ⏳ ожидает 5.1 (MP-2 готова) |
+| 5.1 Импортёр файловой памяти | [5.1-import-file-memory.md](5.1-import-file-memory.md) | ✅ выполнена |
+| 5.2 Подключение memoryd к проекту | [5.2-connect-memoryd.md](5.2-connect-memoryd.md) | ⏳ разблокирована (5.1 + MP-2 готовы) |
 
 ## Общие требования ко всем задачам
 

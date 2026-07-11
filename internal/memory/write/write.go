@@ -93,13 +93,22 @@ type SaveInput struct {
 // UpdateInput — правка существующей записи для Writer.Update. Указатели различают
 // «поле не передано» (nil, не трогаем) от «поле передано» — так правка меняет
 // только то, что агент явно прислал; Tags — исключение, полностью заменяет старый
-// набор (как и в mcp updateInput), поэтому различается по nil-срезу.
+// набор (как и в mcp updateInput), поэтому различается по nil-срезу. Links —
+// другое исключение: в отличие от Tags, ДОБАВЛЯЕТСЯ к существующим исходящим
+// связям записи, а не заменяет их (см. Update). Это доменный инвариант графа
+// памяти: правка не должна молча стирать уже существующие рёбра записи, просто
+// потому что вызывающий добавляет новое, — связь удаляется только явным
+// действием, а не как побочный эффект Update. (Ровно на это опирается второй
+// проход импортёра, DESIGN.md §14 Этап 5: он резолвит [[wiki-ссылки]] уже после
+// того, как запись сохранена без links.)
 type UpdateInput struct {
 	Id         string
 	Content    *string
 	Summary    *string
-	Importance *int // нормализуется clampImportance — тем же правилом, что и Save
+	Importance *int // нормализуется ClampImportance — тем же правилом, что и Save
 	Tags       []string
+	Links      []string // id целевых записей, добавляемых к текущим links (rel=related);
+	// висячие ссылки пропускаются молча, как в Save (см. resolveLinks); nil — не менять.
 }
 
 // Save принимает атомарный факт и сохраняет его по write path DESIGN.md §7:
@@ -146,7 +155,7 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 	default:
 		return "", false, fmt.Errorf("%w: %q", ErrUnknownKind, in.Kind)
 	}
-	importance := clampImportance(in.Importance)
+	importance := ClampImportance(in.Importance)
 	tags := unionTags(nil, in.Tags)
 
 	if id, merged, err := w.dedup(ctx, scope, in.Kind, content, importance, tags); err != nil {
@@ -346,11 +355,14 @@ func (w *Writer) newULID() (string, error) {
 }
 
 // Update правит существующую запись (DESIGN.md §12 memory_update): применяются
-// только не-nil поля UpdateInput, importance нормализуется той же clampImportance,
+// только не-nil поля UpdateInput, importance нормализуется той же ClampImportance,
 // что и Save, — единый источник нормализации, чтобы memory_save и memory_update
 // вели себя одинаково на границах диапазона (0 → дефолт 3, вне 1..5 → clamp), а не
-// расходились (одна падает ошибкой, другая клампит). Если записи с Id нет,
-// возвращает ошибку, оборачивающую store.ErrNotFound (проверяется errors.Is).
+// расходились (одна падает ошибкой, другая клампит). Links, в отличие от Tags,
+// не заменяет текущий набор связей, а добавляет к нему (см. UpdateInput.Links) —
+// резолвится той же resolveLinks, что и Save (висячие ссылки пропускаются молча).
+// Если записи с Id нет, возвращает ошибку, оборачивающую store.ErrNotFound
+// (проверяется errors.Is).
 func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 	id := strings.TrimSpace(in.Id)
 	if id == "" {
@@ -381,11 +393,30 @@ func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 		changed = true
 	}
 	if in.Importance != nil {
-		m.Importance = clampImportance(*in.Importance)
+		m.Importance = ClampImportance(*in.Importance)
 		changed = true
 	}
 	if in.Tags != nil {
 		m.Tags = unionTags(nil, in.Tags)
+		changed = true
+	}
+	if in.Links != nil {
+		resolved, err := w.resolveLinks(ctx, in.Links)
+		if err != nil {
+			return fmt.Errorf("write: резолв links %q: %w", id, err)
+		}
+		// Инвариант графа: запись не ссылается сама на себя — ребро id->id
+		// бессмысленно (self-сосед в ListNeighbors). Отсекаем self-петли здесь,
+		// в доменном write-пути, чтобы правило держалось для всех вызывающих
+		// (импортёр, будущий memory_update с Links), а не в каждом из них.
+		filtered := resolved[:0]
+		for _, l := range resolved {
+			if l.Dst == id {
+				continue
+			}
+			filtered = append(filtered, l)
+		}
+		m.Links = mergeLinks(m.Links, filtered)
 		changed = true
 	}
 
@@ -430,8 +461,35 @@ func (w *Writer) Forget(ctx context.Context, id string, replacedBy string) error
 	return nil
 }
 
-// clampImportance приводит importance к диапазону [1,5]; 0 (не указано) → дефолт 3.
-func clampImportance(importance int) int {
+// mergeLinks объединяет текущие и добавляемые связи без дублей по паре (Dst, Rel):
+// используется Update при обработке UpdateInput.Links — в отличие от unionTags,
+// применяемой к Tags при полной замене, здесь исходные связи ВСЕГДА сохраняются,
+// а не переписываются входом (см. годок UpdateInput.Links).
+func mergeLinks(existing, additional []memory.Link) []memory.Link {
+	seen := make(map[memory.Link]bool, len(existing)+len(additional))
+	var out []memory.Link
+	for _, l := range existing {
+		if seen[l] {
+			continue
+		}
+		seen[l] = true
+		out = append(out, l)
+	}
+	for _, l := range additional {
+		if seen[l] {
+			continue
+		}
+		seen[l] = true
+		out = append(out, l)
+	}
+	return out
+}
+
+// ClampImportance приводит importance к диапазону [1,5]; 0 (не указано) → дефолт 3.
+// Экспортирована, чтобы вызывающие вне пакета (напр. cmd/memimport при печати
+// -dry-run) нормализовали importance тем же правилом, что и Save/Update, и не
+// расходились с реально сохраняемым значением.
+func ClampImportance(importance int) int {
 	if importance == 0 {
 		return 3
 	}

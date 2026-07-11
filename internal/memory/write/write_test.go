@@ -446,6 +446,84 @@ func TestWriterUpdate(t *testing.T) {
 	})
 }
 
+// TestWriterUpdateLinks — Links в UpdateInput ДОБАВЛЯЕТ связи к уже существующим,
+// а не заменяет их (в отличие от Tags), и молча пропускает висячие ссылки —
+// нужно двухпроходным сценариям (импорт файловой памяти, DESIGN.md §14 Этап 5),
+// где запись сохраняется до того, как известны id всех её [[wiki-ссылок]].
+func TestWriterUpdateLinks(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	targetA, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-update-links", Content: "первая целевая запись про базы данных"})
+	if err != nil {
+		t.Fatalf("Save targetA: %v", err)
+	}
+	targetB, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-update-links", Content: "вторая целевая запись про сетевые протоколы"})
+	if err != nil {
+		t.Fatalf("Save targetB: %v", err)
+	}
+	srcID, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-update-links", Content: "источник без links при сохранении"})
+	if err != nil {
+		t.Fatalf("Save src: %v", err)
+	}
+
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []string{targetA}}); err != nil {
+		t.Fatalf("Update (первая ссылка): %v", err)
+	}
+	got, err := st.Get(ctx, srcID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Links) != 1 || got.Links[0].Dst != targetA || got.Links[0].Rel != memory.RelRelated {
+		t.Fatalf("Links после первого Update = %+v, want ровно 1 ссылку на %q", got.Links, targetA)
+	}
+
+	// Второй Update с новой ссылкой + висячей должен ДОБАВИТЬ targetB, сохранив
+	// targetA, и молча пропустить несуществующий id.
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []string{targetB, "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}); err != nil {
+		t.Fatalf("Update (вторая ссылка): %v", err)
+	}
+	got, err = st.Get(ctx, srcID)
+	if err != nil {
+		t.Fatalf("Get после второго Update: %v", err)
+	}
+	if len(got.Links) != 2 {
+		t.Fatalf("Links после второго Update = %+v, want 2 ссылки (targetA сохранена + targetB добавлена)", got.Links)
+	}
+	dsts := map[string]bool{got.Links[0].Dst: true, got.Links[1].Dst: true}
+	if !dsts[targetA] || !dsts[targetB] {
+		t.Errorf("Links = %+v, want содержать %q и %q", got.Links, targetA, targetB)
+	}
+}
+
+// TestWriterUpdateSkipsSelfLink — Update отсекает self-петлю (Dst == id записи):
+// ребро id->id бессмысленно, инвариант держится в доменном write-пути для всех
+// вызывающих. Ссылка на себя, поданная вперемешку с валидной, не мешает валидной.
+func TestWriterUpdateSkipsSelfLink(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	other, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-self-link", Content: "валидная цель про базы данных"})
+	if err != nil {
+		t.Fatalf("Save other: %v", err)
+	}
+	srcID, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-self-link", Content: "источник ссылается сам на себя"})
+	if err != nil {
+		t.Fatalf("Save src: %v", err)
+	}
+
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []string{srcID, other}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := st.Get(ctx, srcID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Links) != 1 || got.Links[0].Dst != other {
+		t.Errorf("Links = %+v, want ровно 1 ссылку на %q (self-петля на %q отсечена)", got.Links, other, srcID)
+	}
+}
+
 func TestWriterForget(t *testing.T) {
 	ctx := context.Background()
 	w, st := newTestWriter(t)

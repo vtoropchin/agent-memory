@@ -5,7 +5,8 @@ importance: 5
 tags: [roadmap, progress]
 ---
 
-Состояние проекта на 2026-07-11: **Этап 1 (MVP) закоммичен** (`f9fd7c5`),
+Состояние проекта на 2026-07-11: **Этап 5 начат — задача 5.1 (импортёр файловой памяти)
+выполнена и финализирована** (коммит в этой сессии). **Этап 1 (MVP) закоммичен** (`f9fd7c5`),
 **Этап 2 (Reasoner) закоммичен** (`6479186`), **задача 3.1 (Ollama-Embedder) закоммичена**
 (`153524d`), **планирование мультипроектности закоммичено** (`c09c9ab` — только DESIGN §2.1
 + task-файлы mp-1/mp-2, без кода). **Задача MP-1 (ядро модели scope) закоммичена** (`d480d62`).
@@ -250,6 +251,55 @@ stdio: save→recall, деградация без ключа (Noop + warning, st
 (новые файлы уцелели) — восстановлено агентами по файлам задач. Урок: коммитить сразу
 после финализации этапа.
 
+**Сделано на Этапе 5 (задача 5.1, ✅):** импортёр файловой памяти — новый CLI-бинарь
+`cmd/memimport` (`main.go` + `importer.go` + `main_test.go`), НЕ MCP. Переносит
+`.claude/memory/*.md` в SQLite-хранилище memoryd через `store.Open` + `write.Writer`
+(embedder = `embed.NewNoop()`, вектор досчитает reindex/backfill). Флаги `-dir`
+(`.claude/memory`), `-db` (пусто → `config.Load("").Store.Path`), `-scope`
+(`project:agentmemory`), `-dry-run`. **Ключевое:** `-dry-run` вообще НЕ открывает Store
+(`Run` вызывается с `w==nil`) — гарантия «ничего не пишет» архитектурная, а не по соглашению.
+Ручной парсер frontmatter (`parseFrontMatter`/`parseTagsList`, stdlib, без YAML-зависимости):
+`name` → тег `name:<slug>` + `Source="file-import:<slug>"`; kind файла (project/decision/...)
+→ ВСЕГДА `memory.KindSemantic` (процедур в файлах нет; **поле `frontMatter.Kind` не хранится**
+— удалено при симплификации как мёртвое, парсер молча игнорирует строку `kind:`); `importance`
+через `write.ClampImportance` (0→3, clamp 1..5), tags из frontmatter. **Два прохода** в `Run`:
+(1) `Save` всех записей → `slugToID`, дедуп работает штатно (merged → `SkippedDuplicate`);
+(2) `[[slug]]`-ссылки (regexp `\[\[([\w-]+)\]\]`, ASCII-kebab по конвенции slug'ов) → links
+(rel=related) через `Update`; ссылка на неизвестный slug → warning + пропуск (§15). **Расширение
+write path (по явному разрешению задачи):** поле `UpdateInput.Links []string` + обработка в
+`Writer.Update` — резолв через существующий `resolveLinks`, слияние с текущими через новый
+`mergeLinks` (дедуп по паре `(Dst,Rel)`). **Семантика Links АДДИТИВНА** (в отличие от заменяющих
+Tags) — доменный инвариант графа: правка не стирает молча существующие рёбра; на это опирается
+двухпроходность импортёра (запись сохраняется без links, links досчитываются вторым проходом).
+**Self-link — инвариант графа, разнесён по слоям (итог арх/симпл-ревью):** `Update` отсекает
+`Dst==id` (ловит случай, когда две записи слились дедупом в один id — импортёр по slug этого не
+видит); импортёр дополнительно пропускает ссылку на свой slug в обоих проходах (симметрично
+dry-run, для честного счётчика `UpdatedWithLinks`). Экспортирован **`write.ClampImportance`**
+(по образцу `write.IsNearDuplicate`) — устранён дубль правила нормализа́ции. Makefile: цель
+`import`. **Проверено (факты):** `CGO_ENABLED=1 go build/vet/test -tags sqlite_fts5 -count=1
+./...` — всё зелёное (11 пакетов; `cmd/memimport` — 14 тестов: парсинг frontmatter с tags-списком/
+без/без разделителя/незакрытый, маппинг record, skip README/MEMORY, двухпроходное связывание с
+висячей ссылкой, self-link не создаёт ребро, dry-run без Writer, CLI «не создаёт БД» и «повтор не
+плодит дубли»; `write` — `TestWriterUpdateLinks` аддитивность + `TestWriterUpdateSkipsSelfLink`).
+**Арх-ревью go-reviewer:** «соответствует §4/§5/§7/§15», 0 отклонений (границы: `mcp/recall/maint`
+не тронуты, store — только `Open`/`Get`; косметика — локальный clampImportance и асимметрия
+`memory_update` без Links в MCP — устранена/учтена). **Code review high** (2 finder-угла): по
+`write.go` — 0 находок; по `memimport` — 3 low-severity edge (self-link ×2 → закрыты guard'ом на
+двух уровнях; regex ASCII-only → by-design, slug'и ASCII-kebab, на реальных 9 файлах потери нет).
+**Симплификация:** экспорт `ClampImportance`, удаление мёртвого `frontMatter.Kind`, перенос
+self-link guard в доменный `Update`, уточнение годока `UpdateInput.Links`; отклонено (обоснованно):
+`mergeLinks`→generic `union[T]` (широко вне диффа), полная унификация dry/real веток (разные
+slug/id-пространства). **e2e verify через ЖИВОЙ бинарь:** dry-run по реальной `.claude/memory` →
+9 записей (README/MEMORY пропущены), все `[[ссылки]]` резолвятся; реальный прогон в scratch-БД →
+`imported 9, updated-with-links 9`, 9 memories + **16 links + 0 self-петель**; повтор →
+`imported 0, skipped-as-duplicate 9` (дедуп), links не дублируются (идемпотентно); recall через
+живой memoryd по MCP stdio по перефразировке («как хранятся данные проекта») **нашёл**
+`stack-and-storage` (★5, связи в теле), stdout — чистый JSON-RPC, планировщик:
+`dedup(scanned=9 superseded=0)`. **Границы:** `.claude/memory/*.md` не тронуты (источник до 5.2);
+`mcp`/`recall`/`maint`/`config`/`store`(структуры) не менялись. **Тех-долг:** `memory_update` в
+MCP-схеме не пробрасывает Links (у `memory_save` есть) — асимметрия §12 на будущее; кириллические
+slug'и в `[[...]]` regexp не ловит (для текущих ASCII-файлов не важно).
+
 **Сделано на Этапе 4** (по задачам tasks/4.x):
 - **4.3 (Планировщик джобов)** ✅ — **Этап 4 полностью закрыт**. Новый файл
   `internal/memory/maint/scheduler.go`: тип `Scheduler` + `NewScheduler(d *Decayer,
@@ -339,10 +389,12 @@ stdio: save→recall, деградация без ключа (Noop + warning, st
   в листинг Store); /code-review (high) — багов нет; /simplify — код чист, правок нет. `verify`
   неприменим: decay ещё не подключён к рантайму (планировщик/wiring — 4.3), покрыт юнит-тестами.
 
-**Следующий шаг:** Этап 4 закрыт целиком (4.1/4.2/4.3). Остаётся **Этап 5 — догфудинг**:
-**5.1 (импортёр файловой памяти)** разблокирована (переносит `.claude/memory/*.md` в memoryd
-через MCP), **5.2 (подключение memoryd к проекту)** ждёт 5.1 (MP-2 готова). Порядок —
-tasks/README.md. ollama+bge-m3 у пользователя есть.
+**Следующий шаг:** Этап 4 закрыт целиком; на Этапе 5 закрыта **5.1 (импортёр)**. Остаётся
+**5.2 (подключение memoryd как MCP-сервера проекта)** — теперь разблокирована (5.1 + MP-2 готовы):
+сборка `bin/memoryd`, `.mcp.json` с сервером `agentmemory`, `agentmemory.toml` (deepseek+ollama/
+bge-m3, `[scope] project="agentmemory"`, общий путь БД `~/.agentmemory/memory.db`), правка раздела
+«Память проекта» в скилле `/dev` (memory_recall/save вместо файлов), пометка `.claude/memory/README.md`
+как архива. После 5.2 проект догфудит сам себя. Порядок — tasks/README.md. ollama+bge-m3 у пользователя есть.
 
 **Как применять:** обновляй этот файл по мере закрытия задач/этапов. Отмечай, что реально
 собрано/протестировано/запущено (с фактами), а не только «сделано».
