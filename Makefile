@@ -6,6 +6,10 @@
 # пользователей). Переопределяется: make install-system PREFIX=~/.local
 PREFIX ?= /usr/local
 BINDIR := $(PREFIX)/bin
+# SUDO — повышение прав для записи в системный каталог (/usr/local/bin принадлежит
+# root). Для пользовательского PREFIX (напр. ~/.local, ~/bin) отключается пустым
+# значением: make install-system PREFIX=~/.local SUDO=
+SUDO ?= sudo
 
 build:
 	CGO_ENABLED=1 go build -tags sqlite_fts5 ./...
@@ -17,16 +21,19 @@ install:
 
 # install-system компилирует memoryd и ставит его глобально в систему ($(BINDIR),
 # по умолчанию /usr/local/bin — обычно на PATH у всех). Так его находит .mcp.json,
-# сгенерированный `memoryd init` с фолбэком-командой "memoryd". Запись в /usr/local
-# может требовать прав root: тогда `sudo make install-system`.
+# сгенерированный `memoryd init` с фолбэком-командой "memoryd". Сборка (bin/memoryd)
+# идёт от текущего пользователя, а $(SUDO) поднимает права только на шаги записи в
+# систему — запусти обычным `make install-system` (спросит пароль на копирование),
+# НЕ `sudo make ...`, иначе go build выполнится под root. mkdir -p не трогает права
+# уже существующего /usr/local/bin (в отличие от install -d, который его chmod-ит).
 install-system: bin/memoryd
-	install -d "$(BINDIR)"
-	install -m 0755 bin/memoryd "$(BINDIR)/memoryd"
+	$(SUDO) mkdir -p "$(BINDIR)"
+	$(SUDO) install -m 0755 bin/memoryd "$(BINDIR)/memoryd"
 	@echo "установлено: $(BINDIR)/memoryd"
 
 # uninstall-system удаляет бинарь, поставленный install-system.
 uninstall-system:
-	rm -f "$(BINDIR)/memoryd"
+	$(SUDO) rm -f "$(BINDIR)/memoryd"
 	@echo "удалено: $(BINDIR)/memoryd"
 
 # bin/memoryd — бинарь для догфудинга (DESIGN.md §14 Этап 5): его запускает
