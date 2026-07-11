@@ -64,10 +64,11 @@ func run() error {
 		return fmt.Errorf("создание reasoner: %w", err)
 	}
 
-	// Embedder ещё не подключён в memoryd (отдельная задача) — Noop оставляет вектор
-	// каждой записи отложенным на фоновый досчёт (Store.ListMissingVectors, DESIGN.md §9).
+	// Embedder ещё не подключён в memoryd (задача 3.6) — Noop оставляет вектор каждой
+	// записи отложенным на фоновый досчёт (Store.ListMissingVectors, DESIGN.md §9) и
+	// отключает векторный источник кандидатов в recall (деградация до чистого FTS5).
 	w := write.New(s, embed.NewNoop())
-	r := recall.New(s, cfg.Recall, reasoner)
+	r := recall.New(s, cfg.Recall, reasoner, embed.NewNoop())
 	srv := mcp.NewServer(w, r, s, cfg.Scope)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -11,6 +11,7 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/store"
 )
@@ -97,7 +98,7 @@ func TestRecall_RanksByImportanceWhenRelevanceEqual(t *testing.T) {
 		CreatedAt: 1000, UpdatedAt: 1000,
 	})
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факты SQLite базе", Scope: scope})
@@ -135,7 +136,7 @@ func TestRecall_RanksByRecencyWhenRelevanceAndImportanceEqual(t *testing.T) {
 	})
 
 	// now намного дальше периода полураспада от oldID и совпадает с freshID.
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 1_000_000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факты SQLite базе", Scope: scope})
@@ -168,7 +169,7 @@ func TestRecall_BudgetCollapsesTail(t *testing.T) {
 		})
 	}
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 2000 }))
 
 	t.Run("маленький бюджет режет хвост", func(t *testing.T) {
@@ -220,7 +221,7 @@ func TestRecall_BudgetAccountsForMarkdownWrapping(t *testing.T) {
 		})
 	}
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 2000 }))
 
 	// Бюджет заведомо меньше того, что нужно на все n записей + обвязку (заголовок,
@@ -265,7 +266,7 @@ func TestRecall_TinyBudgetStillReturnsOneRecord(t *testing.T) {
 		})
 	}
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 2000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{
@@ -307,7 +308,7 @@ func TestRecall_GroupsByKindInOrder(t *testing.T) {
 		Importance: 3, CreatedAt: 3, UpdatedAt: 3,
 	})
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "термин факт группировку", Scope: scope})
@@ -352,7 +353,7 @@ func TestRecall_FiltersByScope(t *testing.T) {
 		Importance: 5, CreatedAt: 1, UpdatedAt: 1,
 	})
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "уникальный маркер scope", Scope: "project:mine"})
@@ -374,7 +375,7 @@ func TestRecall_EmptyResultIsFriendly(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "ничего не найдётся", Scope: "project:empty"})
@@ -412,7 +413,7 @@ func TestRecall_TouchesIncludedMemories(t *testing.T) {
 		t.Fatalf("AccessCount до recall = %d, want 0", before.AccessCount)
 	}
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 	brief, err := r.Recall(ctx, memory.Query{Text: "запись touch recall", Scope: scope})
 	if err != nil {
@@ -446,7 +447,7 @@ func TestRecall_SummarizeSuccess_AddsSummarySection(t *testing.T) {
 	})
 
 	fr := &fakeReasoner{result: "Короткая сводка о фактах проекта."}
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr, embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факт суммаризация брифа", Scope: scope, Summarize: true})
@@ -479,7 +480,7 @@ func TestRecall_SummarizeError_DegradesWithoutFailingRecall(t *testing.T) {
 	})
 
 	fr := &fakeReasoner{err: fmt.Errorf("deepseek: недоступен")}
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr, embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факт деградация суммаризации", Scope: scope, Summarize: true})
@@ -509,7 +510,7 @@ func TestRecall_SummarizeFalse_DoesNotCallReasoner(t *testing.T) {
 	})
 
 	fr := &fakeReasoner{result: "эта сводка не должна попасть в бриф"}
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr, embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факт без сводки", Scope: scope})
@@ -529,7 +530,7 @@ func TestRecall_SummarizeTrue_EmptyResultSkipsReasoner(t *testing.T) {
 	s := newTestStore(t)
 
 	fr := &fakeReasoner{result: "эта сводка не должна вызываться вовсе"}
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr, embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "ничего не найдётся", Scope: "project:summarize-empty", Summarize: true})
@@ -562,7 +563,7 @@ func TestRecall_SummarizeSuccess_ApproxTokensReflectsFinalMarkdown(t *testing.T)
 	})
 
 	fr := &fakeReasoner{result: "Довольно длинная сводка, которая заметно увеличивает размер итогового Markdown-брифа."}
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr, embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факт токены сводка", Scope: scope, Summarize: true})
@@ -601,7 +602,7 @@ func TestRecall_NoopReasoner_LeavesBriefUnchanged(t *testing.T) {
 		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
 	})
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факт noop reasoner", Scope: scope, Summarize: true})
@@ -613,5 +614,188 @@ func TestRecall_NoopReasoner_LeavesBriefUnchanged(t *testing.T) {
 	}
 	if !strings.Contains(brief.Markdown, "Факт без реального reasoner") {
 		t.Errorf("бриф должен остаться неизменным при Noop reasoner:\n%s", brief.Markdown)
+	}
+}
+
+// fakeEmbedder — тестовая реализация embed.Embedder: возвращает фиксированный вектор
+// (одинаковый для любого текста запроса) заданной размерности, считает вызовы Embed
+// и может вернуть заданную ошибку вместо вектора.
+type fakeEmbedder struct {
+	dim        int
+	vec        []float32
+	err        error
+	embedCalls int
+}
+
+func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	f.embedCalls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = f.vec
+	}
+	return out, nil
+}
+
+func (f *fakeEmbedder) Model() string { return "fake" }
+func (f *fakeEmbedder) Dim() int      { return f.dim }
+
+var _ embed.Embedder = (*fakeEmbedder)(nil)
+
+// TestRecall_FoundOnlyByVector демонстрирует снятие ограничения FTS5 на русскую
+// морфологию (.claude/memory/mvp-notes.md): запрос "собирать/тестировать" не матчит
+// лексически сохранённое "Сборка/тесты" (нет общих токенов вообще), но запись всё
+// равно попадает в бриф — через векторный источник.
+func TestRecall_FoundOnlyByVector(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:vector-only"
+
+	if err := s.ResetVectorIndex(ctx, "fake-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	id := newID(t)
+	putMemory(t, ctx, s, memory.Memory{
+		Id: id, Kind: memory.KindSemantic, Scope: scope,
+		Content: "Сборка тесты проекта запускаются через Makefile",
+		Summary: strPtr("Про сборку и тесты"), Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+	if err := s.PutVector(ctx, id, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	fe := &fakeEmbedder{dim: 3, vec: []float32{1, 0, 0}}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), fe,
+		WithNow(func() int64 { return 1000 }))
+
+	// Перефразировка без единого общего токена с сохранённым Content/Summary.
+	brief, err := r.Recall(ctx, memory.Query{Text: "собирать тестировать репозиторий", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if fe.embedCalls != 1 {
+		t.Errorf("embedCalls = %d, want 1", fe.embedCalls)
+	}
+	if brief.Count != 1 {
+		t.Fatalf("Count = %d, want 1 (запись должна найтись только вектором): brief=%+v", brief.Count, brief)
+	}
+	if !strings.Contains(brief.Markdown, "Про сборку и тесты") {
+		t.Errorf("бриф должен содержать запись, найденную вектором:\n%s", brief.Markdown)
+	}
+}
+
+// TestRecall_FoundByBothSourcesRanksHigher проверяет свойство RRF: запись, найденная
+// и лексическим, и векторным источником, должна ранжироваться выше записи, найденной
+// только одним из них (сумма 1/(k+rank) по двум источникам больше, чем по одному).
+func TestRecall_FoundByBothSourcesRanksHigher(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:rrf-both"
+
+	if err := s.ResetVectorIndex(ctx, "fake-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	bothID, lexicalOnlyID := newID(t), newID(t)
+	// Одинаковые важность/свежесть у обеих записей — единственная разница в
+	// финальном скоринге должна идти от вклада источников в RRF.
+	putMemory(t, ctx, s, memory.Memory{
+		Id: bothID, Kind: memory.KindSemantic, Scope: scope,
+		Content: "уникальныймаркерrrf общий термин поиска", Summary: strPtr("Найдена обоими источниками"),
+		Importance: 3, CreatedAt: 1000, UpdatedAt: 1000,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: lexicalOnlyID, Kind: memory.KindSemantic, Scope: scope,
+		Content: "уникальныймаркерrrf общий термин поиска", Summary: strPtr("Найдена только лексикой"),
+		Importance: 3, CreatedAt: 1000, UpdatedAt: 1000,
+	})
+	// Вектор кладём только для bothID — lexicalOnlyID останется вне векторного индекса.
+	if err := s.PutVector(ctx, bothID, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	fe := &fakeEmbedder{dim: 3, vec: []float32{1, 0, 0}}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), fe,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "уникальныймаркерrrf общий термин поиска", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if brief.Count != 2 {
+		t.Fatalf("Count = %d, want 2 (обе записи должны попасть в бриф): brief=%+v", brief.Count, brief)
+	}
+	idxBoth := strings.Index(brief.Markdown, "Найдена обоими источниками")
+	idxLexOnly := strings.Index(brief.Markdown, "Найдена только лексикой")
+	if idxBoth == -1 || idxLexOnly == -1 {
+		t.Fatalf("обе записи должны быть в брифе:\n%s", brief.Markdown)
+	}
+	if idxBoth > idxLexOnly {
+		t.Errorf("запись, найденная обоими источниками, должна ранжироваться выше:\n%s", brief.Markdown)
+	}
+}
+
+// TestRecall_EmbedErrorDegradesToLexical проверяет деградацию §15: ошибка Embed не
+// должна ронять Recall — бриф собирается из FTS без ошибки наружу.
+func TestRecall_EmbedErrorDegradesToLexical(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:embed-error"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "запись для проверки деградации при ошибке эмбеддинга", Summary: strPtr("Найдена лексикой при сбое Embed"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	fe := &fakeEmbedder{dim: 3, err: fmt.Errorf("ollama: недоступен")}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), fe,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "запись деградация ошибка эмбеддинга", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall не должен возвращать ошибку при сбое Embed: %v", err)
+	}
+	if fe.embedCalls != 1 {
+		t.Errorf("embedCalls = %d, want 1", fe.embedCalls)
+	}
+	if brief.Count != 1 {
+		t.Fatalf("Count = %d, want 1 (бриф должен собраться из FTS): brief=%+v", brief.Count, brief)
+	}
+	if !strings.Contains(brief.Markdown, "Найдена лексикой при сбое Embed") {
+		t.Errorf("бриф должен содержать запись, найденную лексическим поиском:\n%s", brief.Markdown)
+	}
+}
+
+// TestRecall_NoopEmbedderNeverCallsEmbed проверяет, что при выключенном векторном
+// слое (Dim()==0) Embed вообще не вызывается — векторный источник кандидатов не
+// подключается, а не молча выполняет бесполезную работу.
+func TestRecall_NoopEmbedderNeverCallsEmbed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:embed-noop"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "запись для проверки noop embedder", Summary: strPtr("Факт при noop embedder"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	fe := &fakeEmbedder{dim: 0}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), fe,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "запись noop embedder", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if fe.embedCalls != 0 {
+		t.Errorf("embedCalls = %d, want 0 (Noop Dim()==0 не должен вызывать Embed)", fe.embedCalls)
+	}
+	if brief.Count != 1 {
+		t.Errorf("Count = %d, want 1", brief.Count)
 	}
 }

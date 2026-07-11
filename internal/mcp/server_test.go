@@ -46,7 +46,7 @@ func newServerOnDB(t *testing.T, dbPath string, scope config.ScopeConfig) *Serve
 	t.Cleanup(func() { _ = s.Close() })
 
 	w := write.New(s, embed.NewNoop())
-	r := recall.New(s, config.Default().Recall, reason.NewNoop())
+	r := recall.New(s, config.Default().Recall, reason.NewNoop(), embed.NewNoop())
 	return NewServer(w, r, s, scope)
 }
 

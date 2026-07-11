@@ -15,6 +15,7 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/store"
 )
@@ -64,12 +65,14 @@ type Recaller struct {
 	defaultBudget int
 	now           func() int64
 	reasoner      reason.Reasoner
+	embedder      embed.Embedder
 }
 
 // New создаёт Recaller поверх заданного Store с весами и дефолтным бюджетом токенов
-// из конфига (DESIGN.md §13). reasoner используется опционально (Query.Summarize) —
-// на Этапе 1 передаётся reason.NewNoop().
-func New(s store.Store, cfg config.RecallConfig, reasoner reason.Reasoner, opts ...Option) *Recaller {
+// из конфига (DESIGN.md §13). reasoner используется опционально (Query.Summarize),
+// embedder — опционально для векторного источника кандидатов (DESIGN.md §8, §9); на
+// Этапе 1/до подключения векторного слоя обоим передаётся соответствующий Noop.
+func New(s store.Store, cfg config.RecallConfig, reasoner reason.Reasoner, embedder embed.Embedder, opts ...Option) *Recaller {
 	budget := cfg.DefaultTokenBudget
 	if budget <= 0 {
 		budget = 800
@@ -80,6 +83,7 @@ func New(s store.Store, cfg config.RecallConfig, reasoner reason.Reasoner, opts 
 		defaultBudget: budget,
 		now:           func() int64 { return time.Now().Unix() },
 		reasoner:      reasoner,
+		embedder:      embedder,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -130,12 +134,7 @@ func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, er
 	if err != nil {
 		return memory.Brief{}, fmt.Errorf("recall: лексический поиск: %w", err)
 	}
-	// SearchVector пока заглушка (Embedder=noop, Этап 1), но вызываем её всегда,
-	// чтобы Этап 3 подключил векторный источник без правок этого пути.
-	vector, err := r.store.SearchVector(ctx, nil, candQuery)
-	if err != nil {
-		return memory.Brief{}, fmt.Errorf("recall: векторный поиск: %w", err)
-	}
+	vector := r.searchVector(ctx, q.Text, candQuery)
 
 	merged := fuseRRF(lexical, vector)
 	if len(merged) == 0 {
@@ -165,6 +164,33 @@ func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, er
 		brief = r.withSummary(ctx, brief)
 	}
 	return brief, nil
+}
+
+// searchVector — векторный источник кандидатов (DESIGN.md §8, §9): если Embedder
+// включён (Dim() > 0) и текст запроса непуст, считает вектор запроса и ищет по нему
+// в Store. Векторный слой опционален — любая ошибка (Embed, пустой результат Embed
+// или SearchVector) только логируется в stderr, а Recall продолжает работу с одной
+// лексикой (DESIGN.md §15: деградация, а не падение). Noop (Dim()==0) — Embed вообще
+// не вызывается.
+func (r *Recaller) searchVector(ctx context.Context, text string, candQuery memory.Query) []memory.Candidate {
+	if r.embedder.Dim() <= 0 || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	vecs, err := r.embedder.Embed(ctx, []string{text})
+	if err != nil {
+		log.Printf("recall: эмбеддинг запроса: %v (продолжаю только с лексическим поиском)", err)
+		return nil
+	}
+	if len(vecs) < 1 {
+		log.Printf("recall: эмбеддинг запроса не вернул вектор (продолжаю только с лексическим поиском)")
+		return nil
+	}
+	vector, err := r.store.SearchVector(ctx, vecs[0], candQuery)
+	if err != nil {
+		log.Printf("recall: векторный поиск: %v (продолжаю только с лексическим поиском)", err)
+		return nil
+	}
+	return vector
 }
 
 // withSummary просит Reasoner сжать уже собранный бриф в короткую сводку и, если
