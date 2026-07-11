@@ -9,6 +9,8 @@ require (
 	github.com/oklog/ulid/v2 v2.1.1
 )
 
+require github.com/asg017/sqlite-vec-go-bindings v0.1.6
+
 require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/segmentio/asm v1.1.3 // indirect

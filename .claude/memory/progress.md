@@ -9,10 +9,39 @@ tags: [roadmap, progress]
 **Этап 2 (Reasoner) закоммичен** (`6479186`), **задача 3.1 (Ollama-Embedder) закоммичена**
 (`153524d`), **планирование мультипроектности закоммичено** (`c09c9ab` — только DESIGN §2.1
 + task-файлы mp-1/mp-2, без кода). **Задача MP-1 (ядро модели scope) закоммичена** (`d480d62`).
-**Задача MP-2 (разрешение scope в save/recall + связка в memoryd) выполнена и финализирована**
-в рабочем дереве (коммит в этой сессии). Бэклог этапов 3–5 нарезан по файлам в `tasks/`
+**Задача MP-2 (разрешение scope в save/recall + связка в memoryd) закоммичена** (`e2d0967`).
+**Задача 3.2 (sqlite-vec в Store) выполнена и финализирована** в рабочем дереве (коммит в
+этой сессии). Бэклог этапов 3–5 нарезан по файлам в `tasks/`
 (см. [[task-files]]); **каждая задача выполняется в отдельной новой сессии** — указание
 пользователя.
+
+**Сделано на Этапе 3 (задача 3.2, ✅):** подключён `github.com/asg017/sqlite-vec-go-bindings`
+(CGO). `Open()`: `sqlite_vec.Auto()` до `sql.Open` — регистрирует vec0 для всех соединений.
+`ResetVectorIndex(model,dim)` в транзакции: `DROP TABLE IF EXISTS memories_vec` + `CREATE
+VIRTUAL TABLE memories_vec USING vec0(memory_id TEXT PRIMARY KEY, embedding float[<dim>]
+distance_metric=cosine)` (dim через fmt.Sprintf — из кода, не юзер-ввод) + upsert `embed_meta`.
+Векторной таблицы **нет в статической схеме** (dim неизвестен заранее) — появляется только
+после первого reindex. `SearchVector(vec,q)`: guard `len(vec)==0 → nil,nil` (recall шлёт nil
+до 3.4 — деградация §15, не dimension mismatch); `hasVecTable` (sqlite_master) — нет таблицы
+→ `nil,nil`; KNN через **CTE** (`WITH knn AS (SELECT memory_id,distance FROM memories_vec
+WHERE embedding MATCH ? AND k=?)` затем JOIN memories + фильтры) — vec0 не джойнит MATCH+k с
+внешними фильтрами в одном SELECT; `Score=1/(1+distance)`, `Source="vector"`, ORDER BY
+distance ASC; Tags не грузятся (read-hot-path). `PutVector`: `INSERT OR REPLACE` +
+`SerializeFloat32`; нет таблицы → **ошибка** (не молчит). `AllForReindex`: теперь
+`WHERE superseded_by IS NULL` + грузит tags/links. **Симплификация:** вынес общий
+`metaFilters(q) → (conds,args)` (superseded+scope+kind+since) — переиспользуют и SearchLexical,
+и SearchVector; §8 требует идентичной фильтрации обоих источников (раньше был вынесен только
+`scopePredicate`). **Проверено (факты):** билд+vet `-tags sqlite_fts5` чисты; `go test ./...`
+весь зелёный (9 пакетов; тесты гоняют ЖИВОЕ расширение sqlite-vec: реальные vec0/KNN/serialize).
+Арх-ревью go-reviewer — «соответствует §4/§6/§8/§9/§15», 1 замечание (KNN k-before-filter —
+не отклонение, предписано заданием, к учёту в 3.4). Code review high — подтвердил тот же
+k-before-filter + латентную cross-file мину: `recall` зовёт `SearchVector(ctx,nil,q)`; после
+появления vec-таблицы (3.6) пустой вектор ушёл бы в MATCH → падение recall — **закрыто guard'ом
+`len(vec)==0`**. Симплификация — вынес `metaFilters` (см. выше); удаление tags/links из
+AllForReindex **отклонено** (задание явно требует «с tags/links»). **Известное ограничение
+KNN — в tasks/3.2 и [[scope-multiproject]], учесть в 3.4.** `verify`: рантайм-поверхность —
+методы Store над живым sqlite-vec, покрыты интеграционными тестами; e2e через бинарь недостижим
+(вектор не подключён к memoryd — это 3.6).
 
 **Сделано в MP-2 (✅, [[scope-multiproject]]):** разрешение scope на входе MCP-инструментов.
 `mcp.NewServer(w, r, s, scope config.ScopeConfig)` — Server хранит `scope`. `handleSave`:
@@ -82,10 +111,10 @@ stdio: save→recall, деградация без ключа (Noop + warning, st
 (новые файлы уцелели) — восстановлено агентами по файлам задач. Урок: коммитить сразу
 после финализации этапа.
 
-**Следующий шаг:** задача [tasks/3.2](../../tasks/3.2-sqlite-vec-store.md) (sqlite-vec в
-Store) — разблокирована (MP-1 применил scopePredicate в SearchLexical, та же точка для
-SearchVector). После 3.2 открываются 3.3/3.4/3.5. MP-2 закрыта → 5.2 ждёт только 5.1.
-Порядок и зависимости — tasks/README.md. ollama+bge-m3 у пользователя есть.
+**Следующий шаг:** 3.2 закрыта → разблокированы **3.3** (вектор в write path), **3.4**
+(гибридный recall — учесть KNN k-before-filter из 3.2!), **3.5** (reindex). 3.6 (связка
+Embedder в memoryd) ждёт 3.3–3.5. MP-2 закрыта → 5.2 ждёт только 5.1. Порядок и зависимости —
+tasks/README.md. ollama+bge-m3 у пользователя есть.
 
 **Как применять:** обновляй этот файл по мере закрытия задач/этапов. Отмечай, что реально
 собрано/протестировано/запущено (с фактами), а не только «сделано».

@@ -559,6 +559,269 @@ func TestListEpisodicForConsolidation(t *testing.T) {
 	})
 }
 
+func TestResetVectorIndexRecreatesTable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "bge-m3", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+	exists, err := s.hasVecTable(ctx)
+	if err != nil {
+		t.Fatalf("hasVecTable: %v", err)
+	}
+	if !exists {
+		t.Fatal("memories_vec не создана после ResetVectorIndex")
+	}
+	model, dim, err := s.EmbedMeta(ctx)
+	if err != nil {
+		t.Fatalf("EmbedMeta: %v", err)
+	}
+	if model != "bge-m3" || dim != 3 {
+		t.Fatalf("EmbedMeta = (%q, %d), want (bge-m3, 3)", model, dim)
+	}
+
+	id := newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: id, Kind: memory.KindSemantic, Scope: "s", Content: "c", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.PutVector(ctx, id, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	// Пересоздание с другой размерностью: старые векторы должны исчезнуть, dim в
+	// embed_meta — обновиться.
+	if err := s.ResetVectorIndex(ctx, "other-model", 4); err != nil {
+		t.Fatalf("ResetVectorIndex (2): %v", err)
+	}
+	model, dim, err = s.EmbedMeta(ctx)
+	if err != nil {
+		t.Fatalf("EmbedMeta (2): %v", err)
+	}
+	if model != "other-model" || dim != 4 {
+		t.Fatalf("EmbedMeta (2) = (%q, %d), want (other-model, 4)", model, dim)
+	}
+
+	cands, err := s.SearchVector(ctx, []float32{1, 0, 0, 0}, memory.Query{Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchVector после пересоздания: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Fatalf("candidates = %+v, want пусто (старые векторы должны были исчезнуть)", cands)
+	}
+}
+
+func TestSearchVectorOrdersByDistance(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	near, mid, far := newID(t), newID(t), newID(t)
+	for _, tc := range []struct {
+		id  string
+		vec []float32
+		ts  int64
+	}{
+		{near, []float32{1, 0, 0}, 1},
+		{mid, []float32{1, 1, 0}, 2},
+		{far, []float32{0, 1, 0}, 3},
+	} {
+		if err := s.Put(ctx, memory.Memory{
+			Id: tc.id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "запись " + tc.id, CreatedAt: tc.ts, UpdatedAt: tc.ts,
+		}); err != nil {
+			t.Fatalf("Put %s: %v", tc.id, err)
+		}
+		if err := s.PutVector(ctx, tc.id, tc.vec); err != nil {
+			t.Fatalf("PutVector %s: %v", tc.id, err)
+		}
+	}
+
+	cands, err := s.SearchVector(ctx, []float32{1, 0, 0}, memory.Query{Scope: "project:agentmemory", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if len(cands) != 3 {
+		t.Fatalf("candidates = %+v, want 3", cands)
+	}
+	wantOrder := []string{near, mid, far}
+	for i, id := range wantOrder {
+		if cands[i].Memory.Id != id {
+			t.Errorf("cands[%d].Id = %q, want %q (порядок: %+v)", i, cands[i].Memory.Id, id, cands)
+		}
+		if cands[i].Source != "vector" {
+			t.Errorf("cands[%d].Source = %q, want vector", i, cands[i].Source)
+		}
+	}
+	// score убывает по мере удаления (1/(1+distance) монотонно убывает с distance).
+	for i := 1; i < len(cands); i++ {
+		if cands[i].Score > cands[i-1].Score {
+			t.Errorf("score не убывает по расстоянию: %+v", cands)
+		}
+	}
+}
+
+func TestSearchVectorScopesAndSuperseded(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 2); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	mine, other, supersededID, replacement := newID(t), newID(t), newID(t), newID(t)
+	for _, tc := range []struct {
+		id, scope string
+		vec       []float32
+		ts        int64
+	}{
+		{mine, "project:agentmemory", []float32{1, 0}, 1},
+		{other, "project:other", []float32{1, 0}, 2},
+		{supersededID, "project:agentmemory", []float32{1, 0}, 3},
+		{replacement, "project:agentmemory", []float32{0, 1}, 4},
+	} {
+		if err := s.Put(ctx, memory.Memory{
+			Id: tc.id, Kind: memory.KindSemantic, Scope: tc.scope,
+			Content: "c", CreatedAt: tc.ts, UpdatedAt: tc.ts,
+		}); err != nil {
+			t.Fatalf("Put %s: %v", tc.id, err)
+		}
+		if err := s.PutVector(ctx, tc.id, tc.vec); err != nil {
+			t.Fatalf("PutVector %s: %v", tc.id, err)
+		}
+	}
+	if err := s.Supersede(ctx, supersededID, replacement); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	t.Run("набор scopes видит свой проект и user:*, не видит чужой", func(t *testing.T) {
+		cands, err := s.SearchVector(ctx, []float32{1, 0}, memory.Query{
+			Scopes: []string{"project:agentmemory", "user:*"}, Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("SearchVector: %v", err)
+		}
+		got := map[string]bool{}
+		for _, c := range cands {
+			got[c.Memory.Id] = true
+		}
+		if got[other] {
+			t.Errorf("candidates содержат запись чужого project:other: %+v", cands)
+		}
+		if got[supersededID] {
+			t.Errorf("candidates содержат superseded запись: %+v", cands)
+		}
+		if !got[mine] || !got[replacement] {
+			t.Errorf("candidates = %+v, want содержать %q и %q", cands, mine, replacement)
+		}
+	})
+}
+
+func TestSearchVectorWithoutVecTable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	cands, err := s.SearchVector(ctx, []float32{1, 0, 0}, memory.Query{Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchVector без vec-таблицы должен вернуть nil,nil: %v", err)
+	}
+	if cands != nil {
+		t.Fatalf("candidates = %+v, want nil", cands)
+	}
+}
+
+func TestSearchVectorEmptyQueryVector(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	// Индекс существует, но вектор запроса пуст (recall передаёт nil до Этапа 3.4):
+	// деградация до пустого результата без ошибки, а не dimension mismatch в MATCH.
+	if err := s.ResetVectorIndex(ctx, "test-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+	id := newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: id, Kind: memory.KindSemantic, Scope: "s", Content: "c", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.PutVector(ctx, id, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	for _, vec := range [][]float32{nil, {}} {
+		cands, err := s.SearchVector(ctx, vec, memory.Query{Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchVector с пустым вектором (%v) должен вернуть nil,nil: %v", vec, err)
+		}
+		if cands != nil {
+			t.Fatalf("candidates = %+v, want nil", cands)
+		}
+	}
+}
+
+func TestPutVectorWithoutVecTableFails(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id := newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: id, Kind: memory.KindSemantic, Scope: "s", Content: "c", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.PutVector(ctx, id, []float32{1, 0, 0}); err == nil {
+		t.Error("PutVector без ResetVectorIndex должен вернуть ошибку")
+	}
+}
+
+func TestAllForReindex(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	kept, superseded, replacement := newID(t), newID(t), newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: replacement, Kind: memory.KindSemantic, Scope: "s", Content: "замена", CreatedAt: 2, UpdatedAt: 2}); err != nil {
+		t.Fatalf("Put replacement: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{
+		Id: kept, Kind: memory.KindSemantic, Scope: "s", Content: "живая запись",
+		CreatedAt: 1, UpdatedAt: 1, Tags: []string{"go"},
+		Links: []memory.Link{{Dst: replacement, Rel: memory.RelRelated}},
+	}); err != nil {
+		t.Fatalf("Put kept: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "s", Content: "устаревшая", CreatedAt: 3, UpdatedAt: 3}); err != nil {
+		t.Fatalf("Put superseded: %v", err)
+	}
+	if err := s.Supersede(ctx, superseded, replacement); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	all, err := s.AllForReindex(ctx)
+	if err != nil {
+		t.Fatalf("AllForReindex: %v", err)
+	}
+	got := map[string]memory.Memory{}
+	for _, m := range all {
+		got[m.Id] = m
+	}
+	if len(all) != 2 {
+		t.Fatalf("AllForReindex = %+v, want 2 записи (kept, replacement)", all)
+	}
+	if _, ok := got[superseded]; ok {
+		t.Errorf("AllForReindex вернул superseded запись: %+v", all)
+	}
+	keptGot, ok := got[kept]
+	if !ok {
+		t.Fatalf("AllForReindex не содержит %q: %+v", kept, all)
+	}
+	if len(keptGot.Tags) != 1 || keptGot.Tags[0] != "go" {
+		t.Errorf("AllForReindex не подгрузил Tags: %+v", keptGot)
+	}
+	if len(keptGot.Links) != 1 || keptGot.Links[0].Dst != replacement {
+		t.Errorf("AllForReindex не подгрузил Links: %+v", keptGot)
+	}
+}
+
 func TestEmbedMetaEmptyByDefault(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

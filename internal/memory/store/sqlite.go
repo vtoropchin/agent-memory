@@ -11,6 +11,7 @@ import (
 
 	"context"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/oklog/ulid/v2"
 
@@ -92,11 +93,11 @@ CREATE TRIGGER IF NOT EXISTS tags_ad AFTER DELETE ON tags BEGIN
     ) WHERE rowid = (SELECT rowid FROM memories WHERE id = old.memory_id);
 END;
 
--- Векторный индекс (Этап 3) — создаётся, когда включён Embedder; dim берётся из модели.
--- CREATE VIRTUAL TABLE memories_vec USING vec0(
---     memory_id TEXT PRIMARY KEY,
---     embedding float[<DIM>] distance_metric=cosine
--- );
+-- Векторный индекс memories_vec НЕ создаётся здесь: dim (размерность эмбеддинга)
+-- неизвестен заранее — она определяется моделью Embedder и подставляется только при
+-- первом вызове ResetVectorIndex (см. ниже), который создаёт таблицу через
+-- fmt.Sprintf с нужным float[<DIM>]. До первого reindex таблицы memories_vec просто
+-- нет — SearchVector/PutVector деградируют соответственно (DESIGN.md §15).
 
 CREATE TABLE IF NOT EXISTS embed_meta (
     id    INTEGER PRIMARY KEY CHECK (id = 1),
@@ -105,8 +106,7 @@ CREATE TABLE IF NOT EXISTS embed_meta (
 );
 `
 
-// sqliteStore — реализация Store поверх SQLite (метаданные + FTS5). Векторный слой
-// (SearchVector/PutVector) — заглушка до Этапа 3.
+// sqliteStore — реализация Store поверх SQLite (метаданные + FTS5 + sqlite-vec).
 type sqliteStore struct {
 	db  *sql.DB
 	now func() int64 // источник текущего unix ts; подменяется в тестах
@@ -132,6 +132,10 @@ func Open(path string) (*sqliteStore, error) {
 			return nil, fmt.Errorf("создание директории %q: %w", dir, err)
 		}
 	}
+
+	// Регистрирует расширение sqlite-vec (vec0) для всех новых соединений этого
+	// процесса. Должно быть вызвано до sql.Open. Идемпотентно.
+	sqlite_vec.Auto()
 
 	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000", expanded)
 	db, err := sql.Open("sqlite3", dsn)
@@ -343,35 +347,16 @@ func scopePredicate(scopes []string, scope string) (clause string, args []any) {
 	return "", nil
 }
 
-// SearchLexical ищет по FTS5-индексу (content/summary/tags), фильтрует по scope и
-// kind, исключает записи с проставленным superseded_by. Score — инверсия bm25
-// (больше значит релевантнее).
+// metaFilters строит общие для SearchLexical и SearchVector фильтры-предикаты по полям
+// Query — кроме полнотекстового/векторного MATCH: мягкое забывание (superseded_by IS
+// NULL), scope (через scopePredicate), kind, свежесть (since). Единая точка гарантирует,
+// что лексический и векторный источники recall отбирают кандидатов одинаково (DESIGN.md
+// §8) — новый фильтр добавляется в одном месте, а не синхронно в двух.
 //
-// Tags кандидатов НЕ заполняются (Memory.Tags остаётся nil) — это read-hot-path
-// (recall дергает его на каждый запрос), а ни recall (см. rank/formatLine), ни
-// write-дедуп (сравнивает только Content через SimHash) теги кандидатов не читают;
-// при усилении дубля write.reinforce берёт полную запись отдельным Store.Get.
-// Загрузка тегов построчно для каждого из до Limit кандидатов стоила N+1 запросов
-// на recall без какой-либо пользы.
-func (s *sqliteStore) SearchLexical(ctx context.Context, q memory.Query) ([]memory.Candidate, error) {
-	var (
-		conds []string
-		args  []any
-	)
+// conds и args возвращаются в lockstep: порядок ? в conds совпадает с порядком args,
+// поэтому вызывающая сторона может дописать свои conds/args (MATCH) до или после.
+func metaFilters(q memory.Query) (conds []string, args []any) {
 	conds = append(conds, "m.superseded_by IS NULL")
-
-	matchQuery := sanitizeFTSQuery(q.Text)
-	useMatch := matchQuery != ""
-
-	query := "SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source"
-	if useMatch {
-		query += ", -bm25(memories_fts) AS score FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid"
-		conds = append(conds, "memories_fts MATCH ?")
-		args = append(args, matchQuery)
-	} else {
-		query += ", 0.0 AS score FROM memories m"
-	}
-
 	if clause, scopeArgs := scopePredicate(q.Scopes, q.Scope); clause != "" {
 		conds = append(conds, clause)
 		args = append(args, scopeArgs...)
@@ -387,6 +372,33 @@ func (s *sqliteStore) SearchLexical(ctx context.Context, q memory.Query) ([]memo
 	if q.SinceTs > 0 {
 		conds = append(conds, "m.created_at >= ?")
 		args = append(args, q.SinceTs)
+	}
+	return conds, args
+}
+
+// SearchLexical ищет по FTS5-индексу (content/summary/tags), фильтрует по scope и
+// kind, исключает записи с проставленным superseded_by. Score — инверсия bm25
+// (больше значит релевантнее).
+//
+// Tags кандидатов НЕ заполняются (Memory.Tags остаётся nil) — это read-hot-path
+// (recall дергает его на каждый запрос), а ни recall (см. rank/formatLine), ни
+// write-дедуп (сравнивает только Content через SimHash) теги кандидатов не читают;
+// при усилении дубля write.reinforce берёт полную запись отдельным Store.Get.
+// Загрузка тегов построчно для каждого из до Limit кандидатов стоила N+1 запросов
+// на recall без какой-либо пользы.
+func (s *sqliteStore) SearchLexical(ctx context.Context, q memory.Query) ([]memory.Candidate, error) {
+	conds, args := metaFilters(q)
+
+	matchQuery := sanitizeFTSQuery(q.Text)
+	useMatch := matchQuery != ""
+
+	query := "SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source"
+	if useMatch {
+		query += ", -bm25(memories_fts) AS score FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid"
+		conds = append(conds, "memories_fts MATCH ?")
+		args = append(args, matchQuery)
+	} else {
+		query += ", 0.0 AS score FROM memories m"
 	}
 
 	query += " WHERE " + strings.Join(conds, " AND ")
@@ -452,10 +464,91 @@ func sanitizeFTSQuery(text string) string {
 	return strings.Join(parts, " OR ")
 }
 
-// SearchVector — заглушка Этапа 1: векторный слой не подключён (Embedder=noop),
-// поиск деградирует до SearchLexical на уровне recall.
-func (s *sqliteStore) SearchVector(_ context.Context, _ []float32, _ memory.Query) ([]memory.Candidate, error) {
-	return nil, nil
+// SearchVector ищет по векторному индексу memories_vec (sqlite-vec) методом KNN и
+// применяет те же фильтры, что и SearchLexical: superseded_by IS NULL, scope через
+// общий scopePredicate (набор Query.Scopes), kind, since. Score — 1/(1+distance)
+// (больше значит ближе), Source = "vector", порядок — по возрастанию distance
+// (ближайшие первыми).
+//
+// vec0 не позволяет джойнить MATCH+k с фильтрами по другой таблице в одном SELECT —
+// KNN выполняется в CTE, фильтры по memories накладываются во внешнем запросе.
+//
+// Если memories_vec ещё не создана (Embedder выключен, ResetVectorIndex ни разу не
+// вызывался), возвращает (nil, nil) без ошибки — деградация до чистого FTS5, а не
+// падение recall (DESIGN.md §15).
+//
+// Как и SearchLexical, Tags кандидатов не заполняются (read-hot-path, см. коммент там).
+func (s *sqliteStore) SearchVector(ctx context.Context, vec []float32, q memory.Query) ([]memory.Candidate, error) {
+	// Пустой вектор запроса — не с чем сравнивать: деградируем до пустого векторного
+	// источника, а не роняем recall на dimension mismatch в MATCH (DESIGN.md §15).
+	// recall передаёт nil, пока векторный запрос не подключён (Этап 3.4); дешёвая
+	// проверка до обращения к БД.
+	if len(vec) == 0 {
+		return nil, nil
+	}
+
+	exists, err := s.hasVecTable(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("проверка memories_vec: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	blob, err := sqlite_vec.SerializeFloat32(vec)
+	if err != nil {
+		return nil, fmt.Errorf("сериализация вектора запроса: %w", err)
+	}
+
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	conds, args := metaFilters(q)
+
+	query := `
+		WITH knn AS (
+			SELECT memory_id, distance FROM memories_vec WHERE embedding MATCH ? AND k = ?
+		)
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, knn.distance
+		FROM knn JOIN memories m ON m.id = knn.memory_id
+		WHERE ` + strings.Join(conds, " AND ") + `
+		ORDER BY knn.distance ASC
+	`
+	queryArgs := append([]any{blob, limit}, args...)
+
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("векторный поиск: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []memory.Candidate
+	for rows.Next() {
+		var distance float64
+		m, err := scanMemory(rowWithExtra{row: rows, extra: []any{&distance}})
+		if err != nil {
+			return nil, fmt.Errorf("сканирование кандидата: %w", err)
+		}
+		candidates = append(candidates, memory.Candidate{Memory: m, Score: 1.0 / (1.0 + distance), Source: "vector"})
+	}
+	return candidates, rows.Err()
+}
+
+// hasVecTable сообщает, создана ли виртуальная таблица memories_vec. Она не входит
+// в статическую schema (dim неизвестен заранее) — появляется только после первого
+// ResetVectorIndex.
+func (s *sqliteStore) hasVecTable(ctx context.Context) (bool, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memories_vec'`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("чтение sqlite_master: %w", err)
+	}
+	return true, nil
 }
 
 // Neighbors возвращает записи, связанные с id рёбрами links (в любом направлении),
@@ -534,27 +627,57 @@ func (s *sqliteStore) EmbedMeta(ctx context.Context) (string, int, error) {
 	return model, dim, nil
 }
 
-// ResetVectorIndex фиксирует новую модель/размерность эмбеддинга. Пересоздание
-// самой vec-таблицы — Этап 3; в MVP метод только обновляет embed_meta.
+// ResetVectorIndex пересоздаёт векторный индекс memories_vec под новую модель/dim и
+// фиксирует их в embed_meta — источнике истины для reindex (DESIGN.md §9). Вызывается
+// при первом включении Embedder или при смене модели (dim/пространство меняются).
+// Таблица пересоздаётся с нуля (DROP + CREATE) — старые векторы теряются; вызывающая
+// сторона (reindex-джоб) обязана после этого пересчитать эмбеддинги через
+// AllForReindex + PutVector. В транзакции.
 func (s *sqliteStore) ResetVectorIndex(ctx context.Context, model string, dim int) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("начало транзакции: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS memories_vec`); err != nil {
+		return fmt.Errorf("удаление memories_vec: %w", err)
+	}
+
+	// dim приходит из кода (Embedder.Dim()), не из пользовательского ввода — безопасно
+	// подставлять напрямую в DDL, sqlite-vec не поддерживает параметризацию типа колонки.
+	createStmt := fmt.Sprintf(
+		`CREATE VIRTUAL TABLE memories_vec USING vec0(memory_id TEXT PRIMARY KEY, embedding float[%d] distance_metric=cosine)`,
+		dim,
+	)
+	if _, err := tx.ExecContext(ctx, createStmt); err != nil {
+		return fmt.Errorf("создание memories_vec: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO embed_meta (id, model, dim) VALUES (1, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET model = excluded.model, dim = excluded.dim
-	`, model, dim)
-	if err != nil {
-		return fmt.Errorf("сброс embed_meta: %w", err)
+	`, model, dim); err != nil {
+		return fmt.Errorf("обновление embed_meta: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
 
-// AllForReindex возвращает все записи для пересчёта эмбеддингов фоновым джобом.
+// AllForReindex возвращает все не устаревшие (superseded_by IS NULL) записи вместе с
+// tags/links — источник для фонового reindex-джоба при смене модели Embedder
+// (DESIGN.md §9). Устаревшие записи не нужны новому вектору: они уже вне recall.
 func (s *sqliteStore) AllForReindex(ctx context.Context) ([]memory.Memory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source
 		FROM memories
+		WHERE superseded_by IS NULL
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("чтение всех записей для reindex: %w", err)
+		return nil, fmt.Errorf("чтение записей для reindex: %w", err)
 	}
 	defer rows.Close()
 
@@ -564,13 +687,29 @@ func (s *sqliteStore) AllForReindex(ctx context.Context) ([]memory.Memory, error
 		if err != nil {
 			return nil, fmt.Errorf("сканирование записи для reindex: %w", err)
 		}
+		if m.Tags, err = s.loadTags(ctx, m.Id); err != nil {
+			return nil, err
+		}
+		if m.Links, err = s.loadLinks(ctx, m.Id); err != nil {
+			return nil, err
+		}
 		all = append(all, m)
 	}
 	return all, rows.Err()
 }
 
-// PutVector — заглушка Этапа 1: векторный индекс не создан, запись игнорируется.
-func (s *sqliteStore) PutVector(_ context.Context, _ string, _ []float32) error {
+// PutVector сохраняет (или заменяет) вектор записи id в memories_vec. Требует, чтобы
+// индекс уже был создан ResetVectorIndex — иначе возвращает внятную ошибку (а не
+// молча теряет вектор): reindex-джоб обязан вызвать ResetVectorIndex до первого
+// PutVector.
+func (s *sqliteStore) PutVector(ctx context.Context, id string, vec []float32) error {
+	blob, err := sqlite_vec.SerializeFloat32(vec)
+	if err != nil {
+		return fmt.Errorf("сериализация вектора %q: %w", id, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO memories_vec(memory_id, embedding) VALUES (?, ?)`, id, blob); err != nil {
+		return fmt.Errorf("запись вектора %q: %w", id, err)
+	}
 	return nil
 }
 
