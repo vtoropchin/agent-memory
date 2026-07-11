@@ -16,6 +16,11 @@ path = "~/.agentmemory/memory.db"
 provider = "ollama"
 base_url = "http://localhost:11434"
 model    = "bge-m3"                        # любая ollama-модель; dim определяется автоматически
+# При старте memoryd делает пробный эмбеддинг, чтобы проверить доступность сервера
+# и модели — dim не хардкодится и не задаётся здесь. Если ollama недоступен или
+# модель не подтянута, memoryd всё равно стартует: предупреждение в stderr и откат
+# на noop (recall на чистом FTS5, DESIGN.md §15). Отложенные вектора досчитываются
+# в фоне при следующем запуске с рабочим ollama (internal/memory/maint.Reindexer).
 
 [reasoner]
 # noop     — без LLM: recall возвращает сырые карточки без суммаризации, консолидация

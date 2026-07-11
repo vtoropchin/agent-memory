@@ -15,6 +15,7 @@ import (
 	"agentmemory/internal/config"
 	"agentmemory/internal/mcp"
 	"agentmemory/internal/memory/embed"
+	"agentmemory/internal/memory/maint"
 	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/recall"
 	"agentmemory/internal/memory/store"
@@ -59,20 +60,37 @@ func run() error {
 		}
 	}()
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	reasoner, err := newReasoner(cfg.Reasoner)
 	if err != nil {
 		return fmt.Errorf("создание reasoner: %w", err)
 	}
 
-	// Embedder ещё не подключён в memoryd (задача 3.6) — Noop оставляет вектор каждой
-	// записи отложенным на фоновый досчёт (Store.ListMissingVectors, DESIGN.md §9) и
-	// отключает векторный источник кандидатов в recall (деградация до чистого FTS5).
-	w := write.New(s, embed.NewNoop())
-	r := recall.New(s, cfg.Recall, reasoner, embed.NewNoop())
+	embedder, err := newEmbedder(ctx, cfg.Embedder)
+	if err != nil {
+		return fmt.Errorf("создание embedder: %w", err)
+	}
+
+	w := write.New(s, embedder)
+	r := recall.New(s, cfg.Recall, reasoner, embedder)
 	srv := mcp.NewServer(w, r, s, cfg.Scope)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	// Embedder ≠ Noop: досчитываем вектора, отложенные предыдущими запусками (смена
+	// модели, ранее недоступный ollama и т.п.), в фоне — не блокируя старт MCP-сервера
+	// (DESIGN.md §9, §15). Горутина завершается по тому же ctx, что и сервер.
+	if embedder.Dim() > 0 {
+		go func() {
+			result, err := maint.NewReindexer(s, embedder).CheckAndReindex(ctx)
+			if err != nil {
+				log.Printf("memoryd: фоновый reindex: %v", err)
+				return
+			}
+			log.Printf("memoryd: фоновый reindex завершён: reindexed=%v embedded=%d failed=%d",
+				result.Reindexed, result.Embedded, result.Failed)
+		}()
+	}
 
 	log.Printf("memoryd: запуск MCP-сервера (stdio), store=%s", cfg.Store.Path)
 	if err := srv.Run(ctx); err != nil {
@@ -104,5 +122,28 @@ func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 		return reason.NewDeepSeek(key, cfg.Model)
 	default:
 		return nil, fmt.Errorf("неизвестный reasoner.provider %q", cfg.Provider)
+	}
+}
+
+// newEmbedder создаёт Embedder по конфигу (симметрично newReasoner). "" и "noop"
+// отключают векторный слой — recall работает на чистом FTS5. "ollama" создаёт
+// клиент к серверу ollama; конструктор делает пробный эмбеддинг, заодно проверяя
+// доступность сервера и модели. Эта проверка — не про конфигурацию, а про внешний
+// сервис: сервер обязан стартовать в любом случае (DESIGN.md §15), поэтому ошибка
+// здесь — предупреждение в stderr и откат на Noop, а не отказ в старте. Неизвестный
+// provider — ошибка при старте, это опечатка в конфиге, а не runtime-деградация.
+func newEmbedder(ctx context.Context, cfg config.EmbedderConfig) (embed.Embedder, error) {
+	switch cfg.Provider {
+	case "", "noop":
+		return embed.NewNoop(), nil
+	case "ollama":
+		e, err := embed.NewOllama(ctx, cfg.BaseURL, cfg.Model)
+		if err != nil {
+			log.Printf("memoryd: embedder.provider=ollama, но сервер недоступен или модель не подтянута (%v) — работаю без Embedder (Noop, recall на FTS5)", err)
+			return embed.NewNoop(), nil
+		}
+		return e, nil
+	default:
+		return nil, fmt.Errorf("неизвестный embedder.provider %q", cfg.Provider)
 	}
 }
