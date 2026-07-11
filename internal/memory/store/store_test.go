@@ -822,6 +822,58 @@ func TestAllForReindex(t *testing.T) {
 	}
 }
 
+func TestListMissingVectorsWithoutVecTable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id := newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: id, Kind: memory.KindSemantic, Scope: "s", Content: "c", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	missing, err := s.ListMissingVectors(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListMissingVectors без vec-таблицы должен вернуть nil,nil: %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("missing = %+v, want nil", missing)
+	}
+}
+
+func TestListMissingVectors(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	withVec, withoutVec, superseded := newID(t), newID(t), newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: withVec, Kind: memory.KindSemantic, Scope: "s", Content: "с вектором", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+		t.Fatalf("Put withVec: %v", err)
+	}
+	if err := s.PutVector(ctx, withVec, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: withoutVec, Kind: memory.KindSemantic, Scope: "s", Content: "без вектора", CreatedAt: 2, UpdatedAt: 2}); err != nil {
+		t.Fatalf("Put withoutVec: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "s", Content: "устаревшая без вектора", CreatedAt: 3, UpdatedAt: 3}); err != nil {
+		t.Fatalf("Put superseded: %v", err)
+	}
+	if err := s.Supersede(ctx, superseded, withVec); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	missing, err := s.ListMissingVectors(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListMissingVectors: %v", err)
+	}
+	if len(missing) != 1 || missing[0].Id != withoutVec {
+		t.Fatalf("ListMissingVectors = %+v, want ровно [%q]", missing, withoutVec)
+	}
+}
+
 func TestEmbedMetaEmptyByDefault(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

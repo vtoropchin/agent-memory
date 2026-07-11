@@ -12,6 +12,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/store"
 	"agentmemory/internal/memory/write"
@@ -78,7 +79,7 @@ func TestConsolidateSuccess(t *testing.T) {
 		a.Id, b.Id,
 	)
 	rs := &fakeReasoner{resp: resp}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -153,7 +154,7 @@ func TestConsolidateInvalidJSONSkipsGroup(t *testing.T) {
 	putEpisodic(t, s, "project:x", "эпизод 2", veryOld+1)
 
 	rs := &fakeReasoner{resp: "это не JSON, а свободный текст"}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -185,7 +186,7 @@ func TestConsolidateNoopReasonerSkips(t *testing.T) {
 	s := newTestStore(t)
 	putEpisodic(t, s, "project:x", "эпизод", veryOld)
 
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, reason.NewNoop(), w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -209,7 +210,7 @@ func TestConsolidateReasonerErrorSkipsGroup(t *testing.T) {
 	putEpisodic(t, s, "project:x", "эпизод", veryOld)
 
 	rs := &fakeReasoner{err: errors.New("boom")}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -227,7 +228,7 @@ func TestConsolidateFreshEpisodesNotScanned(t *testing.T) {
 	putEpisodic(t, s, "project:x", "свежий эпизод", time.Now().Unix())
 
 	rs := &fakeReasoner{resp: "[]"}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -253,7 +254,7 @@ func TestConsolidateForeignSourceIDIgnored(t *testing.T) {
 		a.Id, foreign,
 	)
 	rs := &fakeReasoner{resp: resp}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -304,7 +305,7 @@ func TestConsolidateMergedFactDoesNotOverwriteSummaryOrCountAsCreated(t *testing
 		a.Id, b.Id,
 	)
 	rs := &fakeReasoner{resp: resp}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -354,7 +355,7 @@ func TestConsolidateDuplicateSourceIDWithinFactSupersededOnce(t *testing.T) {
 		a.Id, a.Id,
 	)
 	rs := &fakeReasoner{resp: resp}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -383,7 +384,7 @@ func TestConsolidateDuplicateSourceIDAcrossFactsSupersededOnce(t *testing.T) {
 		a.Id, a.Id,
 	)
 	rs := &fakeReasoner{resp: resp}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -413,7 +414,7 @@ func TestConsolidateBatchLimitDoesNotSplitGroup(t *testing.T) {
 	putEpisodic(t, s, "project:b", "эпизод b2", veryOld+1)
 
 	rs := &fakeReasoner{resp: "[]"}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	// batchLimit=2, но группа "project:a" (сортируется первой) состоит из 3 записей.
@@ -485,7 +486,7 @@ func TestConsolidateStoreErrorInOneGroupDoesNotBlockOthers(t *testing.T) {
 
 	fs := &failingSupersedeStore{Store: real, failFor: map[string]bool{a.Id: true}}
 	rs := &echoReasoner{}
-	w := write.New(fs)
+	w := write.New(fs, embed.NewNoop())
 	c := NewConsolidator(fs, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)
@@ -527,7 +528,7 @@ func TestConsolidateEmptyFactsArrayNoError(t *testing.T) {
 	putEpisodic(t, s, "project:x", "единичный эпизод без пары", veryOld)
 
 	rs := &fakeReasoner{resp: "```json\n[]\n```"}
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	c := NewConsolidator(s, rs, w)
 
 	result, err := c.Consolidate(ctx, time.Hour, 0)

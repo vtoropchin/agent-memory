@@ -24,6 +24,13 @@ type Store interface {
 	ResetVectorIndex(ctx context.Context, model string, dim int) error
 	AllForReindex(ctx context.Context) ([]memory.Memory, error)
 	PutVector(ctx context.Context, id string, vec []float32) error
+	// ListMissingVectors возвращает не устаревшие (superseded_by IS NULL) записи, для
+	// которых ещё нет строки в векторном индексе — очередь на досчёт вектора фоновым
+	// джобом, когда Save/Update отложили эмбеддинг из-за временной недоступности
+	// Embedder (DESIGN.md §7.4, §9). limit <= 0 означает без ограничения. Если
+	// векторный индекс ещё не создавался (Embedder всегда был noop), возвращает
+	// пустой список без ошибки — деградация, а не падение (DESIGN.md §15).
+	ListMissingVectors(ctx context.Context, limit int) ([]memory.Memory, error)
 	// ListEpisodicForConsolidation возвращает episodic-записи старше olderThan
 	// (created_at < olderThan) без superseded_by, отсортированные по scope, затем
 	// created_at — для группировки consolidation-джобом (DESIGN.md §11). limit <= 0

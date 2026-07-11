@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/store"
 )
 
@@ -38,9 +40,10 @@ const simhashDistanceThreshold = 8
 
 // Writer — точка приёма новых фактов в память (DESIGN.md §3, §7).
 type Writer struct {
-	store   store.Store
-	now     func() int64
-	entropy io.Reader
+	store    store.Store
+	embedder embed.Embedder
+	now      func() int64
+	entropy  io.Reader
 }
 
 // Option настраивает Writer при создании (используется в тестах для детерминизма).
@@ -57,12 +60,16 @@ func WithEntropy(entropy io.Reader) Option {
 	return func(w *Writer) { w.entropy = entropy }
 }
 
-// New создаёт Writer поверх Store.
-func New(s store.Store, opts ...Option) *Writer {
+// New создаёт Writer поверх Store и Embedder. Embedder используется в Save/Update
+// для синхронного расчёта вектора новой/изменённой записи (DESIGN.md §7.4, §9);
+// пока Embedder=noop (Dim()==0), эмбеддинг не считается — vec-запись остаётся
+// отложенной для фонового досчёта (см. Store.ListMissingVectors).
+func New(s store.Store, e embed.Embedder, opts ...Option) *Writer {
 	w := &Writer{
-		store:   s,
-		now:     func() int64 { return time.Now().Unix() },
-		entropy: ulid.DefaultEntropy(),
+		store:    s,
+		embedder: e,
+		now:      func() int64 { return time.Now().Unix() },
+		entropy:  ulid.DefaultEntropy(),
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -105,7 +112,11 @@ type UpdateInput struct {
 //  3. резолвит Links на существующие записи (см. ограничение ниже);
 //  4. генерирует ULID и вставляет запись (вместе с Summary, если он передан) через
 //     Store.Put одной операцией (FTS5-индекс обновляется триггерами внутри Put
-//     автоматически); merged=false.
+//     автоматически); merged=false;
+//  5. если Embedder включён (Dim() > 0), синхронно считает вектор content и
+//     сохраняет его через Store.PutVector; ошибка эмбеддинга/PutVector не
+//     проваливает Save — запись остаётся без вектора до фонового досчёта
+//     (см. embedNow, Store.ListMissingVectors, DESIGN.md §7.4, §9).
 //
 // Возвращаемый merged честно сообщает вызывающему коду (mcp.handleSave), был ли
 // факт слит с существующим дублем, вместо вставки новой записи, — без отдельного
@@ -176,14 +187,36 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		Source:     sourcePtr,
 		Tags:       tags,
 		Links:      links,
-		// TODO(Этап 3): при подключении Embedder!=noop поставить вектор в очередь на
-		// расчёт (или посчитать синхронно) и вызвать store.PutVector. Пока Embedder=noop,
-		// векторная индексация не требуется (DESIGN.md §7.4, §9).
 	}
 	if err := w.store.Put(ctx, m); err != nil {
 		return "", false, fmt.Errorf("write: сохранение записи: %w", err)
 	}
+	w.embedNow(ctx, id, content)
 	return id, false, nil
+}
+
+// embedNow считает и сохраняет вектор content для записи id, если Embedder включён
+// (Dim() > 0). Noop (Dim()==0) — Embed вообще не вызывается, векторная индексация
+// не требуется. Любая ошибка (Embed или PutVector) только логируется в stderr и не
+// прерывает вызывающий Save/Update — запись уже сохранена, а вектор досчитает
+// фоновый джоб по Store.ListMissingVectors (DESIGN.md §7.4, §9, §15: деградация,
+// а не падение).
+func (w *Writer) embedNow(ctx context.Context, id, content string) {
+	if w.embedder.Dim() <= 0 {
+		return
+	}
+	vecs, err := w.embedder.Embed(ctx, []string{content})
+	if err != nil {
+		log.Printf("write: эмбеддинг записи %q: %v (вектор будет досчитан позже)", id, err)
+		return
+	}
+	if len(vecs) < 1 {
+		log.Printf("write: эмбеддинг записи %q не вернул вектор (вектор будет досчитан позже)", id)
+		return
+	}
+	if err := w.store.PutVector(ctx, id, vecs[0]); err != nil {
+		log.Printf("write: сохранение вектора записи %q: %v (вектор будет досчитан позже)", id, err)
+	}
 }
 
 // dedup ищет в scope+kind запись, похожую на content (точное совпадение после
@@ -351,6 +384,9 @@ func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 	m.UpdatedAt = w.now()
 	if err := w.store.Put(ctx, m); err != nil {
 		return fmt.Errorf("write: сохранение %q: %w", id, err)
+	}
+	if in.Content != nil {
+		w.embedNow(ctx, id, m.Content)
 	}
 	return nil
 }

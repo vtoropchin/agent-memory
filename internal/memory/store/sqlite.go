@@ -702,15 +702,84 @@ func (s *sqliteStore) AllForReindex(ctx context.Context) ([]memory.Memory, error
 // индекс уже был создан ResetVectorIndex — иначе возвращает внятную ошибку (а не
 // молча теряет вектор): reindex-джоб обязан вызвать ResetVectorIndex до первого
 // PutVector.
+//
+// Замена реализована как DELETE + INSERT в транзакции, а не `INSERT OR REPLACE`:
+// виртуальная таблица vec0 (sqlite-vec) не поддерживает конфликт-резолюцию `OR
+// REPLACE` по своему PRIMARY KEY и возвращает "UNIQUE constraint failed" при
+// повторной вставке существующего memory_id — это нужно write.Writer.Update,
+// который пересчитывает и перезаписывает вектор при изменении content.
 func (s *sqliteStore) PutVector(ctx context.Context, id string, vec []float32) error {
 	blob, err := sqlite_vec.SerializeFloat32(vec)
 	if err != nil {
 		return fmt.Errorf("сериализация вектора %q: %w", id, err)
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO memories_vec(memory_id, embedding) VALUES (?, ?)`, id, blob); err != nil {
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("начало транзакции: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memories_vec WHERE memory_id = ?`, id); err != nil {
+		return fmt.Errorf("удаление старого вектора %q: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO memories_vec(memory_id, embedding) VALUES (?, ?)`, id, blob); err != nil {
 		return fmt.Errorf("запись вектора %q: %w", id, err)
 	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
 	return nil
+}
+
+// ListMissingVectors возвращает не устаревшие (superseded_by IS NULL) записи без
+// строки в memories_vec — очередь на досчёт вектора фоновым джобом, когда Save/Update
+// отложили эмбеддинг из-за временной недоступности Embedder (DESIGN.md §7.4, §9:
+// «очередь» — это просто записи без строки в memories_vec, отдельная таблица не
+// нужна). Если memories_vec ещё не создана (Embedder ни разу не включался,
+// ResetVectorIndex не вызывался), возвращает пустой список без ошибки — деградация,
+// а не падение (DESIGN.md §15).
+//
+// Как и AllForReindex/ListEpisodicForConsolidation, Tags/Links не подгружаются —
+// потребителю (реindex-джобу) для расчёта эмбеддинга нужен только Content.
+func (s *sqliteStore) ListMissingVectors(ctx context.Context, limit int) ([]memory.Memory, error) {
+	exists, err := s.hasVecTable(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("проверка memories_vec: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	query := `
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source
+		FROM memories m
+		LEFT JOIN memories_vec v ON v.memory_id = m.id
+		WHERE m.superseded_by IS NULL AND v.memory_id IS NULL
+		ORDER BY m.created_at
+	`
+	var args []any
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("выборка записей без вектора: %w", err)
+	}
+	defer rows.Close()
+
+	var missing []memory.Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("сканирование записи без вектора: %w", err)
+		}
+		missing = append(missing, m)
+	}
+	return missing, rows.Err()
 }
 
 // ListEpisodicForConsolidation возвращает episodic-записи старше olderThan без

@@ -33,7 +33,7 @@ foundational (набор scope в поиске + идентичность про
 |--------|------|--------|
 | 3.1 Ollama-Embedder | [3.1-ollama-embedder.md](3.1-ollama-embedder.md) | ✅ выполнена |
 | 3.2 sqlite-vec в Store | [3.2-sqlite-vec-store.md](3.2-sqlite-vec-store.md) | ✅ выполнена |
-| 3.3 Вектор в write path | [3.3-write-vector.md](3.3-write-vector.md) | ⏳ разблокирована (3.1, 3.2 готовы) |
+| 3.3 Вектор в write path | [3.3-write-vector.md](3.3-write-vector.md) | ✅ выполнена |
 | 3.4 Гибридный recall | [3.4-hybrid-recall.md](3.4-hybrid-recall.md) | ⏳ разблокирована (3.1, 3.2, MP-1 готовы) |
 | 3.5 Reindex при смене модели | [3.5-reindex.md](3.5-reindex.md) | ⏳ разблокирована (3.1, 3.2 готовы) |
 | 3.6 Связка Embedder в memoryd | [3.6-wiring-embedder.md](3.6-wiring-embedder.md) | ⏳ ожидает 3.1–3.5 |

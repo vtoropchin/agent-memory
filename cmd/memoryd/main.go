@@ -14,6 +14,7 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/mcp"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/recall"
 	"agentmemory/internal/memory/store"
@@ -63,7 +64,9 @@ func run() error {
 		return fmt.Errorf("создание reasoner: %w", err)
 	}
 
-	w := write.New(s)
+	// Embedder ещё не подключён в memoryd (отдельная задача) — Noop оставляет вектор
+	// каждой записи отложенным на фоновый досчёт (Store.ListMissingVectors, DESIGN.md §9).
+	w := write.New(s, embed.NewNoop())
 	r := recall.New(s, cfg.Recall, reasoner)
 	srv := mcp.NewServer(w, r, s, cfg.Scope)
 

@@ -11,6 +11,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"agentmemory/internal/config"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/recall"
 	"agentmemory/internal/memory/store"
@@ -44,7 +45,7 @@ func newServerOnDB(t *testing.T, dbPath string, scope config.ScopeConfig) *Serve
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	w := write.New(s)
+	w := write.New(s, embed.NewNoop())
 	r := recall.New(s, config.Default().Recall, reason.NewNoop())
 	return NewServer(w, r, s, scope)
 }

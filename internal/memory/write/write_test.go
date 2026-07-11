@@ -7,10 +7,41 @@ import (
 	"testing"
 
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/store"
 )
 
+// fakeEmbedder — управляемая тестами реализация embed.Embedder: возвращает
+// фиксированный вектор Vec (или ошибку Err) и считает число вызовов Embed.
+type fakeEmbedder struct {
+	Vec       []float32
+	Err       error
+	CallCount int
+}
+
+func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	f.CallCount++
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	vecs := make([][]float32, len(texts))
+	for i := range texts {
+		vecs[i] = f.Vec
+	}
+	return vecs, nil
+}
+
+func (f *fakeEmbedder) Model() string { return "fake" }
+func (f *fakeEmbedder) Dim() int      { return len(f.Vec) }
+
+var _ embed.Embedder = (*fakeEmbedder)(nil)
+
 func newTestWriter(t *testing.T) (*Writer, store.Store) {
+	t.Helper()
+	return newTestWriterWithEmbedder(t, embed.NewNoop())
+}
+
+func newTestWriterWithEmbedder(t *testing.T, e embed.Embedder) (*Writer, store.Store) {
 	t.Helper()
 	s, err := store.Open(filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
@@ -20,7 +51,7 @@ func newTestWriter(t *testing.T) (*Writer, store.Store) {
 
 	var st store.Store = s
 	now := int64(1000)
-	w := New(st, WithNow(func() int64 { return now }))
+	w := New(st, e, WithNow(func() int64 { return now }))
 	return w, st
 }
 
@@ -475,4 +506,122 @@ func TestWriterForget(t *testing.T) {
 			t.Error("Forget с несуществующим replacedBy должен вернуть ошибку")
 		}
 	})
+}
+
+// TestSaveEmbedsAndStoresVector — Save с включённым Embedder (Dim() > 0) считает
+// вектор content и сохраняет его через Store.PutVector (DESIGN.md §7.4, §9).
+// Точность сохранённого вектора проверяется через SearchVector: KNN по тому же
+// вектору должен найти запись с нулевой дистанцией (score 1.0).
+func TestSaveEmbedsAndStoresVector(t *testing.T) {
+	ctx := context.Background()
+	fe := &fakeEmbedder{Vec: []float32{1, 0, 0}}
+	w, st := newTestWriterWithEmbedder(t, fe)
+	if err := st.ResetVectorIndex(ctx, fe.Model(), fe.Dim()); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	id, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-embed", Content: "факт для эмбеддинга"})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if fe.CallCount != 1 {
+		t.Errorf("CallCount = %d, want 1", fe.CallCount)
+	}
+
+	cands, err := st.SearchVector(ctx, fe.Vec, memory.Query{Limit: 5})
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if len(cands) != 1 || cands[0].Memory.Id != id {
+		t.Fatalf("SearchVector = %+v, want ровно запись %q", cands, id)
+	}
+	if cands[0].Score != 1.0 {
+		t.Errorf("Score = %v, want 1.0 (нулевая дистанция — вектор сохранён без искажений)", cands[0].Score)
+	}
+}
+
+// TestSaveEmbedErrorDegradesGracefully — ошибка Embed не должна проваливать Save:
+// запись сохраняется без вектора и остаётся видна через ListMissingVectors —
+// очередь на досчёт фоновым джобом (DESIGN.md §7.4, §9, §15: деградация, а не падение).
+func TestSaveEmbedErrorDegradesGracefully(t *testing.T) {
+	ctx := context.Background()
+	fe := &fakeEmbedder{Vec: []float32{1, 0, 0}, Err: errors.New("embedder недоступен")}
+	w, st := newTestWriterWithEmbedder(t, fe)
+	if err := st.ResetVectorIndex(ctx, fe.Model(), fe.Dim()); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	id, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-embed-err", Content: "факт без вектора"})
+	if err != nil {
+		t.Fatalf("Save должен вернуть успех даже при ошибке Embed: %v", err)
+	}
+	if fe.CallCount != 1 {
+		t.Errorf("CallCount = %d, want 1", fe.CallCount)
+	}
+
+	missing, err := st.ListMissingVectors(ctx, 0)
+	if err != nil {
+		t.Fatalf("ListMissingVectors: %v", err)
+	}
+	found := false
+	for _, m := range missing {
+		if m.Id == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ListMissingVectors = %+v, want содержать %q (вектор не сохранён)", missing, id)
+	}
+}
+
+// TestSaveNoopEmbedderSkipsEmbed — Dim() == 0 означает, что Embed вообще не должен
+// вызываться (не просто «результат игнорируется»): дешёвая деградация, без лишней
+// работы, пока Embedder отключён (DESIGN.md §7.4, §9).
+func TestSaveNoopEmbedderSkipsEmbed(t *testing.T) {
+	ctx := context.Background()
+	fe := &fakeEmbedder{} // Vec == nil => Dim() == 0, как у embed.Noop
+	w, _ := newTestWriterWithEmbedder(t, fe)
+
+	if _, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-noop", Content: "факт без эмбеддера"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if fe.CallCount != 0 {
+		t.Errorf("CallCount = %d, want 0 (Dim()==0 => Embed не вызывается)", fe.CallCount)
+	}
+}
+
+// TestUpdateContentReembeds — Update, меняющий Content, должен пересчитать вектор от
+// НОВОГО content и перезаписать его в Store (DESIGN.md §7.4, §9).
+func TestUpdateContentReembeds(t *testing.T) {
+	ctx := context.Background()
+	fe := &fakeEmbedder{Vec: []float32{1, 0, 0}}
+	w, st := newTestWriterWithEmbedder(t, fe)
+	if err := st.ResetVectorIndex(ctx, fe.Model(), fe.Dim()); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	id, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-reembed", Content: "исходный факт"})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if fe.CallCount != 1 {
+		t.Fatalf("CallCount после Save = %d, want 1", fe.CallCount)
+	}
+
+	fe.Vec = []float32{0, 1, 0}
+	newContent := "обновлённый факт"
+	if err := w.Update(ctx, UpdateInput{Id: id, Content: &newContent}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if fe.CallCount != 2 {
+		t.Errorf("CallCount после Update = %d, want 2 (переэмбеддинг нового content)", fe.CallCount)
+	}
+
+	cands, err := st.SearchVector(ctx, []float32{0, 1, 0}, memory.Query{Limit: 5})
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if len(cands) != 1 || cands[0].Memory.Id != id || cands[0].Score != 1.0 {
+		t.Fatalf("SearchVector = %+v, want ровно запись %q с новым вектором", cands, id)
+	}
 }
