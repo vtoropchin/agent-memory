@@ -39,7 +39,7 @@ type Server struct {
 // запускается — для этого вызови Run.
 func NewServer(w *write.Writer, r *recall.Recaller, s store.Store, scope config.ScopeConfig) *Server {
 	srv := &Server{
-		sdk:      sdkmcp.NewServer(&sdkmcp.Implementation{Name: serverName, Version: serverVersion}, nil),
+		sdk:      sdkmcp.NewServer(&sdkmcp.Implementation{Name: serverName, Version: serverVersion}, &sdkmcp.ServerOptions{Instructions: buildInstructions(scope)}),
 		writer:   w,
 		recaller: r,
 		store:    s,

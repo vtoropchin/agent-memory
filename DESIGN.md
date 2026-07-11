@@ -328,6 +328,12 @@ DeepSeek chat (OpenAI-совместимый) в роли текстового �
 
 Транспорт: MCP over stdio (`/cmd/memoryd`). HTTP-слой — опция на будущее.
 
+При `initialize` сервер публикует server-level `instructions` (`ServerOptions.Instructions`)
+— компактный клиент-агностичный протокол (когда звать recall, что такое атомарный факт,
+дефолты save/recall, выведенные из `[scope]`), собираемый `internal/mcp.buildInstructions`.
+Так базовый протокол доезжает до любого MCP-клиента (не только Claude Code) без Claude-скила;
+богатый проектный протокол по-прежнему живёт в скиле `/memoryd`.
+
 ---
 
 ## 13. Конфигурация (TOML + env)
