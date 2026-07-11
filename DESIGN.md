@@ -346,6 +346,10 @@ weights = { relevance = 1.0, importance = 0.5, recency = 0.4, access = 0.2 }
 [maint]
 decay_interval   = "24h"
 consolidate_after = "168h"                 # неделя episodic → semantic
+
+[scope]
+project = "myproject"                      # → "project:myproject"; пусто = мультипроектность выключена
+shared  = ["user:*"]                       # пространства, всегда добавляемые к recall по умолчанию
 ```
 
 ---

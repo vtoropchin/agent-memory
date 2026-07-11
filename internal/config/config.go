@@ -47,6 +47,32 @@ type MaintConfig struct {
 	ConsolidateAfter string `toml:"consolidate_after"` // напр. "168h"
 }
 
+// ScopeConfig — идентичность инстанса и мультипроектность (DESIGN.md §2.1).
+// Project пуст => мультипроектность выключена (одно-проектный/adhoc-режим): save
+// требует явный scope, recall без scope не фильтрует.
+type ScopeConfig struct {
+	Project string   `toml:"project"` // имя проекта -> "домашнее" пространство "project:<name>"
+	Shared  []string `toml:"shared"`  // пространства, всегда добавляемые к recall по умолчанию
+}
+
+// SaveScope возвращает "домашний" scope инстанса для save по умолчанию
+// ("project:<name>"), либо "", если мультипроектность выключена.
+func (c ScopeConfig) SaveScope() string {
+	if c.Project == "" {
+		return ""
+	}
+	return "project:" + c.Project
+}
+
+// RecallScopes возвращает набор scope для recall по умолчанию
+// (["project:<name>"] + Shared), либо nil, если мультипроектность выключена.
+func (c ScopeConfig) RecallScopes() []string {
+	if c.Project == "" {
+		return nil
+	}
+	return append([]string{"project:" + c.Project}, c.Shared...)
+}
+
 // Config — корневая структура конфигурации AgentMemory.
 type Config struct {
 	Store    StoreConfig    `toml:"store"`
@@ -54,6 +80,7 @@ type Config struct {
 	Reasoner ReasonerConfig `toml:"reasoner"`
 	Recall   RecallConfig   `toml:"recall"`
 	Maint    MaintConfig    `toml:"maint"`
+	Scope    ScopeConfig    `toml:"scope"`
 }
 
 // Default возвращает конфигурацию по умолчанию (DESIGN.md §13), используемую когда
@@ -84,6 +111,10 @@ func Default() Config {
 		Maint: MaintConfig{
 			DecayInterval:    "24h",
 			ConsolidateAfter: "168h",
+		},
+		Scope: ScopeConfig{
+			Project: "", // мультипроектность выключена по умолчанию
+			Shared:  []string{"user:*"},
 		},
 	}
 }

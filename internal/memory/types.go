@@ -49,8 +49,12 @@ type Memory struct {
 
 // Query — параметры поиска для recall.
 type Query struct {
-	Text        string   // текст запроса
-	Scope       string   // фильтр по scope
+	Text string // текст запроса
+	// Scopes — набор пространств для фильтра (DESIGN.md §2.1), напр.
+	// ["project:<name>", "user:*"]. Если пуст — откат на одиночный Scope; если
+	// пусты оба поля — фильтра по scope нет (adhoc-режим, мультипроектность выключена).
+	Scopes      []string
+	Scope       string   // фильтр по одиночному scope (используется write-путём/дедупом)
 	Kinds       []string // фильтр по kind, пусто = все
 	Limit       int      // максимум кандидатов от источника
 	TokenBudget int      // бюджет токенов для сборки брифа

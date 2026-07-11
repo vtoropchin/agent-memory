@@ -221,6 +221,89 @@ func TestSearchLexical(t *testing.T) {
 	})
 }
 
+func TestSearchLexicalScopes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	aID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: aID, Kind: memory.KindSemantic, Scope: "project:a",
+		Content: "заметка про golang в проекте a", Importance: 3,
+		CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("Put a: %v", err)
+	}
+
+	userID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: userID, Kind: memory.KindSemantic, Scope: "user:*",
+		Content: "заметка про golang общая", Importance: 3,
+		CreatedAt: 2, UpdatedAt: 2,
+	}); err != nil {
+		t.Fatalf("Put user: %v", err)
+	}
+
+	bID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: bID, Kind: memory.KindSemantic, Scope: "project:b",
+		Content: "заметка про golang в проекте b", Importance: 3,
+		CreatedAt: 3, UpdatedAt: 3,
+	}); err != nil {
+		t.Fatalf("Put b: %v", err)
+	}
+
+	t.Run("набор scopes возвращает записи из всех перечисленных scope и не возвращает прочие", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{
+			Text: "golang", Scopes: []string{"project:a", "user:*"}, Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		got := map[string]bool{}
+		for _, c := range cands {
+			got[c.Memory.Id] = true
+		}
+		if len(cands) != 2 || !got[aID] || !got[userID] {
+			t.Fatalf("candidates = %+v, want [a user]", cands)
+		}
+		if got[bID] {
+			t.Errorf("candidates содержат запись из project:b, не входящего в Scopes")
+		}
+	})
+
+	t.Run("одиночный Scope работает по-прежнему (регрессия)", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{Text: "golang", Scope: "project:a", Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		if len(cands) != 1 || cands[0].Memory.Id != aID {
+			t.Fatalf("candidates = %+v, want [a]", cands)
+		}
+	})
+
+	t.Run("без scope — без фильтра", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{Text: "golang", Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		if len(cands) != 3 {
+			t.Fatalf("candidates = %+v, want 3 (без фильтра по scope)", cands)
+		}
+	})
+
+	t.Run("Scopes имеет приоритет над Scope", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{
+			Text: "golang", Scope: "project:b", Scopes: []string{"project:a"}, Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		if len(cands) != 1 || cands[0].Memory.Id != aID {
+			t.Fatalf("candidates = %+v, want [a] (Scopes приоритетнее Scope)", cands)
+		}
+	})
+}
+
 func TestSupersede(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

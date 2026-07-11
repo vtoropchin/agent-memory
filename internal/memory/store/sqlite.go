@@ -321,6 +321,28 @@ func scanMemory(row rowScanner) (memory.Memory, error) {
 	return m, nil
 }
 
+// scopePredicate строит условие фильтра по scope (DESIGN.md §2.1) для использования в
+// SearchLexical и (в дальнейшем, Этап 3.2) SearchVector — единая точка, чтобы оба
+// источника поиска фильтровали scope одинаково.
+//
+// Приоритет: набор scopes (m.scope IN (...)) > одиночный scope (m.scope = ?) > без
+// фильтра (пустой clause), если оба параметра пусты.
+func scopePredicate(scopes []string, scope string) (clause string, args []any) {
+	if len(scopes) > 0 {
+		placeholders := make([]string, len(scopes))
+		args = make([]any, len(scopes))
+		for i, s := range scopes {
+			placeholders[i] = "?"
+			args[i] = s
+		}
+		return "m.scope IN (" + strings.Join(placeholders, ",") + ")", args
+	}
+	if scope != "" {
+		return "m.scope = ?", []any{scope}
+	}
+	return "", nil
+}
+
 // SearchLexical ищет по FTS5-индексу (content/summary/tags), фильтрует по scope и
 // kind, исключает записи с проставленным superseded_by. Score — инверсия bm25
 // (больше значит релевантнее).
@@ -350,9 +372,9 @@ func (s *sqliteStore) SearchLexical(ctx context.Context, q memory.Query) ([]memo
 		query += ", 0.0 AS score FROM memories m"
 	}
 
-	if q.Scope != "" {
-		conds = append(conds, "m.scope = ?")
-		args = append(args, q.Scope)
+	if clause, scopeArgs := scopePredicate(q.Scopes, q.Scope); clause != "" {
+		conds = append(conds, clause)
+		args = append(args, scopeArgs...)
 	}
 	if len(q.Kinds) > 0 {
 		placeholders := make([]string, len(q.Kinds))

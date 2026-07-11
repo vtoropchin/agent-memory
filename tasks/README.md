@@ -24,8 +24,8 @@ foundational (набор scope в поиске + идентичность про
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| MP-1 Ядро модели scope | [mp-1-scope-core.md](mp-1-scope-core.md) | ⏳ следующая, блокирует 3.2/3.4/3.6/5.2 |
-| MP-2 Разрешение scope в recall/save + memoryd | [mp-2-scope-recall-wiring.md](mp-2-scope-recall-wiring.md) | ⏳ ожидает MP-1 |
+| MP-1 Ядро модели scope | [mp-1-scope-core.md](mp-1-scope-core.md) | ✅ выполнена |
+| MP-2 Разрешение scope в recall/save + memoryd | [mp-2-scope-recall-wiring.md](mp-2-scope-recall-wiring.md) | ⏳ следующая (MP-1 готова) |
 
 ## Этап 3 — Embedder + гибридный поиск
 
