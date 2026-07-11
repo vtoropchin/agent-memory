@@ -21,7 +21,7 @@
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| 3.1 Ollama-Embedder | [3.1-ollama-embedder.md](3.1-ollama-embedder.md) | ⏳ |
+| 3.1 Ollama-Embedder | [3.1-ollama-embedder.md](3.1-ollama-embedder.md) | ✅ выполнена |
 | 3.2 sqlite-vec в Store | [3.2-sqlite-vec-store.md](3.2-sqlite-vec-store.md) | ⏳ |
 | 3.3 Вектор в write path | [3.3-write-vector.md](3.3-write-vector.md) | ⏳ ожидает 3.1, 3.2 |
 | 3.4 Гибридный recall | [3.4-hybrid-recall.md](3.4-hybrid-recall.md) | ⏳ ожидает 3.1, 3.2 |
