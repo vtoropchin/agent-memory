@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "agentmemory": {
-      "command": "${CLAUDE_PROJECT_DIR:-.}/bin/memoryd",
-      "args": ["-config", "${CLAUDE_PROJECT_DIR:-.}/agentmemory.toml"],
+      "command": "/Users/vladimir/.local/bin/memoryd",
+      "args": [
+        "-config",
+        "${CLAUDE_PROJECT_DIR:-.}/agentmemory.toml"
+      ],
       "env": {
         "DEEPSEEK_API_KEY": "${DEEPSEEK_API_KEY:-}"
       }
