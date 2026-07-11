@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"agentmemory/internal/config"
@@ -52,6 +53,20 @@ func run() error {
 	configPath := flag.String("config", "", "путь к TOML-конфигу (опционально)")
 	dbPath := flag.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	flag.Parse()
+
+	// .env рядом с конфигом (или в текущем каталоге, если -config не задан) —
+	// раскладывается `memoryd init` (задача 5.4). Загрузить ДО newReasoner,
+	// иначе DEEPSEEK_API_KEY туда не долетит. Значение ключа в лог не попадает.
+	dotenvDir := "."
+	if *configPath != "" {
+		dotenvDir = filepath.Dir(*configPath)
+	}
+	dotenvPath := filepath.Join(dotenvDir, ".env")
+	if loaded, err := loadDotEnv(dotenvPath); err != nil {
+		log.Printf("memoryd: загрузка %s: %v", dotenvPath, err)
+	} else if loaded {
+		log.Printf("memoryd: переменные окружения подхвачены из %s", dotenvPath)
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {

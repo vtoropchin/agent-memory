@@ -26,8 +26,11 @@ model    = "bge-m3"                        # любая ollama-модель; dim
 # noop     — без LLM: recall возвращает сырые карточки без суммаризации, консолидация
 #            episodic→semantic недоступна (дефолт, Этап 1).
 # deepseek — DeepSeek chat (OpenAI-совместимый API). Ключ берётся из env
-#            DEEPSEEK_API_KEY, а не из этого файла. Если ключ пуст, memoryd
-#            стартует с предупреждением и работает как noop (деградация, DESIGN §15).
+#            DEEPSEEK_API_KEY, а не из этого файла. Если в shell-env его нет,
+#            memoryd сам подхватывает его из .env рядом с этим конфигом при
+#            старте (DESIGN.md §13; раскладывается `memoryd init`, задача 5.4).
+#            Если ключ всё равно пуст, memoryd стартует с предупреждением и
+#            работает как noop (деградация, DESIGN §15).
 provider = "deepseek"
 model    = "deepseek-chat"
 
