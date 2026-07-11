@@ -331,10 +331,13 @@ DeepSeek chat (OpenAI-совместимый) в роли текстового �
 **Read-only web-морда.** `memoryd web` (Этап 6, `cmd/memoryd`) поднимает отдельный HTTP-режим
 того же бинаря поверх того же файла БД: JSON API (`/api/stats`, `/api/memories`,
 `/api/memories/{id}`, `/api/search`) только на read-методах Store (`List`/`Stats`/`Get`/
-`Neighbors`/`SearchLexical`) — никаких Put/Update/Supersede из браузера. Слушает по умолчанию
-только `127.0.0.1:7070` (localhost, наружу не выставляется), поиск — лексический (FTS5);
-гибридный/векторный поиск (нужен Embedder) — вне этой версии. Статический фронтенд отдаётся из
-`embed.FS` (`cmd/memoryd/web/`), сам интерфейс — задача 6.3.
+`Neighbors`/`SearchLexical`, а также `VectorStatus`/`SemanticNeighbors` для карточки записи) —
+никаких Put/Update/Supersede из браузера. Слушает по умолчанию только `127.0.0.1:7070`
+(localhost, наружу не выставляется); поиск (`/api/search`) — лексический (FTS5), гибридный
+векторный поиск вне этой версии. Карточка записи (`/api/memories/{id}`, задача 6.4) при этом
+показывает статус вектора и KNN-соседей по cosine — read-only чтение уже сохранённых векторов
+из БД, без вызовов Embedder/ollama (при выключенном векторном слое деградирует, а не падает).
+Статический фронтенд отдаётся из `embed.FS` (`cmd/memoryd/web/`), сам интерфейс — задачи 6.3/6.4.
 
 При `initialize` сервер публикует server-level `instructions` (`ServerOptions.Instructions`)
 — компактный клиент-агностичный протокол (когда звать recall, что такое атомарный факт,

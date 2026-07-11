@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"testing"
 
@@ -1261,5 +1262,261 @@ func TestEmbedMetaEmptyByDefault(t *testing.T) {
 	}
 	if model != "bge-m3" || dim != 1024 {
 		t.Errorf("EmbedMeta = (%q, %d), want (bge-m3, 1024)", model, dim)
+	}
+}
+
+func TestVectorStatusWithoutVecTable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+		Content: "c", CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	status, err := s.VectorStatus(ctx, id)
+	if err != nil {
+		t.Fatalf("VectorStatus без vec-таблицы: %v", err)
+	}
+	if status != (VectorStatus{}) {
+		t.Errorf("VectorStatus = %+v, want нулевое значение", status)
+	}
+}
+
+func TestVectorStatusNotEmbedded(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "bge-m3", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	id := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+		Content: "c", CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	status, err := s.VectorStatus(ctx, id)
+	if err != nil {
+		t.Fatalf("VectorStatus: %v", err)
+	}
+	want := VectorStatus{Embedded: false, Model: "bge-m3", Dim: 3}
+	if status != want {
+		t.Errorf("VectorStatus = %+v, want %+v", status, want)
+	}
+}
+
+func TestVectorStatusEmbedded(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "bge-m3", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	id := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+		Content: "c", CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.PutVector(ctx, id, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	status, err := s.VectorStatus(ctx, id)
+	if err != nil {
+		t.Fatalf("VectorStatus: %v", err)
+	}
+	want := VectorStatus{Embedded: true, Model: "bge-m3", Dim: 3}
+	if status != want {
+		t.Errorf("VectorStatus = %+v, want %+v", status, want)
+	}
+}
+
+func TestSemanticNeighborsWithoutVecTable(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	id := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+		Content: "c", CreatedAt: 1, UpdatedAt: 1,
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	cands, err := s.SemanticNeighbors(ctx, id, 3)
+	if err != nil {
+		t.Fatalf("SemanticNeighbors без vec-таблицы: %v", err)
+	}
+	if cands != nil {
+		t.Fatalf("candidates = %+v, want nil", cands)
+	}
+}
+
+func TestSemanticNeighborsAnchorWithoutVector(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	anchor, other := newID(t), newID(t)
+	for _, id := range []string{anchor, other} {
+		if err := s.Put(ctx, memory.Memory{
+			Id: id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "c", CreatedAt: 1, UpdatedAt: 1,
+		}); err != nil {
+			t.Fatalf("Put %s: %v", id, err)
+		}
+	}
+	// у anchor вектора нет; у other — есть.
+	if err := s.PutVector(ctx, other, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	cands, err := s.SemanticNeighbors(ctx, anchor, 3)
+	if err != nil {
+		t.Fatalf("SemanticNeighbors без вектора якоря: %v", err)
+	}
+	if cands != nil {
+		t.Fatalf("candidates = %+v, want nil", cands)
+	}
+}
+
+func TestSemanticNeighborsExcludesSelfAndSuperseded(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	anchor, near, far, supersededID, replacement := newID(t), newID(t), newID(t), newID(t), newID(t)
+	for i, tc := range []struct {
+		id     string
+		vec    []float32
+		hasVec bool
+		ts     int64
+	}{
+		{anchor, []float32{1, 0, 0}, true, 1},
+		{near, []float32{1, 0.1, 0}, true, 2},
+		{far, []float32{0, 1, 0}, true, 3},
+		{supersededID, []float32{1, 0.05, 0}, true, 4}, // ближе near, но будет superseded
+		{replacement, nil, false, 5},                   // без вектора — не должен попадать в выдачу
+	} {
+		if err := s.Put(ctx, memory.Memory{
+			Id: tc.id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "запись " + tc.id, CreatedAt: tc.ts, UpdatedAt: tc.ts,
+		}); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+		if tc.hasVec {
+			if err := s.PutVector(ctx, tc.id, tc.vec); err != nil {
+				t.Fatalf("PutVector %d: %v", i, err)
+			}
+		}
+	}
+	if err := s.Supersede(ctx, supersededID, replacement); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	cands, err := s.SemanticNeighbors(ctx, anchor, 3)
+	if err != nil {
+		t.Fatalf("SemanticNeighbors: %v", err)
+	}
+	if len(cands) != 2 {
+		t.Fatalf("candidates = %+v, want 2 (near, far; anchor и superseded исключены)", cands)
+	}
+	wantOrder := []string{near, far}
+	for i, id := range wantOrder {
+		if cands[i].Memory.Id != id {
+			t.Errorf("cands[%d].Id = %q, want %q (порядок: %+v)", i, cands[i].Memory.Id, id, cands)
+		}
+		if cands[i].Source != "vector" {
+			t.Errorf("cands[%d].Source = %q, want vector", i, cands[i].Source)
+		}
+	}
+	// Score — честная дистанция, возрастает с удалением.
+	for i := 1; i < len(cands); i++ {
+		if cands[i].Score < cands[i-1].Score {
+			t.Errorf("Score (дистанция) не возрастает: %+v", cands)
+		}
+	}
+	for _, c := range cands {
+		if c.Memory.Id == anchor {
+			t.Errorf("candidates содержат саму запись-якорь: %+v", cands)
+		}
+		if c.Memory.Id == supersededID {
+			t.Errorf("candidates содержат superseded запись: %+v", cands)
+		}
+	}
+}
+
+// TestSemanticNeighborsKTruncation проверяет, что запас (semanticNeighborsPad) над
+// k в MATCH-запросе достаточен, чтобы якорь (дистанция 0, всегда попадающий в
+// top-k выборки vec0) не вытеснял настоящих соседей: при 10 реальных соседях и
+// k=3 должны вернуться ровно 3 ближайшие записи, а не меньше.
+func TestSemanticNeighborsKTruncation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 2); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	anchor := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: anchor, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+		Content: "anchor", CreatedAt: 0, UpdatedAt: 0,
+	}); err != nil {
+		t.Fatalf("Put anchor: %v", err)
+	}
+	if err := s.PutVector(ctx, anchor, []float32{1, 0}); err != nil {
+		t.Fatalf("PutVector anchor: %v", err)
+	}
+
+	const n = 10
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		id := newID(t)
+		ids[i] = id
+		// углы возрастают вместе с i => cosine-дистанция до anchor([1,0]) тоже
+		// монотонно возрастает вместе с i.
+		angle := float64(i+1) * math.Pi / (2 * (n + 1))
+		vec := []float32{float32(math.Cos(angle)), float32(math.Sin(angle))}
+		if err := s.Put(ctx, memory.Memory{
+			Id: id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "запись " + id, CreatedAt: int64(i + 1), UpdatedAt: int64(i + 1),
+		}); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+		if err := s.PutVector(ctx, id, vec); err != nil {
+			t.Fatalf("PutVector %d: %v", i, err)
+		}
+	}
+
+	const k = 3
+	cands, err := s.SemanticNeighbors(ctx, anchor, k)
+	if err != nil {
+		t.Fatalf("SemanticNeighbors: %v", err)
+	}
+	if len(cands) != k {
+		t.Fatalf("candidates = %+v (len %d), want %d", cands, len(cands), k)
+	}
+	wantOrder := ids[:k]
+	for i, id := range wantOrder {
+		if cands[i].Memory.Id != id {
+			t.Errorf("cands[%d].Id = %q, want %q (порядок: %+v)", i, cands[i].Memory.Id, id, cands)
+		}
 	}
 }

@@ -264,6 +264,88 @@ func TestHandleGetMemory(t *testing.T) {
 	}
 }
 
+// TestHandleGetMemory_EmbeddingDegradesWithoutVectorLayer — карточка записи
+// без векторного слоя (нет вектора, ResetVectorIndex не вызывался) деградирует:
+// embedding.embedded=false, semanticNeighbors — пустой массив (не null),
+// статус 200 (не 500).
+func TestHandleGetMemory_EmbeddingDegradesWithoutVectorLayer(t *testing.T) {
+	s := newTestWebStore(t)
+	m := putTestMemory(t, s, func(m *memory.Memory) {})
+
+	srv := httptest.NewServer(newWebHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/memories/" + m.Id)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200 (деградация без падения)", resp.StatusCode)
+	}
+
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	embedding, ok := raw["embedding"].(map[string]any)
+	if !ok {
+		t.Fatalf("нет ключа embedding в ответе: %+v", raw)
+	}
+	if embedded, ok := embedding["embedded"].(bool); !ok || embedded {
+		t.Errorf("embedding.embedded = %v, хочу false", embedding["embedded"])
+	}
+
+	semanticNeighbors, ok := raw["semanticNeighbors"].([]any)
+	if !ok {
+		t.Fatalf("semanticNeighbors не массив: %+v", raw["semanticNeighbors"])
+	}
+	if len(semanticNeighbors) != 0 {
+		t.Errorf("semanticNeighbors = %v, хочу пустой массив", semanticNeighbors)
+	}
+}
+
+// TestHandleGetMemory_SemanticNeighborsWithVectors — позитивный кейс: после
+// ResetVectorIndex+PutVector карточка отдаёт embedding.embedded=true и
+// semanticNeighbors с полем distance, посчитанным из Store.SemanticNeighbors.
+func TestHandleGetMemory_SemanticNeighborsWithVectors(t *testing.T) {
+	s := newTestWebStore(t)
+	anchor := putTestMemory(t, s, func(m *memory.Memory) {})
+	near := putTestMemory(t, s, func(m *memory.Memory) {})
+
+	ctx := context.Background()
+	if err := s.ResetVectorIndex(ctx, "bge-m3", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+	if err := s.PutVector(ctx, anchor.Id, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector anchor: %v", err)
+	}
+	if err := s.PutVector(ctx, near.Id, []float32{0.9, 0.1, 0}); err != nil {
+		t.Fatalf("PutVector near: %v", err)
+	}
+
+	srv := httptest.NewServer(newWebHandler(s))
+	defer srv.Close()
+
+	var card memoryCardResponse
+	resp := getJSON(t, srv.URL+"/api/memories/"+anchor.Id, &card)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200", resp.StatusCode)
+	}
+
+	if !card.Embedding.Embedded || card.Embedding.Model != "bge-m3" || card.Embedding.Dim != 3 {
+		t.Errorf("Embedding = %+v, хочу {true bge-m3 3}", card.Embedding)
+	}
+
+	if len(card.SemanticNeighbors) != 1 || card.SemanticNeighbors[0].Id != near.Id {
+		t.Fatalf("SemanticNeighbors = %+v, хочу [%s]", card.SemanticNeighbors, near.Id)
+	}
+	if card.SemanticNeighbors[0].Distance <= 0 {
+		t.Errorf("Distance = %v, хочу > 0", card.SemanticNeighbors[0].Distance)
+	}
+}
+
 func TestHandleGetMemory_NullableFieldsAndCamelCase(t *testing.T) {
 	s := newTestWebStore(t)
 	m := putTestMemory(t, s, func(m *memory.Memory) {})

@@ -25,6 +25,11 @@ var ErrNotFound = errors.New("memory: запись не найдена")
 // задан (<=0).
 const listDefaultLimit = 50
 
+// semanticNeighborsPad — запас, добавляемый к запрошенному k в MATCH-запросе
+// SemanticNeighbors, чтобы компенсировать k-before-filter sqlite-vec (см.
+// SemanticNeighbors) — иначе якорь (дистанция 0) вытесняет настоящего соседа.
+const semanticNeighborsPad = 5
+
 // schema — DDL хранилища (DESIGN.md §4). Идемпотентен: все объекты создаются
 // через IF NOT EXISTS, поэтому Open можно вызывать многократно на одном файле.
 //
@@ -605,6 +610,80 @@ func (s *sqliteStore) hasVecTable(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// SemanticNeighbors возвращает до k ближайших по cosine-дистанции живых записей к
+// записи id (исключая её саму и superseded), отсортированных по возрастанию
+// дистанции (DESIGN.md §12, задача 6.4). Candidate.Score = distance (честная
+// дистанция — карточке морды нужно показать её как есть, не 1/(1+d)),
+// Candidate.Source = "vector". Tags/Links не заполняются, как в SearchVector.
+//
+// KNN выполняется через CTE, как в SearchVector, но вектор запроса берётся из
+// самой записи id (MATCH (SELECT embedding FROM memories_vec WHERE memory_id = ?)).
+//
+// k-before-filter: vec0 применяет k ДО внешних фильтров (self, superseded) —
+// известное ограничение sqlite-vec. Поэтому запрашиваем k+запас (semanticNeighborsPad)
+// в MATCH, затем в Go отфильтровываем саму запись и superseded, и обрезаем до k. Без
+// запаса якорь (дистанция 0, всегда попадает в top-k) вытеснил бы одного настоящего
+// соседа.
+//
+// Если k<=0, у записи id нет вектора, либо memories_vec ещё не создана — возвращает
+// (nil, nil) без ошибки (деградация DESIGN.md §15).
+func (s *sqliteStore) SemanticNeighbors(ctx context.Context, id string, k int) ([]memory.Candidate, error) {
+	if k <= 0 {
+		return nil, nil
+	}
+
+	exists, err := s.hasVecTable(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("проверка memories_vec: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+
+	var hasVector bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memories_vec WHERE memory_id = ?)`, id).Scan(&hasVector); err != nil {
+		return nil, fmt.Errorf("проверка вектора %q: %w", id, err)
+	}
+	if !hasVector {
+		return nil, nil
+	}
+
+	query := `
+		WITH knn AS (
+			SELECT memory_id, distance FROM memories_vec
+			WHERE embedding MATCH (SELECT embedding FROM memories_vec WHERE memory_id = ?) AND k = ?
+		)
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, knn.distance
+		FROM knn JOIN memories m ON m.id = knn.memory_id
+		ORDER BY knn.distance ASC
+	`
+	rows, err := s.db.QueryContext(ctx, query, id, k+semanticNeighborsPad)
+	if err != nil {
+		return nil, fmt.Errorf("поиск семантических соседей %q: %w", id, err)
+	}
+	defer rows.Close()
+
+	var candidates []memory.Candidate
+	for rows.Next() {
+		var distance float64
+		m, err := scanMemory(rowWithExtra{row: rows, extra: []any{&distance}})
+		if err != nil {
+			return nil, fmt.Errorf("сканирование семантического соседа %q: %w", id, err)
+		}
+		if m.Id == id || m.SupersededBy != nil {
+			continue
+		}
+		candidates = append(candidates, memory.Candidate{Memory: m, Score: distance, Source: "vector"})
+		if len(candidates) == k {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("чтение семантических соседей %q: %w", id, err)
+	}
+	return candidates, nil
+}
+
 // Neighbors возвращает записи, связанные с id рёбрами links (в любом направлении),
 // исключая мягко забытые (superseded_by IS NOT NULL) — как и SearchLexical, соседи
 // не должны включать тумстоуны.
@@ -818,6 +897,33 @@ func (s *sqliteStore) EmbedMeta(ctx context.Context) (string, int, error) {
 		return "", 0, fmt.Errorf("чтение embed_meta: %w", err)
 	}
 	return model, dim, nil
+}
+
+// VectorStatus возвращает состояние вектора записи id (DESIGN.md §12, задача 6.4).
+// Если memories_vec ещё не создана (Embedder всегда был noop), возвращает нулевой
+// VectorStatus{} без ошибки — деградация, а не падение (DESIGN.md §15). Иначе
+// проверяет наличие строки в memories_vec и читает embed_meta (EmbedMeta) для
+// модели/dim.
+func (s *sqliteStore) VectorStatus(ctx context.Context, id string) (VectorStatus, error) {
+	exists, err := s.hasVecTable(ctx)
+	if err != nil {
+		return VectorStatus{}, fmt.Errorf("проверка memories_vec: %w", err)
+	}
+	if !exists {
+		return VectorStatus{}, nil
+	}
+
+	var embedded bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memories_vec WHERE memory_id = ?)`, id).Scan(&embedded); err != nil {
+		return VectorStatus{}, fmt.Errorf("проверка вектора %q: %w", id, err)
+	}
+
+	model, dim, err := s.EmbedMeta(ctx)
+	if err != nil {
+		return VectorStatus{}, fmt.Errorf("чтение embed_meta для статуса %q: %w", id, err)
+	}
+
+	return VectorStatus{Embedded: embedded, Model: model, Dim: dim}, nil
 }
 
 // ResetVectorIndex пересоздаёт векторный индекс memories_vec под новую модель/dim и

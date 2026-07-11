@@ -402,6 +402,22 @@ function closeModal() {
   document.getElementById("modal-backdrop").classList.add("hidden");
 }
 
+// vectorStatusBadge — бейдж состояния векторного слоя записи (задача 6.4).
+// embedding может отсутствовать (старый API/деградация) — трактуем как выключенный слой.
+function vectorStatusBadge(embedding) {
+  const e = embedding || { embedded: false, model: "", dim: 0 };
+  if (e.embedded) {
+    return el("span", {
+      class: "rounded-full border px-2 py-0.5 text-xs text-emerald-700 border-emerald-300 dark:text-emerald-400 dark:border-emerald-700",
+      text: "вектор ✓ " + e.model + "·" + e.dim,
+    });
+  }
+  return el("span", {
+    class: "rounded-full border border-slate-300 px-2 py-0.5 text-xs text-slate-600 dark:border-slate-600 dark:text-slate-400",
+    text: e.model ? "вектор: в очереди" : "векторный слой выключен",
+  });
+}
+
 function renderCardModal(card) {
   const content = document.getElementById("modal-content");
   clear(content);
@@ -417,7 +433,7 @@ function renderCardModal(card) {
   });
   const stars = el("span", { class: "text-amber-500 text-sm", text: fmtStars(m.importance) });
 
-  content.appendChild(el("div", { class: "flex flex-wrap items-center gap-2" }, [kindBadge, scopeBadge, stars]));
+  content.appendChild(el("div", { class: "flex flex-wrap items-center gap-2" }, [kindBadge, scopeBadge, stars, vectorStatusBadge(card.embedding)]));
 
   if (m.supersededBy) {
     content.appendChild(
@@ -491,6 +507,28 @@ function renderCardModal(card) {
       neighborsBox.appendChild(renderCard(n, false));
     });
     content.appendChild(neighborsBox);
+  }
+
+  // --- семантические соседи по вектору (KNN cosine), задача 6.4 ---
+  content.appendChild(el("h3", { class: "mt-4 text-sm font-semibold text-slate-500 dark:text-slate-400", text: "Семантически близкие (по вектору)" }));
+  if (card.semanticNeighbors && card.semanticNeighbors.length > 0) {
+    const semanticBox = el("div", { class: "mt-1 space-y-2" });
+    card.semanticNeighbors.forEach(function (n) {
+      semanticBox.appendChild(
+        el("div", {}, [
+          el("div", { class: "text-xs text-slate-500 dark:text-slate-400", text: "дистанция " + n.distance.toFixed(2) }),
+          renderCard(n, false),
+        ])
+      );
+    });
+    content.appendChild(semanticBox);
+  } else {
+    content.appendChild(
+      el("p", {
+        class: "mt-1 text-sm text-slate-500 dark:text-slate-400",
+        text: "нет семантических соседей / векторный слой выключен",
+      })
+    );
   }
 }
 

@@ -285,10 +285,31 @@ func handleListMemories(s store.Store) http.HandlerFunc {
 	}
 }
 
+// semanticNeighborsCount — сколько семантических соседей запрашивать для
+// карточки записи (задача 6.4, N по умолчанию).
+const semanticNeighborsCount = 5
+
+// embeddingStatusDTO — состояние векторного слоя записи для карточки
+// (задача 6.4): смэпено ли, какой моделью и с какой размерностью.
+type embeddingStatusDTO struct {
+	Embedded bool   `json:"embedded"`
+	Model    string `json:"model"`
+	Dim      int    `json:"dim"`
+}
+
+// semanticNeighborDTO — элемент semanticNeighbors в ответе карточки: memoryDTO
+// + честная cosine-дистанция (не similarity) до записи-якоря.
+type semanticNeighborDTO struct {
+	memoryDTO
+	Distance float64 `json:"distance"`
+}
+
 // memoryCardResponse — тело ответа GET /api/memories/{id}.
 type memoryCardResponse struct {
-	Memory    memoryDTO   `json:"memory"`
-	Neighbors []memoryDTO `json:"neighbors"`
+	Memory            memoryDTO             `json:"memory"`
+	Neighbors         []memoryDTO           `json:"neighbors"`
+	Embedding         embeddingStatusDTO    `json:"embedding"`
+	SemanticNeighbors []semanticNeighborDTO `json:"semanticNeighbors"`
 }
 
 func handleGetMemory(s store.Store) http.HandlerFunc {
@@ -311,9 +332,35 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 			return
 		}
 
+		vecStatus, err := s.VectorStatus(r.Context(), id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("vector status %q: %w", id, err))
+			return
+		}
+
+		semanticCandidates, err := s.SemanticNeighbors(r.Context(), id, semanticNeighborsCount)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("semantic neighbors %q: %w", id, err))
+			return
+		}
+
+		semanticNeighbors := []semanticNeighborDTO{}
+		for _, c := range semanticCandidates {
+			semanticNeighbors = append(semanticNeighbors, semanticNeighborDTO{
+				memoryDTO: toDTO(c.Memory),
+				Distance:  c.Score,
+			})
+		}
+
 		writeJSON(w, http.StatusOK, memoryCardResponse{
 			Memory:    toDTO(m),
 			Neighbors: toDTOs(neighbors),
+			Embedding: embeddingStatusDTO{
+				Embedded: vecStatus.Embedded,
+				Model:    vecStatus.Model,
+				Dim:      vecStatus.Dim,
+			},
+			SemanticNeighbors: semanticNeighbors,
 		})
 	}
 }

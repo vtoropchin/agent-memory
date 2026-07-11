@@ -29,6 +29,15 @@ type Stats struct {
 	ByKind     map[string]int // живые записи по kind
 }
 
+// VectorStatus — состояние векторного слоя для одной записи (для карточки
+// web-морды, DESIGN.md §12/задача 6.4). Нулевое значение означает «векторный
+// индекс ещё не создавался».
+type VectorStatus struct {
+	Embedded bool   // есть строка в memories_vec
+	Model    string // из embed_meta (пусто, если векторный индекс не создавался)
+	Dim      int    // из embed_meta (0, если не создавался)
+}
+
 // Store — единая точка доступа к хранилищу памяти: метаданные, лексический и
 // (в будущем) векторный индексы, граф связей.
 type Store interface {
@@ -72,4 +81,19 @@ type Store interface {
 	// этой же дате по возрастанию (самые старые первыми) — decay-джоб обрабатывает их
 	// в этом порядке. limit <= 0 означает без ограничения.
 	ListEpisodicForDecay(ctx context.Context, notAccessedSince int64, limit int) ([]memory.Memory, error)
+	// VectorStatus возвращает состояние вектора записи id (DESIGN.md §12, задача
+	// 6.4: бейдж статуса вектора в карточке морды). Если векторный индекс ещё не
+	// создавался (Embedder всегда был noop) — Embedded=false, Model="", Dim=0 без
+	// ошибки (деградация, DESIGN.md §15). Дёшево: проверка наличия строки +
+	// чтение embed_meta.
+	VectorStatus(ctx context.Context, id string) (VectorStatus, error)
+	// SemanticNeighbors возвращает до k ближайших по cosine-дистанции живых
+	// записей к записи id (исключая её саму и superseded), отсортированных по
+	// возрастанию дистанции (DESIGN.md §12, задача 6.4: «семантически близкие» в
+	// карточке морды). Candidate.Score = distance (честная дистанция, не
+	// 1/(1+d) — морде нужно показать её как есть), Candidate.Source = "vector".
+	// Tags/Links не заполняются (лёгкий список, как в SearchVector). Если k<=0,
+	// у записи нет вектора, либо векторный индекс ещё не создавался — пустой
+	// список без ошибки (деградация, DESIGN.md §15).
+	SemanticNeighbors(ctx context.Context, id string, k int) ([]memory.Candidate, error)
 }

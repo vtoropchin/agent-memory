@@ -68,6 +68,7 @@ API из 6.2.
 | 6.1 Read-only query-слой в Store | [6.1-store-read-api.md](6.1-store-read-api.md) | ✅ выполнена |
 | 6.2 Подкоманда `memoryd web` (HTTP + JSON API) | [6.2-memoryd-web-server.md](6.2-memoryd-web-server.md) | ✅ выполнена |
 | 6.3 Frontend web-морды (Tailwind bundled) | [6.3-web-frontend-tailwind.md](6.3-web-frontend-tailwind.md) | ✅ выполнена |
+| 6.4 Эмбеддинг-информация в морде (KNN-соседи + статус вектора) | [6.4-web-embedding-insight.md](6.4-web-embedding-insight.md) | ✅ выполнена |
 
 ## Общие требования ко всем задачам
 
