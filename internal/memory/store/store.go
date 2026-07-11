@@ -24,4 +24,9 @@ type Store interface {
 	ResetVectorIndex(ctx context.Context, model string, dim int) error
 	AllForReindex(ctx context.Context) ([]memory.Memory, error)
 	PutVector(ctx context.Context, id string, vec []float32) error
+	// ListEpisodicForConsolidation возвращает episodic-записи старше olderThan
+	// (created_at < olderThan) без superseded_by, отсортированные по scope, затем
+	// created_at — для группировки consolidation-джобом (DESIGN.md §11). limit <= 0
+	// означает без ограничения.
+	ListEpisodicForConsolidation(ctx context.Context, olderThan int64, limit int) ([]memory.Memory, error)
 }

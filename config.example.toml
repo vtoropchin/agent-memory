@@ -1,0 +1,35 @@
+# Пример конфигурации AgentMemory (DESIGN.md §13).
+#
+# Скопируйте файл (например, в ~/.agentmemory/config.toml) и передайте путь через
+# флаг `-config` при запуске memoryd. Если конфиг не передан или каких-то полей в
+# нём нет — используются дефолты из internal/config.Default() (эквивалентны Этапу 1:
+# reasoner и embedder выключены, только SQLite FTS5).
+
+[store]
+# Путь к файлу SQLite (~ раскрывается в домашний каталог пользователя).
+path = "~/.agentmemory/memory.db"
+
+[embedder]
+# noop    — векторный слой выключен, поиск только по FTS5 (дефолт, Этап 1).
+# ollama  — локальный сервер Ollama, модель эмбеддингов задаётся полем model.
+# openai  — совместимый с OpenAI API эмбеддер (ключ читается из env, не отсюда).
+provider = "ollama"
+base_url = "http://localhost:11434"
+model    = "bge-m3"                        # любая ollama-модель; dim определяется автоматически
+
+[reasoner]
+# noop     — без LLM: recall возвращает сырые карточки без суммаризации, консолидация
+#            episodic→semantic недоступна (дефолт, Этап 1).
+# deepseek — DeepSeek chat (OpenAI-совместимый API). Ключ берётся из env
+#            DEEPSEEK_API_KEY, а не из этого файла. Если ключ пуст, memoryd
+#            стартует с предупреждением и работает как noop (деградация, DESIGN §15).
+provider = "deepseek"
+model    = "deepseek-chat"
+
+[recall]
+default_token_budget = 800
+weights = { relevance = 1.0, importance = 0.5, recency = 0.4, access = 0.2 }
+
+[maint]
+decay_interval    = "24h"
+consolidate_after = "168h"                 # неделя episodic → semantic

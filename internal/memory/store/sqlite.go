@@ -551,3 +551,40 @@ func (s *sqliteStore) AllForReindex(ctx context.Context) ([]memory.Memory, error
 func (s *sqliteStore) PutVector(_ context.Context, _ string, _ []float32) error {
 	return nil
 }
+
+// ListEpisodicForConsolidation возвращает episodic-записи старше olderThan без
+// superseded_by, отсортированные по scope (для группировки consolidation-джобом),
+// затем по created_at (DESIGN.md §11). limit <= 0 означает без ограничения.
+//
+// В отличие от других выборок Store, здесь НЕ подгружаются Tags/Links (они остаются
+// nil) — потребитель (maint.Consolidator) использует только Id/Content/Scope, а
+// подгрузка тегов/связей на каждую запись была бы N+1 запросом без пользы.
+func (s *sqliteStore) ListEpisodicForConsolidation(ctx context.Context, olderThan int64, limit int) ([]memory.Memory, error) {
+	query := `
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source
+		FROM memories
+		WHERE kind = ? AND superseded_by IS NULL AND created_at < ?
+		ORDER BY scope, created_at
+	`
+	args := []any{string(memory.KindEpisodic), olderThan}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("выборка episodic для консолидации: %w", err)
+	}
+	defer rows.Close()
+
+	var episodes []memory.Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("сканирование episodic для консолидации: %w", err)
+		}
+		episodes = append(episodes, m)
+	}
+	return episodes, rows.Err()
+}

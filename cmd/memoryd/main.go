@@ -14,10 +14,15 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/mcp"
+	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/recall"
 	"agentmemory/internal/memory/store"
 	"agentmemory/internal/memory/write"
 )
+
+// deepseekAPIKeyEnv — переменная окружения с ключом DeepSeek (DESIGN.md §10). Ключ
+// никогда не читается из конфиг-файла и не логируется.
+const deepseekAPIKeyEnv = "DEEPSEEK_API_KEY"
 
 func main() {
 	// Транспорт MCP использует stdout для протокола — всё логирование только в
@@ -53,8 +58,13 @@ func run() error {
 		}
 	}()
 
+	reasoner, err := newReasoner(cfg.Reasoner)
+	if err != nil {
+		return fmt.Errorf("создание reasoner: %w", err)
+	}
+
 	w := write.New(s)
-	r := recall.New(s, cfg.Recall)
+	r := recall.New(s, cfg.Recall, reasoner)
 	srv := mcp.NewServer(w, r, s)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -65,4 +75,30 @@ func run() error {
 		return fmt.Errorf("работа сервера: %w", err)
 	}
 	return nil
+}
+
+// newReasoner создаёт Reasoner по конфигу. "" и "noop" отключают LLM-слой.
+// "deepseek" без ключа в env или с пустой model деградирует до Noop (сервер
+// должен стартовать — DESIGN.md §15): оба случая означают «LLM-слой не готов»,
+// а не ошибку конфигурации. С ключом и model — создаёт DeepSeek-клиент.
+// Неизвестный provider — ошибка при старте, это опечатка в конфиге, а не
+// runtime-деградация.
+func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
+	switch cfg.Provider {
+	case "", "noop":
+		return reason.NewNoop(), nil
+	case "deepseek":
+		key := os.Getenv(deepseekAPIKeyEnv)
+		if key == "" {
+			log.Printf("memoryd: reasoner.provider=deepseek, но %s пуст — работаю без Reasoner (Noop)", deepseekAPIKeyEnv)
+			return reason.NewNoop(), nil
+		}
+		if cfg.Model == "" {
+			log.Printf("memoryd: reasoner.provider=deepseek, но reasoner.model пуст — работаю без Reasoner (Noop)")
+			return reason.NewNoop(), nil
+		}
+		return reason.NewDeepSeek(key, cfg.Model)
+	default:
+		return nil, fmt.Errorf("неизвестный reasoner.provider %q", cfg.Provider)
+	}
 }

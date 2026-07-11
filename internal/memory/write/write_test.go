@@ -120,6 +120,68 @@ func TestSaveNearDuplicateMergesIntoExisting(t *testing.T) {
 	}
 }
 
+// TestSaveWritesSummaryInOneOperation — SaveInput.Summary попадает в запись при
+// вставке одной операцией Put (без отдельного Update).
+func TestSaveWritesSummaryInOneOperation(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	id, merged, err := w.Save(ctx, SaveInput{
+		Kind: memory.KindSemantic, Scope: "s-summary", Content: "факт с summary",
+		Summary: "краткая форма",
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if merged {
+		t.Fatalf("Save: merged = true, want false (новая запись)")
+	}
+	got, err := st.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Summary == nil || *got.Summary != "краткая форма" {
+		t.Errorf("Summary = %v, want 'краткая форма'", got.Summary)
+	}
+}
+
+// TestSaveMergeDoesNotOverwriteExistingSummary — усиление дубля (reinforce) не
+// должно переписывать summary уже существующей записи значением из нового входа:
+// новый вход — лишь подтверждение того же факта, а не более авторитетный источник.
+func TestSaveMergeDoesNotOverwriteExistingSummary(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	id1, _, err := w.Save(ctx, SaveInput{
+		Kind: memory.KindSemantic, Scope: "s-summary-merge",
+		Content: "Проект использует Go 1.23 и SQLite через mattn/go-sqlite3",
+		Summary: "старое summary",
+	})
+	if err != nil {
+		t.Fatalf("Save 1: %v", err)
+	}
+
+	id2, merged, err := w.Save(ctx, SaveInput{
+		Kind: memory.KindSemantic, Scope: "s-summary-merge",
+		Content: "Проект использует Go 1.23 и SQLite (пакет mattn/go-sqlite3)",
+		Summary: "новое summary, которое не должно применяться",
+	})
+	if err != nil {
+		t.Fatalf("Save 2: %v", err)
+	}
+	if !merged || id2 != id1 {
+		t.Fatalf("Save 2: merged=%v id=%q, want merged=true id=%q", merged, id2, id1)
+	}
+
+	got, err := st.Get(ctx, id1)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Summary == nil || *got.Summary != "старое summary" {
+		t.Errorf("Summary после мерджа = %v, want сохранённое 'старое summary'", got.Summary)
+	}
+}
+
 func TestSaveSameContentDifferentScopeIsolated(t *testing.T) {
 	ctx := context.Background()
 	w, _ := newTestWriter(t)

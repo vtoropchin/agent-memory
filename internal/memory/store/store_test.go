@@ -371,6 +371,111 @@ func TestNeighborsExcludesSuperseded(t *testing.T) {
 	}
 }
 
+func TestListEpisodicForConsolidation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	const threshold = int64(1000)
+
+	// старые episodic, scope "a" (два, для проверки сортировки внутри scope по created_at).
+	oldA1, oldA2 := newID(t), newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: oldA1, Kind: memory.KindEpisodic, Scope: "a", Content: "старое A1",
+		CreatedAt: 100, UpdatedAt: 100, Tags: []string{"t1"},
+	}); err != nil {
+		t.Fatalf("Put oldA1: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{
+		Id: oldA2, Kind: memory.KindEpisodic, Scope: "a", Content: "старое A2",
+		CreatedAt: 200, UpdatedAt: 200,
+	}); err != nil {
+		t.Fatalf("Put oldA2: %v", err)
+	}
+
+	// старая episodic, scope "b" (лексикографически раньше "a" быть не должна, "a" < "b").
+	oldBID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: oldBID, Kind: memory.KindEpisodic, Scope: "b", Content: "старое B",
+		CreatedAt: 150, UpdatedAt: 150,
+	}); err != nil {
+		t.Fatalf("Put oldB: %v", err)
+	}
+
+	// свежая episodic — не должна попасть.
+	freshID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: freshID, Kind: memory.KindEpisodic, Scope: "a", Content: "свежее",
+		CreatedAt: threshold, UpdatedAt: threshold,
+	}); err != nil {
+		t.Fatalf("Put fresh: %v", err)
+	}
+
+	// semantic (даже старая) — не должна попасть.
+	semID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: semID, Kind: memory.KindSemantic, Scope: "a", Content: "старый факт",
+		CreatedAt: 50, UpdatedAt: 50,
+	}); err != nil {
+		t.Fatalf("Put semantic: %v", err)
+	}
+
+	// superseded episodic (даже старая) — не должна попасть.
+	supersededID := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: supersededID, Kind: memory.KindEpisodic, Scope: "a", Content: "заменённое",
+		CreatedAt: 60, UpdatedAt: 60,
+	}); err != nil {
+		t.Fatalf("Put superseded source: %v", err)
+	}
+	if err := s.Supersede(ctx, supersededID, oldA1); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	t.Run("выбирает старые episodic, сортирует scope→created_at", func(t *testing.T) {
+		got, err := s.ListEpisodicForConsolidation(ctx, threshold, 0)
+		if err != nil {
+			t.Fatalf("ListEpisodicForConsolidation: %v", err)
+		}
+		wantIDs := []string{oldA1, oldA2, oldBID}
+		if len(got) != len(wantIDs) {
+			t.Fatalf("len = %d, want %d (got: %+v)", len(got), len(wantIDs), got)
+		}
+		for i, id := range wantIDs {
+			if got[i].Id != id {
+				t.Errorf("got[%d].Id = %q, want %q", i, got[i].Id, id)
+			}
+		}
+		// ListEpisodicForConsolidation намеренно не подгружает Tags/Links (не N+1) —
+		// oldA1 сохранён с тегом, но здесь он не должен вернуться.
+		if got[0].Tags != nil {
+			t.Errorf("got[0].Tags = %v, want nil (Tags не загружаются этим методом)", got[0].Tags)
+		}
+	})
+
+	t.Run("limit ограничивает выборку", func(t *testing.T) {
+		got, err := s.ListEpisodicForConsolidation(ctx, threshold, 2)
+		if err != nil {
+			t.Fatalf("ListEpisodicForConsolidation: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2", len(got))
+		}
+		if got[0].Id != oldA1 || got[1].Id != oldA2 {
+			t.Errorf("got = %+v, want [oldA1 oldA2]", got)
+		}
+	})
+
+	t.Run("слишком ранний порог даёт пустой результат", func(t *testing.T) {
+		got, err := s.ListEpisodicForConsolidation(ctx, 1, 0)
+		if err != nil {
+			t.Fatalf("ListEpisodicForConsolidation: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("got = %+v, want пусто", got)
+		}
+	})
+}
+
 func TestEmbedMetaEmptyByDefault(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

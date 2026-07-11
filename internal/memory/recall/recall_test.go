@@ -2,6 +2,7 @@ package recall
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/store"
 )
 
@@ -40,6 +42,21 @@ func putMemory(t *testing.T, ctx context.Context, s store.Store, m memory.Memory
 func defaultWeights() config.RecallWeights {
 	return config.RecallWeights{Relevance: 1.0, Importance: 0.5, Recency: 0.4, Access: 0.2}
 }
+
+// fakeReasoner — тестовая реализация reason.Reasoner: возвращает заданный результат/
+// ошибку и запоминает, был ли вызван Complete (для проверки Summarize=false).
+type fakeReasoner struct {
+	result string
+	err    error
+	called bool
+}
+
+func (f *fakeReasoner) Complete(_ context.Context, _ string) (string, error) {
+	f.called = true
+	return f.result, f.err
+}
+
+var _ reason.Reasoner = (*fakeReasoner)(nil)
 
 // Секция брифа между заголовком "### <title>" и следующим "###" или концом строки.
 func sectionOf(t *testing.T, md, title string) string {
@@ -80,7 +97,7 @@ func TestRecall_RanksByImportanceWhenRelevanceEqual(t *testing.T) {
 		CreatedAt: 1000, UpdatedAt: 1000,
 	})
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факты SQLite базе", Scope: scope})
@@ -118,7 +135,7 @@ func TestRecall_RanksByRecencyWhenRelevanceAndImportanceEqual(t *testing.T) {
 	})
 
 	// now намного дальше периода полураспада от oldID и совпадает с freshID.
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 1_000_000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "факты SQLite базе", Scope: scope})
@@ -151,7 +168,7 @@ func TestRecall_BudgetCollapsesTail(t *testing.T) {
 		})
 	}
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 2000 }))
 
 	t.Run("маленький бюджет режет хвост", func(t *testing.T) {
@@ -203,7 +220,7 @@ func TestRecall_BudgetAccountsForMarkdownWrapping(t *testing.T) {
 		})
 	}
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 2000 }))
 
 	// Бюджет заведомо меньше того, что нужно на все n записей + обвязку (заголовок,
@@ -248,7 +265,7 @@ func TestRecall_TinyBudgetStillReturnsOneRecord(t *testing.T) {
 		})
 	}
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 2000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{
@@ -290,7 +307,7 @@ func TestRecall_GroupsByKindInOrder(t *testing.T) {
 		Importance: 3, CreatedAt: 3, UpdatedAt: 3,
 	})
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "термин факт группировку", Scope: scope})
@@ -335,7 +352,7 @@ func TestRecall_FiltersByScope(t *testing.T) {
 		Importance: 5, CreatedAt: 1, UpdatedAt: 1,
 	})
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "уникальный маркер scope", Scope: "project:mine"})
@@ -357,7 +374,7 @@ func TestRecall_EmptyResultIsFriendly(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 
 	brief, err := r.Recall(ctx, memory.Query{Text: "ничего не найдётся", Scope: "project:empty"})
@@ -395,7 +412,7 @@ func TestRecall_TouchesIncludedMemories(t *testing.T) {
 		t.Fatalf("AccessCount до recall = %d, want 0", before.AccessCount)
 	}
 
-	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()},
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
 		WithNow(func() int64 { return 1000 }))
 	brief, err := r.Recall(ctx, memory.Query{Text: "запись touch recall", Scope: scope})
 	if err != nil {
@@ -414,5 +431,187 @@ func TestRecall_TouchesIncludedMemories(t *testing.T) {
 	}
 	if after.AccessedAt == nil {
 		t.Errorf("AccessedAt после recall не проставлен")
+	}
+}
+
+func TestRecall_SummarizeSuccess_AddsSummarySection(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:summarize-ok"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "факт для проверки суммаризации брифа", Summary: strPtr("Факт про суммаризацию"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	fr := &fakeReasoner{result: "Короткая сводка о фактах проекта."}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "факт суммаризация брифа", Scope: scope, Summarize: true})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if !fr.called {
+		t.Fatalf("Reasoner.Complete не был вызван при Summarize=true")
+	}
+	if !strings.HasPrefix(brief.Markdown, "### Сводка") {
+		t.Fatalf("бриф должен начинаться с секции ### Сводка:\n%s", brief.Markdown)
+	}
+	if !strings.Contains(brief.Markdown, "Короткая сводка о фактах проекта.") {
+		t.Errorf("бриф должен содержать текст сводки:\n%s", brief.Markdown)
+	}
+	if !strings.Contains(brief.Markdown, "Факт про суммаризацию") {
+		t.Errorf("сводка не должна вытеснять сами записи из брифа:\n%s", brief.Markdown)
+	}
+}
+
+func TestRecall_SummarizeError_DegradesWithoutFailingRecall(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:summarize-err"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "факт для проверки деградации при ошибке суммаризации", Summary: strPtr("Факт про деградацию"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	fr := &fakeReasoner{err: fmt.Errorf("deepseek: недоступен")}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "факт деградация суммаризации", Scope: scope, Summarize: true})
+	if err != nil {
+		t.Fatalf("Recall не должен возвращать ошибку при сбое Reasoner: %v", err)
+	}
+	if !fr.called {
+		t.Fatalf("Reasoner.Complete не был вызван при Summarize=true")
+	}
+	if strings.Contains(brief.Markdown, "### Сводка") {
+		t.Errorf("бриф не должен содержать секцию сводки при ошибке Reasoner:\n%s", brief.Markdown)
+	}
+	if !strings.Contains(brief.Markdown, "Факт про деградацию") {
+		t.Errorf("бриф должен остаться со своими записями при ошибке Reasoner:\n%s", brief.Markdown)
+	}
+}
+
+func TestRecall_SummarizeFalse_DoesNotCallReasoner(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:summarize-off"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "факт без запроса на суммаризацию", Summary: strPtr("Факт без сводки"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	fr := &fakeReasoner{result: "эта сводка не должна попасть в бриф"}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "факт без сводки", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if fr.called {
+		t.Fatalf("Reasoner.Complete не должен вызываться при Summarize=false")
+	}
+	if strings.Contains(brief.Markdown, "### Сводка") {
+		t.Errorf("бриф не должен содержать секцию сводки при Summarize=false:\n%s", brief.Markdown)
+	}
+}
+
+func TestRecall_SummarizeTrue_EmptyResultSkipsReasoner(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	fr := &fakeReasoner{result: "эта сводка не должна вызываться вовсе"}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "ничего не найдётся", Scope: "project:summarize-empty", Summarize: true})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if fr.called {
+		t.Fatalf("Reasoner.Complete не должен вызываться на пустом результате (платный вызов на 'ничего не найдено')")
+	}
+	if brief.Count != 0 || brief.Collapsed != 0 {
+		t.Errorf("brief = %+v, want Count=0 Collapsed=0", brief)
+	}
+	if !strings.Contains(brief.Markdown, "не найдена") {
+		t.Errorf("markdown должен быть стандартным 'не найдено':\n%s", brief.Markdown)
+	}
+	if strings.Contains(brief.Markdown, "### Сводка") {
+		t.Errorf("пустой бриф не должен содержать секцию сводки:\n%s", brief.Markdown)
+	}
+}
+
+func TestRecall_SummarizeSuccess_ApproxTokensReflectsFinalMarkdown(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:summarize-tokens"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "факт для проверки пересчёта ApproxTokens после сводки", Summary: strPtr("Факт про токены"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	fr := &fakeReasoner{result: "Довольно длинная сводка, которая заметно увеличивает размер итогового Markdown-брифа."}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, fr,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "факт токены сводка", Scope: scope, Summarize: true})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if !fr.called {
+		t.Fatalf("Reasoner.Complete не был вызван при Summarize=true")
+	}
+
+	wantTokens := len([]rune(brief.Markdown)) / 4
+	if brief.ApproxTokens != wantTokens {
+		t.Errorf("ApproxTokens = %d, want %d (пересчёт по итоговому Markdown со сводкой)", brief.ApproxTokens, wantTokens)
+	}
+
+	// ApproxTokens после сводки должен быть больше, чем оценка брифа без неё
+	// (те же записи, без секции "### Сводка").
+	withoutSummary, err := r.Recall(ctx, memory.Query{Text: "факт токены сводка", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall (без Summarize): %v", err)
+	}
+	if brief.ApproxTokens <= withoutSummary.ApproxTokens {
+		t.Errorf("ApproxTokens со сводкой (%d) должен быть больше, чем без неё (%d)",
+			brief.ApproxTokens, withoutSummary.ApproxTokens)
+	}
+}
+
+func TestRecall_NoopReasoner_LeavesBriefUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:summarize-noop"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "факт для проверки noop reasoner", Summary: strPtr("Факт без реального reasoner"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "факт noop reasoner", Scope: scope, Summarize: true})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if strings.Contains(brief.Markdown, "### Сводка") {
+		t.Errorf("Noop Reasoner возвращает пустую строку — бриф не должен получить секцию сводки:\n%s", brief.Markdown)
+	}
+	if !strings.Contains(brief.Markdown, "Факт без реального reasoner") {
+		t.Errorf("бриф должен остаться неизменным при Noop reasoner:\n%s", brief.Markdown)
 	}
 }

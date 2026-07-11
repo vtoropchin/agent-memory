@@ -55,6 +55,7 @@ type Query struct {
 	Limit       int      // максимум кандидатов от источника
 	TokenBudget int      // бюджет токенов для сборки брифа
 	SinceTs     int64    // фильтр свежести: только записи с created_at >= SinceTs (0 = без фильтра)
+	Summarize   bool     // запросить у Reasoner LLM-сводку брифа (DESIGN.md §8)
 }
 
 // Candidate — кандидат на попадание в бриф: запись + оценка релевантности

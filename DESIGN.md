@@ -163,6 +163,8 @@ type Store interface {
     Neighbors(ctx context.Context, id string) ([]Memory, error)                    // граф-обход
     Supersede(ctx context.Context, oldID, newID string) error
     Touch(ctx context.Context, id string) error                                    // accessed_at++, access_count++
+    // maintenance-выборки (§11); Tags/Links не заполняются
+    ListEpisodicForConsolidation(ctx context.Context, olderThan int64, limit int) ([]Memory, error)
     // reindex-поддержка
     EmbedMeta(ctx context.Context) (model string, dim int, err error)
     ResetVectorIndex(ctx context.Context, model string, dim int) error

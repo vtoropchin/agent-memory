@@ -76,7 +76,8 @@ type SaveInput struct {
 	Kind       memory.Kind
 	Scope      string
 	Content    string
-	Importance int // 1..5; 0 трактуется как «не указано» → дефолт 3
+	Summary    string // ультра-короткая форма для брифа (DESIGN.md §4); пусто = не указана.
+	Importance int    // 1..5; 0 трактуется как «не указано» → дефолт 3
 	Tags       []string
 	Links      []string // id целевых записей; висячие ссылки пропускаются молча (см. Save)
 	Source     string   // session id / откуда пришло; пусто = не указан
@@ -98,10 +99,13 @@ type UpdateInput struct {
 //  1. валидирует и нормализует вход;
 //  2. ищет похожую запись в том же scope+kind (лексически + SimHash по content) —
 //     если находит, усиливает её (объединяет теги, поднимает importance, Touch) и
-//     возвращает её id вместо вставки новой записи (merged=true);
+//     возвращает её id вместо вставки новой записи (merged=true); Summary из in при
+//     этом НЕ применяется (см. reinforce) — усиление не должно тихо переписывать
+//     summary уже существующего факта чужим значением;
 //  3. резолвит Links на существующие записи (см. ограничение ниже);
-//  4. генерирует ULID и вставляет запись через Store.Put (FTS5-индекс обновляется
-//     триггерами внутри Put автоматически); merged=false.
+//  4. генерирует ULID и вставляет запись (вместе с Summary, если он передан) через
+//     Store.Put одной операцией (FTS5-индекс обновляется триггерами внутри Put
+//     автоматически); merged=false.
 //
 // Возвращаемый merged честно сообщает вызывающему коду (mcp.handleSave), был ли
 // факт слит с существующим дублем, вместо вставки новой записи, — без отдельного
@@ -154,6 +158,10 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 	if s := strings.TrimSpace(in.Source); s != "" {
 		sourcePtr = &s
 	}
+	var summaryPtr *string
+	if s := strings.TrimSpace(in.Summary); s != "" {
+		summaryPtr = &s
+	}
 
 	now := w.now()
 	m := memory.Memory{
@@ -161,6 +169,7 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		Kind:       in.Kind,
 		Scope:      scope,
 		Content:    content,
+		Summary:    summaryPtr,
 		Importance: importance,
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -231,6 +240,9 @@ func isNearDuplicate(normNew, normOld string) bool {
 // reinforce усиливает существующую запись вместо вставки дубля: объединяет теги
 // (union), поднимает importance до максимума старого/нового, обновляет updated_at
 // и вызывает Touch (accessed_at/access_count) — сигнал повторного использования факта.
+// Summary новой записи (SaveInput.Summary) сюда сознательно не передаётся и не
+// применяется — усиление дубля не должно тихо переписывать summary существующего
+// факта значением из входа, который был признан просто повторением того же факта.
 //
 // Полную запись загружаем через Store.Get, а не переиспользуем кандидата из
 // SearchLexical: у кандидата не заполнены ни Tags (см. store.SearchLexical), ни,

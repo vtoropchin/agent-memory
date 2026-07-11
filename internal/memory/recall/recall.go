@@ -6,6 +6,7 @@ package recall
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/store"
 )
 
@@ -42,6 +44,11 @@ const (
 	tokenCharsPerToken = 4
 )
 
+// summarizePrompt — инструкция для Reasoner при Query.Summarize (DESIGN.md §8):
+// просим короткую сводку брифа, без выдумывания фактов и со сменой языка исходных записей.
+const summarizePrompt = "Сожми выжимку памяти в один короткий абзац-сводку (3–5 предложений), " +
+	"сохрани язык исходных записей, не выдумывай фактов."
+
 // Option настраивает Recaller при создании.
 type Option func(*Recaller)
 
@@ -56,11 +63,13 @@ type Recaller struct {
 	weights       config.RecallWeights
 	defaultBudget int
 	now           func() int64
+	reasoner      reason.Reasoner
 }
 
 // New создаёт Recaller поверх заданного Store с весами и дефолтным бюджетом токенов
-// из конфига (DESIGN.md §13).
-func New(s store.Store, cfg config.RecallConfig, opts ...Option) *Recaller {
+// из конфига (DESIGN.md §13). reasoner используется опционально (Query.Summarize) —
+// на Этапе 1 передаётся reason.NewNoop().
+func New(s store.Store, cfg config.RecallConfig, reasoner reason.Reasoner, opts ...Option) *Recaller {
 	budget := cfg.DefaultTokenBudget
 	if budget <= 0 {
 		budget = 800
@@ -70,6 +79,7 @@ func New(s store.Store, cfg config.RecallConfig, opts ...Option) *Recaller {
 		weights:       cfg.Weights,
 		defaultBudget: budget,
 		now:           func() int64 { return time.Now().Unix() },
+		reasoner:      reasoner,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -129,6 +139,8 @@ func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, er
 
 	merged := fuseRRF(lexical, vector)
 	if len(merged) == 0 {
+		// Нечего суммировать и незачем платить за вызов Reasoner на тексте
+		// "ничего не найдено" — ранний выход до withSummary.
 		return emptyBrief(), nil
 	}
 
@@ -149,7 +161,33 @@ func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, er
 	}
 
 	brief := buildBrief(included, collapsed)
+	if q.Summarize {
+		brief = r.withSummary(ctx, brief)
+	}
 	return brief, nil
+}
+
+// withSummary просит Reasoner сжать уже собранный бриф в короткую сводку и, если
+// получилось, добавляет секцию "### Сводка" перед остальным телом брифа. Сводка не
+// участвует в token_budget-отборе ЗАПИСЕЙ (селектится уже после сборки Markdown) —
+// Count/Collapsed остаются в терминах самих записей. Но ApproxTokens пересчитывается
+// по итоговому Markdown (с добавленной секцией) той же эвристикой estimateTokens, что
+// и при сборке брифа — иначе поле лжёт о фактическом размере выдачи (DESIGN.md §15:
+// честность выдачи). Любая ошибка Reasoner или пустой ответ деградируют до брифа без
+// сводки — ошибка наружу не отдаётся, только в лог.
+func (r *Recaller) withSummary(ctx context.Context, brief memory.Brief) memory.Brief {
+	summary, err := r.reasoner.Complete(ctx, summarizePrompt+"\n\n"+brief.Markdown)
+	if err != nil {
+		log.Printf("recall: суммаризация брифа: %v", err)
+		return brief
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return brief
+	}
+	brief.Markdown = "### Сводка\n\n" + summary + "\n\n" + brief.Markdown
+	brief.ApproxTokens = estimateTokens(brief.Markdown)
+	return brief
 }
 
 // fuseRRF сливает кандидатов от нескольких источников поиска через Reciprocal Rank

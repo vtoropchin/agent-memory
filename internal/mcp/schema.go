@@ -46,6 +46,7 @@ type recallInput struct {
 	Scope       string   `json:"scope,omitempty" jsonschema:"фильтр по пространству имён: user:*, project:<name> или agent:self"`
 	Kinds       []string `json:"kinds,omitempty" jsonschema:"фильтр по типу памяти; пусто — искать по всем типам"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"бюджет токенов на бриф (по умолчанию берётся из конфига)"`
+	Summarize   bool     `json:"summarize,omitempty" jsonschema:"дополнительно сжать бриф в короткую LLM-сводку (### Сводка) поверх списка записей"`
 }
 
 func recallInputSchema() *jsonschema.Schema {
