@@ -1,11 +1,13 @@
-.PHONY: build test run import install install-system uninstall-system bin/memoryd
+.PHONY: build test run import install install-user install-system uninstall-system bin/memoryd
 
 # mattn/go-sqlite3 требует CGO и тег sqlite_fts5 для поддержки полнотекстового поиска FTS5.
 
 # PREFIX — куда install-system ставит бинарь. Дефолт /usr/local (bin на PATH у всех
 # пользователей). Переопределяется: make install-system PREFIX=~/.local
 PREFIX ?= /usr/local
-BINDIR := $(PREFIX)/bin
+# Рекурсивное присваивание (=), а не := — чтобы target-специфичный PREFIX
+# (напр. в install-user) корректно доходил до BINDIR.
+BINDIR = $(PREFIX)/bin
 # SUDO — повышение прав для записи в системный каталог (/usr/local/bin принадлежит
 # root). Для пользовательского PREFIX (напр. ~/.local, ~/bin) отключается пустым
 # значением: make install-system PREFIX=~/.local SUDO=
@@ -30,6 +32,19 @@ install-system: bin/memoryd
 	$(SUDO) mkdir -p "$(BINDIR)"
 	$(SUDO) install -m 0755 bin/memoryd "$(BINDIR)/memoryd"
 	@echo "установлено: $(BINDIR)/memoryd"
+
+# install-user ставит memoryd ТОЛЬКО для текущего пользователя, БЕЗ sudo, в
+# ~/.local/bin (переопределяет PREFIX и обнуляет SUDO для install-system).
+# Для самого MCP-сервера PATH не нужен — .mcp.json хранит абсолютный путь бинаря;
+# PATH нужен лишь чтобы звать `memoryd` короткой командой, поэтому в конце —
+# подсказка, если ~/.local/bin ещё не на PATH.
+install-user: PREFIX := $(HOME)/.local
+install-user: SUDO :=
+install-user: install-system
+	@case ":$$PATH:" in \
+	  *":$(HOME)/.local/bin:"*) echo "$(HOME)/.local/bin уже на PATH — можно звать: memoryd" ;; \
+	  *) echo "добавь в ~/.zshrc: export PATH=\"$$HOME/.local/bin:$$PATH\"  (иначе бинарь ставится, но команда memoryd не найдётся)" ;; \
+	esac
 
 # uninstall-system удаляет бинарь, поставленный install-system.
 uninstall-system:
