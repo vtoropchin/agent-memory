@@ -25,14 +25,14 @@ foundational (набор scope в поиске + идентичность про
 | Задача | Файл | Статус |
 |--------|------|--------|
 | MP-1 Ядро модели scope | [mp-1-scope-core.md](mp-1-scope-core.md) | ✅ выполнена |
-| MP-2 Разрешение scope в recall/save + memoryd | [mp-2-scope-recall-wiring.md](mp-2-scope-recall-wiring.md) | ⏳ следующая (MP-1 готова) |
+| MP-2 Разрешение scope в recall/save + memoryd | [mp-2-scope-recall-wiring.md](mp-2-scope-recall-wiring.md) | ✅ выполнена |
 
 ## Этап 3 — Embedder + гибридный поиск
 
 | Задача | Файл | Статус |
 |--------|------|--------|
 | 3.1 Ollama-Embedder | [3.1-ollama-embedder.md](3.1-ollama-embedder.md) | ✅ выполнена |
-| 3.2 sqlite-vec в Store | [3.2-sqlite-vec-store.md](3.2-sqlite-vec-store.md) | ⏳ ожидает MP-1 |
+| 3.2 sqlite-vec в Store | [3.2-sqlite-vec-store.md](3.2-sqlite-vec-store.md) | ⏳ разблокирована (MP-1 готова) |
 | 3.3 Вектор в write path | [3.3-write-vector.md](3.3-write-vector.md) | ⏳ ожидает 3.1, 3.2 |
 | 3.4 Гибридный recall | [3.4-hybrid-recall.md](3.4-hybrid-recall.md) | ⏳ ожидает 3.1, 3.2, MP-1 |
 | 3.5 Reindex при смене модели | [3.5-reindex.md](3.5-reindex.md) | ⏳ ожидает 3.1, 3.2 |
@@ -51,7 +51,7 @@ foundational (набор scope в поиске + идентичность про
 | Задача | Файл | Статус |
 |--------|------|--------|
 | 5.1 Импортёр файловой памяти | [5.1-import-file-memory.md](5.1-import-file-memory.md) | ⏳ |
-| 5.2 Подключение memoryd к проекту | [5.2-connect-memoryd.md](5.2-connect-memoryd.md) | ⏳ ожидает 5.1, MP-2 |
+| 5.2 Подключение memoryd к проекту | [5.2-connect-memoryd.md](5.2-connect-memoryd.md) | ⏳ ожидает 5.1 (MP-2 готова) |
 
 ## Общие требования ко всем задачам
 

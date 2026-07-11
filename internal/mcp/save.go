@@ -16,9 +16,17 @@ import (
 // существующим дублем (reinforce) вместо вставки новой записи, — поэтому здесь не
 // нужен дополнительный запрос к Store для эвристического определения слияния.
 func (s *Server) handleSave(ctx context.Context, _ *sdkmcp.CallToolRequest, in saveInput) (*sdkmcp.CallToolResult, any, error) {
+	scope := in.Scope
+	if scope == "" {
+		// Явный scope не передан — подставляем "домашний" scope инстанса
+		// (project:<name>). Если мультипроектность выключена (project не задан),
+		// SaveScope() вернёт "" и Writer.Save сам вернёт write.ErrEmptyScope.
+		scope = s.scope.SaveScope()
+	}
+
 	id, merged, err := s.writer.Save(ctx, write.SaveInput{
 		Kind:       memory.Kind(in.Kind),
-		Scope:      in.Scope,
+		Scope:      scope,
 		Content:    in.Content,
 		Importance: in.Importance,
 		Tags:       in.Tags,

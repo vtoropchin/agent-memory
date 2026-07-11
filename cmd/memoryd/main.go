@@ -65,7 +65,7 @@ func run() error {
 
 	w := write.New(s)
 	r := recall.New(s, cfg.Recall, reasoner)
-	srv := mcp.NewServer(w, r, s)
+	srv := mcp.NewServer(w, r, s, cfg.Scope)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

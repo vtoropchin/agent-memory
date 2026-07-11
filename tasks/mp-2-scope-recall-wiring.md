@@ -1,6 +1,14 @@
 # Задача MP-2 — Разрешение scope в recall/save и связка в memoryd
 
-**Статус:** ⏳ ожидает MP-1 (и координируется с 3.4 — см. ниже)
+**Статус:** ✅ выполнено 2026-07-11. `mcp.NewServer` теперь принимает `config.ScopeConfig`;
+`handleSave` подставляет `SaveScope()` при пустом входном scope (Writer.Save сам
+возвращает `ErrEmptyScope`, если и дефолт пуст); `handleRecall` разрешает набор scope
+через `resolveRecallScopes` (приоритет: `in.Scopes` > `in.Scope` > `cfg.RecallScopes()`);
+схема `memory_recall` получила поле `scopes` (back-compat с одиночным `scope`);
+`cmd/memoryd` пробрасывает `cfg.Scope`; `config.example.toml` дополнен секцией `[scope]`.
+Новые тесты `internal/mcp/server_test.go`: `TestResolveRecallScopes` (5 подслучаев),
+`TestSaveDefaultScopeFromInstance` (3 подслучая). Билд и `go test -tags sqlite_fts5
+-count=1 ./...` зелёные целиком (все пакеты PASS).
 **Область:** `internal/mcp`, `cmd/memoryd`, `internal/memory/recall` (только проброс)
 **Зависимости:** MP-1 (Query.Scopes, ScopeConfig, хелперы)
 

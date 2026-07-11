@@ -33,3 +33,16 @@ weights = { relevance = 1.0, importance = 0.5, recency = 0.4, access = 0.2 }
 [maint]
 decay_interval    = "24h"
 consolidate_after = "168h"                 # неделя episodic → semantic
+
+[scope]
+# Мультипроектность (DESIGN.md §2.1): один общий файл БД, изоляция через scope.
+# Каждый проект запускает свой memoryd (через .mcp.json в репозитории) со своим
+# project — отсюда выводится "домашнее" пространство "project:<name>".
+#
+# project — имя текущего проекта. Пусто (дефолт) — мультипроектность выключена:
+#           memory_save требует явный scope в каждом вызове, memory_recall без
+#           scope/scopes ищет по всей базе без фильтра (одно-проектный/adhoc-режим).
+project = "agentmemory"
+# shared — пространства, всегда добавляемые к recall по умолчанию поверх
+#          "домашнего" project:<name> (общий пользовательский слой поверх проектов).
+shared  = ["user:*"]

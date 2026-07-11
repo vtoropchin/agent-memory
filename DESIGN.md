@@ -312,9 +312,12 @@ DeepSeek chat (OpenAI-совместимый) в роли текстового �
   { "kind": "semantic", "content": "...", "importance": 4,
     "tags": ["go","stack"], "scope": "project:agentmemory", "links": ["build-uses-make"] }
   ```
-- **`memory_recall`** — главный инструмент, возвращает Markdown-бриф:
+- **`memory_recall`** — главный инструмент, возвращает Markdown-бриф. Фильтр по
+  пространствам — набор `scopes` (перекрывает одиночный back-compat `scope`);
+  пусто — дефолт инстанса (свой `project:<name>` + общий `user:*`), а при
+  ненастроенном `project` — без фильтра (§2.1):
   ```json
-  { "query": "как собирать и тестировать", "scope": "project:agentmemory",
+  { "query": "как собирать и тестировать", "scopes": ["project:agentmemory","user:*"],
     "kinds": ["procedural","semantic"], "token_budget": 800 }
   ```
 - **`memory_update`** — правка факта (в т.ч. пометка устаревшим).

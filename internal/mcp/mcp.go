@@ -10,6 +10,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"agentmemory/internal/config"
 	"agentmemory/internal/memory/recall"
 	"agentmemory/internal/memory/store"
 	"agentmemory/internal/memory/write"
@@ -29,16 +30,20 @@ type Server struct {
 	writer   *write.Writer
 	recaller *recall.Recaller
 	store    store.Store
+	scope    config.ScopeConfig
 }
 
 // NewServer создаёт MCP-сервер поверх уже сконструированных зависимостей и
-// регистрирует инструменты. Транспорт не запускается — для этого вызови Run.
-func NewServer(w *write.Writer, r *recall.Recaller, s store.Store) *Server {
+// регистрирует инструменты. scope задаёт дефолты save/recall инстанса (DESIGN.md
+// §2.1) — приоритет всегда у явного scope из вызова инструмента. Транспорт не
+// запускается — для этого вызови Run.
+func NewServer(w *write.Writer, r *recall.Recaller, s store.Store, scope config.ScopeConfig) *Server {
 	srv := &Server{
 		sdk:      sdkmcp.NewServer(&sdkmcp.Implementation{Name: serverName, Version: serverVersion}, nil),
 		writer:   w,
 		recaller: r,
 		store:    s,
+		scope:    scope,
 	}
 	srv.registerTools()
 	return srv

@@ -8,10 +8,28 @@ tags: [roadmap, progress]
 Состояние проекта на 2026-07-11: **Этап 1 (MVP) закоммичен** (`f9fd7c5`),
 **Этап 2 (Reasoner) закоммичен** (`6479186`), **задача 3.1 (Ollama-Embedder) закоммичена**
 (`153524d`), **планирование мультипроектности закоммичено** (`c09c9ab` — только DESIGN §2.1
-+ task-файлы mp-1/mp-2, без кода). **Задача MP-1 (ядро модели scope) выполнена и
-финализирована** в рабочем дереве (коммит в этой сессии). Бэклог этапов 3–5 нарезан по
-файлам в `tasks/` (см. [[task-files]]); **каждая задача выполняется в отдельной новой
-сессии** — указание пользователя.
++ task-файлы mp-1/mp-2, без кода). **Задача MP-1 (ядро модели scope) закоммичена** (`d480d62`).
+**Задача MP-2 (разрешение scope в save/recall + связка в memoryd) выполнена и финализирована**
+в рабочем дереве (коммит в этой сессии). Бэклог этапов 3–5 нарезан по файлам в `tasks/`
+(см. [[task-files]]); **каждая задача выполняется в отдельной новой сессии** — указание
+пользователя.
+
+**Сделано в MP-2 (✅, [[scope-multiproject]]):** разрешение scope на входе MCP-инструментов.
+`mcp.NewServer(w, r, s, scope config.ScopeConfig)` — Server хранит `scope`. `handleSave`:
+пустой входной scope → `s.scope.SaveScope()`; если и он пуст — `Writer.Save` сам вернёт
+`write.ErrEmptyScope` (проверка домена не дублируется в mcp). `handleRecall` через новый
+метод `resolveRecallScopes(in)` заполняет `Query.Scopes` по приоритету: `in.Scopes` >
+одиночный `in.Scope` (back-compat) > `s.scope.RecallScopes()` (project + Shared) > `nil`
+(adhoc, без фильтра). Схема `memory_recall` получила поле `scopes []string` рядом с
+`scope`. `cmd/memoryd` пробрасывает `cfg.Scope`; `config.example.toml` — секция `[scope]`;
+DESIGN §12 — пример recall с `scopes`. **Пакет `recall` не тронут:** `candQuery := q` уже
+пробрасывает `Query.Scopes` в store. **Проверено (факты):** билд+vet `-tags sqlite_fts5`
+чисты; `go test ./...` весь зелёный; арх-ревью go-reviewer — «соответствует §2.1», 1
+косметика (пример §12, устранён); code review high — 0 находок; симплификация — заменил
+хендмейд `equalStrings` на stdlib `slices.Equal`. **e2e verify:** `TestScopeIsolationE2E` —
+два Server с разными project над ОДНИМ файлом БД через полный read-path (handleRecall →
+Recaller.Recall → store): каждый видит свой `project:*` + `user:*`, чужой `project:*` не
+протекает. Тесты `TestResolveRecallScopes` (5), `TestSaveDefaultScopeFromInstance` (3).
 
 **Сделано в MP-1 (✅, [[scope-multiproject]]):** foundational-задача набора scope.
 `Query.Scopes []string` в `types.go` (пусто → откат на одиночный `Scope`; оба пусты → без
@@ -64,10 +82,10 @@ stdio: save→recall, деградация без ключа (Noop + warning, st
 (новые файлы уцелели) — восстановлено агентами по файлам задач. Урок: коммитить сразу
 после финализации этапа.
 
-**Следующий шаг:** задача [tasks/mp-2](../../tasks/mp-2-scope-recall-wiring.md) (разрешение
-scope в mcp save/recall + проброс `ScopeConfig` в memoryd) — теперь разблокирована MP-1;
-после неё разблокируются 3.2/3.4/3.6/5.2. Порядок и зависимости — tasks/README.md.
-ollama+bge-m3 у пользователя есть.
+**Следующий шаг:** задача [tasks/3.2](../../tasks/3.2-sqlite-vec-store.md) (sqlite-vec в
+Store) — разблокирована (MP-1 применил scopePredicate в SearchLexical, та же точка для
+SearchVector). После 3.2 открываются 3.3/3.4/3.5. MP-2 закрыта → 5.2 ждёт только 5.1.
+Порядок и зависимости — tasks/README.md. ollama+bge-m3 у пользователя есть.
 
 **Как применять:** обновляй этот файл по мере закрытия задач/этапов. Отмечай, что реально
 собрано/протестировано/запущено (с фактами), а не только «сделано».

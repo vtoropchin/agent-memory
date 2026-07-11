@@ -43,7 +43,8 @@ func saveInputSchema() *jsonschema.Schema {
 // recallInput — вход инструмента memory_recall (DESIGN.md §12).
 type recallInput struct {
 	Query       string   `json:"query" jsonschema:"текст запроса — что нужно вспомнить, в свободной форме"`
-	Scope       string   `json:"scope,omitempty" jsonschema:"фильтр по пространству имён: user:*, project:<name> или agent:self"`
+	Scope       string   `json:"scope,omitempty" jsonschema:"фильтр по одиночному пространству имён: user:*, project:<name> или agent:self (back-compat, см. scopes)"`
+	Scopes      []string `json:"scopes,omitempty" jsonschema:"фильтр по набору пространств имён, перекрывает scope, напр. [\"project:<name>\", \"user:*\"]; пусто — дефолт инстанса: свой проект (project:<name>) плюс общий user:*; если у инстанса не настроен проект — без фильтра"`
 	Kinds       []string `json:"kinds,omitempty" jsonschema:"фильтр по типу памяти; пусто — искать по всем типам"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"бюджет токенов на бриф (по умолчанию берётся из конфига)"`
 	Summarize   bool     `json:"summarize,omitempty" jsonschema:"дополнительно сжать бриф в короткую LLM-сводку (### Сводка) поверх списка записей"`

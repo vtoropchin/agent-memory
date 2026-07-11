@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,10 +19,25 @@ import (
 
 // newTestServer собирает Server поверх свежего файлового SQLite-хранилища —
 // без реального stdio-транспорта, ровно то, что нужно для проверки роутинга
-// инструментов на реальном стеке write/recall/store.
+// инструментов на реальном стеке write/recall/store. scope пуст (дефолт
+// config.Default().Scope: мультипроектность выключена) — используй
+// newTestServerWithScope, если тесту нужен настроенный project.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "m.db")
+	return newTestServerWithScope(t, config.Default().Scope)
+}
+
+// newTestServerWithScope — как newTestServer, но с явно заданным ScopeConfig, для
+// проверки разрешения дефолтов save/recall по DESIGN.md §2.1.
+func newTestServerWithScope(t *testing.T, scope config.ScopeConfig) *Server {
+	t.Helper()
+	return newServerOnDB(t, filepath.Join(t.TempDir(), "m.db"), scope)
+}
+
+// newServerOnDB собирает Server поверх БД по заданному пути — позволяет поднять
+// несколько инстансов над одним файлом (проверка изоляции проектов, DESIGN.md §2.1).
+func newServerOnDB(t *testing.T, dbPath string, scope config.ScopeConfig) *Server {
+	t.Helper()
 	s, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -29,7 +46,7 @@ func newTestServer(t *testing.T) *Server {
 
 	w := write.New(s)
 	r := recall.New(s, config.Default().Recall, reason.NewNoop())
-	return NewServer(w, r, s)
+	return NewServer(w, r, s, scope)
 }
 
 func TestSaveThenRecall(t *testing.T) {
@@ -217,6 +234,161 @@ func TestForgetUnknownIDNotPanic(t *testing.T) {
 	_, _, err := srv.handleForget(ctx, nil, forgetInput{ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"})
 	if err == nil {
 		t.Fatal("ожидалась ошибка на неизвестный id, получили nil")
+	}
+}
+
+// TestResolveRecallScopes проверяет разрешение набора scope для memory_recall
+// (DESIGN.md §2.1): приоритет явного scopes/scope из вызова над дефолтом
+// инстанса, и adhoc-режим (без фильтра) при незаданном project.
+func TestResolveRecallScopes(t *testing.T) {
+	alpha := newTestServerWithScope(t, config.ScopeConfig{Project: "alpha", Shared: []string{"user:*"}})
+	adhoc := newTestServerWithScope(t, config.ScopeConfig{}) // project не задан
+
+	t.Run("дефолт инстанса при пустых scope/scopes", func(t *testing.T) {
+		got := alpha.resolveRecallScopes(recallInput{Query: "x"})
+		want := []string{"project:alpha", "user:*"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("resolveRecallScopes() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("явный scopes перекрывает дефолт", func(t *testing.T) {
+		got := alpha.resolveRecallScopes(recallInput{Query: "x", Scopes: []string{"project:beta"}})
+		want := []string{"project:beta"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("resolveRecallScopes() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("явный одиночный scope даёт набор из одного элемента", func(t *testing.T) {
+		got := alpha.resolveRecallScopes(recallInput{Query: "x", Scope: "agent:self"})
+		want := []string{"agent:self"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("resolveRecallScopes() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("scopes перекрывает и scope, если оба заданы", func(t *testing.T) {
+		got := alpha.resolveRecallScopes(recallInput{Query: "x", Scope: "agent:self", Scopes: []string{"project:beta", "user:*"}})
+		want := []string{"project:beta", "user:*"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("resolveRecallScopes() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("adhoc-режим без project — без фильтра", func(t *testing.T) {
+		got := adhoc.resolveRecallScopes(recallInput{Query: "x"})
+		if len(got) != 0 {
+			t.Fatalf("resolveRecallScopes() = %v, want пусто (без фильтра)", got)
+		}
+	})
+}
+
+// TestSaveDefaultScopeFromInstance проверяет, что memory_save без явного scope
+// пишет запись в "домашний" scope инстанса (project:<name>), а при выключенной
+// мультипроектности (project не задан) возвращает write.ErrEmptyScope.
+func TestSaveDefaultScopeFromInstance(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("save без scope пишет в project:<name>", func(t *testing.T) {
+		srv := newTestServerWithScope(t, config.ScopeConfig{Project: "alpha", Shared: []string{"user:*"}})
+
+		res, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "факт без явного scope"})
+		if err != nil {
+			t.Fatalf("handleSave: %v", err)
+		}
+		id := extractID(t, textOf(res))
+
+		m, err := srv.store.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("store.Get: %v", err)
+		}
+		if m.Scope != "project:alpha" {
+			t.Fatalf("scope = %q, want %q", m.Scope, "project:alpha")
+		}
+	})
+
+	t.Run("явный scope не переопределяется дефолтом", func(t *testing.T) {
+		srv := newTestServerWithScope(t, config.ScopeConfig{Project: "alpha", Shared: []string{"user:*"}})
+
+		res, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "факт с явным scope", Scope: "user:*"})
+		if err != nil {
+			t.Fatalf("handleSave: %v", err)
+		}
+		id := extractID(t, textOf(res))
+
+		m, err := srv.store.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("store.Get: %v", err)
+		}
+		if m.Scope != "user:*" {
+			t.Fatalf("scope = %q, want %q", m.Scope, "user:*")
+		}
+	})
+
+	t.Run("save без scope при выключенной мультипроектности — ошибка", func(t *testing.T) {
+		srv := newTestServerWithScope(t, config.ScopeConfig{}) // project не задан
+
+		_, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "факт без scope, без дефолта"})
+		if !errors.Is(err, write.ErrEmptyScope) {
+			t.Fatalf("err = %v, want errors.Is(err, write.ErrEmptyScope)", err)
+		}
+	})
+}
+
+// TestScopeIsolationE2E — сквозная проверка критерия приёмки MP-2 (DESIGN.md §2.1):
+// два инстанса memoryd с разными project над ОДНИМ файлом БД. Каждый видит через
+// memory_recall свой project:<name> и общий user:*, но не чужой project:*. Прогоняет
+// весь read-path целиком (handleRecall → Recaller.Recall → store), а не только
+// разрешение scope в изоляции.
+func TestScopeIsolationE2E(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "shared.db")
+
+	alpha := newServerOnDB(t, dbPath, config.ScopeConfig{Project: "alpha", Shared: []string{"user:*"}})
+	beta := newServerOnDB(t, dbPath, config.ScopeConfig{Project: "beta", Shared: []string{"user:*"}})
+
+	// Наполняем общий файл: по факту в каждый проектный scope + один общий user:*.
+	// Контент с уникальными маркерами, чтобы однозначно опознать записи в брифе.
+	saveVia := func(srv *Server, in saveInput) {
+		t.Helper()
+		if _, _, err := srv.handleSave(ctx, nil, in); err != nil {
+			t.Fatalf("handleSave(%q): %v", in.Content, err)
+		}
+	}
+	saveVia(alpha, saveInput{Kind: "semantic", Content: "МАРКЕРАЛЬФА проектный факт alpha"})              // → project:alpha
+	saveVia(beta, saveInput{Kind: "semantic", Content: "МАРКЕРБЕТА проектный факт beta"})                 // → project:beta
+	saveVia(alpha, saveInput{Kind: "semantic", Content: "МАРКЕРЮЗЕР общий факт", Scope: "user:*"})        // → user:*
+
+	recallVia := func(srv *Server) string {
+		t.Helper()
+		res, _, err := srv.handleRecall(ctx, nil, recallInput{Query: "МАРКЕРАЛЬФА МАРКЕРБЕТА МАРКЕРЮЗЕР факт"})
+		if err != nil {
+			t.Fatalf("handleRecall: %v", err)
+		}
+		return textOf(res)
+	}
+
+	alphaBrief := recallVia(alpha)
+	if !strings.Contains(alphaBrief, "МАРКЕРАЛЬФА") {
+		t.Errorf("recall alpha не увидел свой project:alpha; бриф:\n%s", alphaBrief)
+	}
+	if !strings.Contains(alphaBrief, "МАРКЕРЮЗЕР") {
+		t.Errorf("recall alpha не увидел общий user:*; бриф:\n%s", alphaBrief)
+	}
+	if strings.Contains(alphaBrief, "МАРКЕРБЕТА") {
+		t.Errorf("recall alpha увидел чужой project:beta (утечка изоляции); бриф:\n%s", alphaBrief)
+	}
+
+	betaBrief := recallVia(beta)
+	if !strings.Contains(betaBrief, "МАРКЕРБЕТА") {
+		t.Errorf("recall beta не увидел свой project:beta; бриф:\n%s", betaBrief)
+	}
+	if !strings.Contains(betaBrief, "МАРКЕРЮЗЕР") {
+		t.Errorf("recall beta не увидел общий user:*; бриф:\n%s", betaBrief)
+	}
+	if strings.Contains(betaBrief, "МАРКЕРАЛЬФА") {
+		t.Errorf("recall beta увидел чужой project:alpha (утечка изоляции); бриф:\n%s", betaBrief)
 	}
 }
 
