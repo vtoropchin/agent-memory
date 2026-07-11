@@ -1,9 +1,15 @@
-.PHONY: build test run import bin/memoryd
+.PHONY: build test run import install bin/memoryd
 
 # mattn/go-sqlite3 требует CGO и тег sqlite_fts5 для поддержки полнотекстового поиска FTS5.
 
 build:
 	CGO_ENABLED=1 go build -tags sqlite_fts5 ./...
+
+# install кладёт memoryd на PATH (go install в $GOBIN/$GOPATH/bin) — так его
+# находит .mcp.json, сгенерированный `memoryd init` с фолбэком-командой "memoryd"
+# (задача 5.3).
+install:
+	CGO_ENABLED=1 go install -tags sqlite_fts5 ./cmd/memoryd
 
 # bin/memoryd — бинарь для догфудинга (DESIGN.md §14 Этап 5): его запускает
 # Claude Code как MCP-сервер `agentmemory` из .mcp.json. Цель .PHONY — всегда

@@ -52,6 +52,7 @@ foundational (набор scope в поиске + идентичность про
 |--------|------|--------|
 | 5.1 Импортёр файловой памяти | [5.1-import-file-memory.md](5.1-import-file-memory.md) | ✅ выполнена |
 | 5.2 Подключение memoryd к проекту | [5.2-connect-memoryd.md](5.2-connect-memoryd.md) | ✅ выполнена |
+| 5.3 Подкоманда `memoryd init` (скаффолдинг) | [5.3-init-scaffold.md](5.3-init-scaffold.md) | ✅ выполнена |
 
 ## Общие требования ко всем задачам
 

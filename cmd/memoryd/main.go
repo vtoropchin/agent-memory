@@ -27,6 +27,17 @@ import (
 const deepseekAPIKeyEnv = "DEEPSEEK_API_KEY"
 
 func main() {
+	// `memoryd init` — скаффолдинг .mcp.json + agentmemory.toml (задача 5.3),
+	// диспетчеризуется до разбора серверных флагов и работы с конфигом/store,
+	// поэтому `memoryd`, `memoryd -config ...`, `memoryd -db ...` не затронуты.
+	if len(os.Args) >= 2 && os.Args[1] == "init" {
+		if err := runInit(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "memoryd init: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Транспорт MCP использует stdout для протокола — всё логирование только в
 	// stderr, иначе лог-строки повредят JSON-RPC поток.
 	log.SetOutput(os.Stderr)
