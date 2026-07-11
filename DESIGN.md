@@ -326,7 +326,15 @@ DeepSeek chat (OpenAI-совместимый) в роли текстового �
 - **`memory_update`** — правка факта (в т.ч. пометка устаревшим).
 - **`memory_forget`** — мягкое удаление (`superseded_by` / архив).
 
-Транспорт: MCP over stdio (`/cmd/memoryd`). HTTP-слой — опция на будущее.
+Транспорт: MCP over stdio (`/cmd/memoryd`).
+
+**Read-only web-морда.** `memoryd web` (Этап 6, `cmd/memoryd`) поднимает отдельный HTTP-режим
+того же бинаря поверх того же файла БД: JSON API (`/api/stats`, `/api/memories`,
+`/api/memories/{id}`, `/api/search`) только на read-методах Store (`List`/`Stats`/`Get`/
+`Neighbors`/`SearchLexical`) — никаких Put/Update/Supersede из браузера. Слушает по умолчанию
+только `127.0.0.1:7070` (localhost, наружу не выставляется), поиск — лексический (FTS5);
+гибридный/векторный поиск (нужен Embedder) — вне этой версии. Статический фронтенд отдаётся из
+`embed.FS` (`cmd/memoryd/web/`), сам интерфейс — задача 6.3.
 
 При `initialize` сервер публикует server-level `instructions` (`ServerOptions.Instructions`)
 — компактный клиент-агностичный протокол (когда звать recall, что такое атомарный факт,
@@ -397,6 +405,12 @@ Decay, dedup-sweep, планировщик джобов.
 генерирующий MCP-конфиг и скил «Протокол работы с памятью» (`memory_recall` в начале
 задачи, `memory_save`/`memory_update`/`memory_forget` по ходу) — так любой проект, не
 только сам AgentMemory, может подключить себе долговременную память в пару команд.
+
+**Этап 6 — Web-морда (read-only viewer).**
+`memoryd web` — просмотр памяти в браузере: подкоманда поднимает HTTP-сервер поверх того же
+общего файла БД (§12), JSON API только на read-методах Store и статический фронтенд (задача
+6.3) поверх него — дашборд статистики, постраничный список с фильтрами по scope/kind,
+карточка записи с соседями по графу связей, лексический поиск.
 
 ---
 

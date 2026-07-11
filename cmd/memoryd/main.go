@@ -39,6 +39,17 @@ func main() {
 		return
 	}
 
+	// `memoryd web` — read-only HTTP-морда просмотра памяти (задача 6.2),
+	// диспетчеризуется симметрично `init`, до разбора серверных флагов и
+	// работы с reasoner/embedder: морда только читает store лексически.
+	if len(os.Args) >= 2 && os.Args[1] == "web" {
+		if err := runWeb(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "memoryd web: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Транспорт MCP использует stdout для протокола — всё логирование только в
 	// stderr, иначе лог-строки повредят JSON-RPC поток.
 	log.SetOutput(os.Stderr)

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>AgentMemory — web-морда</title>
+</head>
+<body>
+  <h1>AgentMemory — web-морда (read-only viewer)</h1>
+  <p>
+    Фронтенд ещё не реализован — это заглушка задачи 6.2 (HTTP-сервер + JSON API).
+    Сам интерфейс просмотра памяти появится в задаче 6.3.
+  </p>
+  <p>Пока можно проверить API напрямую:</p>
+  <ul>
+    <li><a href="/api/stats">/api/stats</a> — сводные счётчики памяти</li>
+    <li><code>/api/memories</code> — постраничный список (query: scope, kind, superseded, limit, offset)</li>
+    <li><code>/api/memories/{id}</code> — карточка записи + соседи по графу связей</li>
+    <li><code>/api/search?q=...</code> — лексический поиск (FTS5)</li>
+  </ul>
+</body>
+</html>

@@ -1,4 +1,4 @@
-.PHONY: build test run import install uninstall bin/memoryd
+.PHONY: build test run web import install uninstall bin/memoryd
 
 # mattn/go-sqlite3 требует CGO и тег sqlite_fts5 для поддержки полнотекстового поиска FTS5.
 
@@ -40,6 +40,12 @@ test:
 
 run:
 	CGO_ENABLED=1 go run -tags sqlite_fts5 ./cmd/memoryd
+
+# web поднимает read-only HTTP-морду просмотра памяти (DESIGN.md §12, Этап 6,
+# задача 6.2) на 127.0.0.1:7070. Доп. флаги (-addr/-config/-db) — напрямую через
+# go run, напр.: CGO_ENABLED=1 go run -tags sqlite_fts5 ./cmd/memoryd web -db ./memory.db
+web:
+	CGO_ENABLED=1 go run -tags sqlite_fts5 ./cmd/memoryd web
 
 # import переносит файловую память (.claude/memory/) в SQLite-хранилище memoryd
 # (DESIGN.md §14 Этап 5). Доп. флаги (-dir/-db/-scope/-dry-run) — напрямую через
