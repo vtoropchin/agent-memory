@@ -1,0 +1,36 @@
+package mcp
+
+import (
+	"context"
+	"fmt"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/write"
+)
+
+// handleSave реализует memory_save: роутинг на Writer.Save (DESIGN.md §7, §12).
+//
+// Writer.Save честно сообщает через возвращаемый merged, был ли факт слит с
+// существующим дублем (reinforce) вместо вставки новой записи, — поэтому здесь не
+// нужен дополнительный запрос к Store для эвристического определения слияния.
+func (s *Server) handleSave(ctx context.Context, _ *sdkmcp.CallToolRequest, in saveInput) (*sdkmcp.CallToolResult, any, error) {
+	id, merged, err := s.writer.Save(ctx, write.SaveInput{
+		Kind:       memory.Kind(in.Kind),
+		Scope:      in.Scope,
+		Content:    in.Content,
+		Importance: in.Importance,
+		Tags:       in.Tags,
+		Links:      in.Links,
+		Source:     in.Source,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("memory_save: %w", err)
+	}
+
+	if merged {
+		return textResult(fmt.Sprintf("Сохранено: %s (слито с существующей похожей записью)", id)), nil, nil
+	}
+	return textResult(fmt.Sprintf("Сохранено: %s", id)), nil, nil
+}
