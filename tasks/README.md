@@ -17,14 +17,24 @@
 | 2.3 Консолидация episodic→semantic | [2.3-consolidation.md](2.3-consolidation.md) | ✅ выполнена |
 | 2.4 Связка Reasoner в memoryd | [2.4-wiring-reasoner.md](2.4-wiring-reasoner.md) | ✅ выполнена |
 
+## Мультипроектность (scope) — DESIGN.md §2.1
+
+Модель: **изоляция проектов + общий слой `user:*`**, один общий файл БД. `mp-1` —
+foundational (набор scope в поиске + идентичность проекта), выполнять СЛЕДУЮЩЕЙ, до 3.2.
+
+| Задача | Файл | Статус |
+|--------|------|--------|
+| MP-1 Ядро модели scope | [mp-1-scope-core.md](mp-1-scope-core.md) | ⏳ следующая, блокирует 3.2/3.4/3.6/5.2 |
+| MP-2 Разрешение scope в recall/save + memoryd | [mp-2-scope-recall-wiring.md](mp-2-scope-recall-wiring.md) | ⏳ ожидает MP-1 |
+
 ## Этап 3 — Embedder + гибридный поиск
 
 | Задача | Файл | Статус |
 |--------|------|--------|
 | 3.1 Ollama-Embedder | [3.1-ollama-embedder.md](3.1-ollama-embedder.md) | ✅ выполнена |
-| 3.2 sqlite-vec в Store | [3.2-sqlite-vec-store.md](3.2-sqlite-vec-store.md) | ⏳ |
+| 3.2 sqlite-vec в Store | [3.2-sqlite-vec-store.md](3.2-sqlite-vec-store.md) | ⏳ ожидает MP-1 |
 | 3.3 Вектор в write path | [3.3-write-vector.md](3.3-write-vector.md) | ⏳ ожидает 3.1, 3.2 |
-| 3.4 Гибридный recall | [3.4-hybrid-recall.md](3.4-hybrid-recall.md) | ⏳ ожидает 3.1, 3.2 |
+| 3.4 Гибридный recall | [3.4-hybrid-recall.md](3.4-hybrid-recall.md) | ⏳ ожидает 3.1, 3.2, MP-1 |
 | 3.5 Reindex при смене модели | [3.5-reindex.md](3.5-reindex.md) | ⏳ ожидает 3.1, 3.2 |
 | 3.6 Связка Embedder в memoryd | [3.6-wiring-embedder.md](3.6-wiring-embedder.md) | ⏳ ожидает 3.1–3.5 |
 
@@ -41,7 +51,7 @@
 | Задача | Файл | Статус |
 |--------|------|--------|
 | 5.1 Импортёр файловой памяти | [5.1-import-file-memory.md](5.1-import-file-memory.md) | ⏳ |
-| 5.2 Подключение memoryd к проекту | [5.2-connect-memoryd.md](5.2-connect-memoryd.md) | ⏳ ожидает 5.1 |
+| 5.2 Подключение memoryd к проекту | [5.2-connect-memoryd.md](5.2-connect-memoryd.md) | ⏳ ожидает 5.1, MP-2 |
 
 ## Общие требования ко всем задачам
 
