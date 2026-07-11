@@ -75,13 +75,13 @@ func TestDoInit_WritesAllFiles(t *testing.T) {
 		t.Errorf("Store.Path = %q, хочу %q", cfg.Store.Path, defaultStorePath)
 	}
 
-	skillPath := filepath.Join(dir, ".claude", "skills", "agentmemory-memory", "SKILL.md")
+	skillPath := filepath.Join(dir, ".claude", "skills", "memoryd", "SKILL.md")
 	skillRaw, err := os.ReadFile(skillPath)
 	if err != nil {
 		t.Fatalf("чтение %s: %v", skillPath, err)
 	}
 	skill := string(skillRaw)
-	if !strings.HasPrefix(skill, "---\nname: agentmemory-memory\ndescription:") {
+	if !strings.HasPrefix(skill, "---\nname: memoryd\ndescription:") {
 		t.Errorf("SKILL.md не начинается с валидного фронтматтера name/description")
 	}
 	if strings.Count(skill, "---\n") < 2 {

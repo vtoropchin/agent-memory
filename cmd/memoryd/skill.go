@@ -69,6 +69,6 @@ func claudeSkillDescription(project string) string {
 // renderClaudeSkill оборачивает memorySkillBody в SKILL.md для Claude Code —
 // валидный YAML-фронтматтер (name/description) поверх общего тела.
 func renderClaudeSkill(project string) string {
-	frontMatter := fmt.Sprintf("---\nname: agentmemory-memory\ndescription: %s\n---\n\n", claudeSkillDescription(project))
+	frontMatter := fmt.Sprintf("---\nname: memoryd\ndescription: %s\n---\n\n", claudeSkillDescription(project))
 	return frontMatter + memorySkillBody(project)
 }

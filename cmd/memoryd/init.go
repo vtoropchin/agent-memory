@@ -113,7 +113,7 @@ var agentRegistry = map[string]agentTarget{
 		mcpConfigPath:   func(dir string) string { return filepath.Join(dir, ".mcp.json") },
 		renderMCPConfig: renderMCPJSON,
 		skillPath: func(dir string) string {
-			return filepath.Join(dir, ".claude", "skills", "agentmemory-memory", "SKILL.md")
+			return filepath.Join(dir, ".claude", "skills", "memoryd", "SKILL.md")
 		},
 		renderSkill: renderClaudeSkill,
 	},
