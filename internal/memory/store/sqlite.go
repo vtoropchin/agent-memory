@@ -21,6 +21,10 @@ import (
 // ErrNotFound возвращается, когда запись с указанным id не найдена.
 var ErrNotFound = errors.New("memory: запись не найдена")
 
+// listDefaultLimit — размер страницы List по умолчанию, когда BrowseFilter.Limit не
+// задан (<=0).
+const listDefaultLimit = 50
+
 // schema — DDL хранилища (DESIGN.md §4). Идемпотентен: все объекты создаются
 // через IF NOT EXISTS, поэтому Open можно вызывать многократно на одном файле.
 //
@@ -271,6 +275,44 @@ func (s *sqliteStore) loadTags(ctx context.Context, id string) ([]string, error)
 	return tags, rows.Err()
 }
 
+// loadTagsBatch грузит теги сразу для набора id одним запросом (memory_id IN (...))
+// — в отличие от loadTags (одна запись), нужна там, где потребителю отдаётся
+// страница записей и построчная загрузка была бы N+1 (List). Читает внутри той же
+// транзакции, что и страница List, — для консистентности пары (items, total).
+// Возвращает map с пустым срезом отсутствующим — вызывающая сторона обращается к ней
+// по id и получает nil для записей без тегов, что для memory.Memory.Tags эквивалентно.
+func (s *sqliteStore) loadTagsBatch(ctx context.Context, tx *sql.Tx, ids []string) (map[string][]string, error) {
+	result := make(map[string][]string, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT memory_id, tag FROM tags WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY memory_id, tag
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("батч-чтение tags: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, tag string
+		if err := rows.Scan(&id, &tag); err != nil {
+			return nil, fmt.Errorf("сканирование tag (батч): %w", err)
+		}
+		result[id] = append(result[id], tag)
+	}
+	return result, rows.Err()
+}
+
 func (s *sqliteStore) loadLinks(ctx context.Context, id string) ([]memory.Link, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT dst, rel FROM links WHERE src = ? ORDER BY dst, rel`, id)
 	if err != nil {
@@ -347,6 +389,22 @@ func scopePredicate(scopes []string, scope string) (clause string, args []any) {
 	return "", nil
 }
 
+// kindPredicate строит условие фильтра по kind (m.kind IN (...)) — единая точка для
+// metaFilters (recall) и List (browse-морда), чтобы предикат не дублировался. Пустой
+// набор kinds → пустой clause (без фильтра по типу).
+func kindPredicate(kinds []string) (clause string, args []any) {
+	if len(kinds) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, len(kinds))
+	args = make([]any, len(kinds))
+	for i, k := range kinds {
+		placeholders[i] = "?"
+		args[i] = k
+	}
+	return "m.kind IN (" + strings.Join(placeholders, ",") + ")", args
+}
+
 // metaFilters строит общие для SearchLexical и SearchVector фильтры-предикаты по полям
 // Query — кроме полнотекстового/векторного MATCH: мягкое забывание (superseded_by IS
 // NULL), scope (через scopePredicate), kind, свежесть (since). Единая точка гарантирует,
@@ -361,13 +419,9 @@ func metaFilters(q memory.Query) (conds []string, args []any) {
 		conds = append(conds, clause)
 		args = append(args, scopeArgs...)
 	}
-	if len(q.Kinds) > 0 {
-		placeholders := make([]string, len(q.Kinds))
-		for i, k := range q.Kinds {
-			placeholders[i] = "?"
-			args = append(args, k)
-		}
-		conds = append(conds, "m.kind IN ("+strings.Join(placeholders, ",")+")")
+	if clause, kindArgs := kindPredicate(q.Kinds); clause != "" {
+		conds = append(conds, clause)
+		args = append(args, kindArgs...)
 	}
 	if q.SinceTs > 0 {
 		conds = append(conds, "m.created_at >= ?")
@@ -610,6 +664,145 @@ func (s *sqliteStore) Touch(ctx context.Context, id string) error {
 		return fmt.Errorf("touch %q: %w", id, ErrNotFound)
 	}
 	return nil
+}
+
+// List возвращает страницу записей под фильтр f (для browse-морды, DESIGN.md §12) и
+// total — общее число записей под тот же фильтр без учёта Limit/Offset. items и
+// total читаются в одной транзакции (на одном соединении), чтобы пара оставалась
+// консистентной под конкурентной записью. Tags грузятся батчем на всю страницу
+// (loadTagsBatch) — не N+1; Links не грузятся (детальная карточка берёт их Get).
+func (s *sqliteStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory, int, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = listDefaultLimit
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	var conds []string
+	var args []any
+	if !f.IncludeSuperseded {
+		conds = append(conds, "m.superseded_by IS NULL")
+	}
+	if clause, scopeArgs := scopePredicate(f.Scopes, ""); clause != "" {
+		conds = append(conds, clause)
+		args = append(args, scopeArgs...)
+	}
+	if clause, kindArgs := kindPredicate(f.Kinds); clause != "" {
+		conds = append(conds, clause)
+		args = append(args, kindArgs...)
+	}
+
+	where := ""
+	if len(conds) > 0 {
+		where = " WHERE " + strings.Join(conds, " AND ")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("начало транзакции: %w", err)
+	}
+	defer tx.Rollback()
+
+	var total int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM memories m"+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("подсчёт total для List: %w", err)
+	}
+
+	query := `
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source
+		FROM memories m` + where + `
+		ORDER BY m.created_at DESC, m.id DESC
+		LIMIT ? OFFSET ?
+	`
+	pageArgs := append(append([]any{}, args...), limit, offset)
+
+	rows, err := tx.QueryContext(ctx, query, pageArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("выборка List: %w", err)
+	}
+	defer rows.Close()
+
+	var items []memory.Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, 0, fmt.Errorf("сканирование List: %w", err)
+		}
+		items = append(items, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("чтение List: %w", err)
+	}
+
+	ids := make([]string, len(items))
+	for i, m := range items {
+		ids[i] = m.Id
+	}
+	tagsByID, err := s.loadTagsBatch(ctx, tx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range items {
+		items[i].Tags = tagsByID[items[i].Id]
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, 0, fmt.Errorf("commit: %w", err)
+	}
+	return items, total, nil
+}
+
+// Stats возвращает сводные счётчики памяти (DESIGN.md §12): всего живых и архивных
+// записей, разбивки живых записей по scope и kind. Пустые карты инициализируются, а
+// не остаются nil — потребителю (морде) не нужно проверять nil перед обходом.
+func (s *sqliteStore) Stats(ctx context.Context) (Stats, error) {
+	stats := Stats{ByScope: map[string]int{}, ByKind: map[string]int{}}
+
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL`).Scan(&stats.Total); err != nil {
+		return Stats{}, fmt.Errorf("подсчёт живых записей: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE superseded_by IS NOT NULL`).Scan(&stats.Superseded); err != nil {
+		return Stats{}, fmt.Errorf("подсчёт архивных записей: %w", err)
+	}
+
+	scopeRows, err := s.db.QueryContext(ctx, `SELECT scope, COUNT(*) FROM memories WHERE superseded_by IS NULL GROUP BY scope`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("разбивка по scope: %w", err)
+	}
+	defer scopeRows.Close()
+	for scopeRows.Next() {
+		var scope string
+		var n int
+		if err := scopeRows.Scan(&scope, &n); err != nil {
+			return Stats{}, fmt.Errorf("сканирование разбивки по scope: %w", err)
+		}
+		stats.ByScope[scope] = n
+	}
+	if err := scopeRows.Err(); err != nil {
+		return Stats{}, fmt.Errorf("чтение разбивки по scope: %w", err)
+	}
+
+	kindRows, err := s.db.QueryContext(ctx, `SELECT kind, COUNT(*) FROM memories WHERE superseded_by IS NULL GROUP BY kind`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("разбивка по kind: %w", err)
+	}
+	defer kindRows.Close()
+	for kindRows.Next() {
+		var kind string
+		var n int
+		if err := kindRows.Scan(&kind, &n); err != nil {
+			return Stats{}, fmt.Errorf("сканирование разбивки по kind: %w", err)
+		}
+		stats.ByKind[kind] = n
+	}
+	if err := kindRows.Err(); err != nil {
+		return Stats{}, fmt.Errorf("чтение разбивки по kind: %w", err)
+	}
+
+	return stats, nil
 }
 
 // EmbedMeta возвращает модель и размерность вектора, зафиксированные последним

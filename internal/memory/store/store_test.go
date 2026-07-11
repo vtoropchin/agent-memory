@@ -975,6 +975,271 @@ func TestListMissingVectors(t *testing.T) {
 	}
 }
 
+func TestListPaginationAndOrder(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	var ids []string
+	for i := 0; i < 5; i++ {
+		id := newID(t)
+		ids = append(ids, id)
+		if err := s.Put(ctx, memory.Memory{
+			Id: id, Kind: memory.KindSemantic, Scope: "s", Content: "запись",
+			CreatedAt: int64(i), UpdatedAt: int64(i), Tags: []string{"t" + id[:1]},
+		}); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+	// ожидаемый порядок: created_at DESC, т.е. обратный ids.
+	wantOrder := make([]string, len(ids))
+	for i, id := range ids {
+		wantOrder[len(ids)-1-i] = id
+	}
+
+	t.Run("страница 1: Limit=2 Offset=0, total не зависит от страницы", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Limit: 2, Offset: 0})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 5 {
+			t.Errorf("total = %d, want 5", total)
+		}
+		if len(items) != 2 || items[0].Id != wantOrder[0] || items[1].Id != wantOrder[1] {
+			t.Fatalf("items = %+v, want [%q %q]", items, wantOrder[0], wantOrder[1])
+		}
+		if len(items[0].Tags) != 1 {
+			t.Errorf("items[0].Tags = %v, want заполнены", items[0].Tags)
+		}
+		if items[0].Links != nil {
+			t.Errorf("items[0].Links = %v, want nil (List не грузит Links)", items[0].Links)
+		}
+	})
+
+	t.Run("страница 2: Limit=2 Offset=2", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 5 {
+			t.Errorf("total = %d, want 5", total)
+		}
+		if len(items) != 2 || items[0].Id != wantOrder[2] || items[1].Id != wantOrder[3] {
+			t.Fatalf("items = %+v, want [%q %q]", items, wantOrder[2], wantOrder[3])
+		}
+	})
+}
+
+func TestListFiltersScopeAndKind(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	aSem, aProc, bSem := newID(t), newID(t), newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: aSem, Kind: memory.KindSemantic, Scope: "project:a", Content: "c", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+		t.Fatalf("Put aSem: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: aProc, Kind: memory.KindProcedural, Scope: "project:a", Content: "c", CreatedAt: 2, UpdatedAt: 2}); err != nil {
+		t.Fatalf("Put aProc: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: bSem, Kind: memory.KindSemantic, Scope: "project:b", Content: "c", CreatedAt: 3, UpdatedAt: 3}); err != nil {
+		t.Fatalf("Put bSem: %v", err)
+	}
+
+	t.Run("фильтр по scope", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Scopes: []string{"project:a"}, Limit: 10})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 2 || len(items) != 2 {
+			t.Fatalf("items/total = %+v/%d, want 2/2", items, total)
+		}
+		for _, m := range items {
+			if m.Scope != "project:a" {
+				t.Errorf("m.Scope = %q, want project:a", m.Scope)
+			}
+		}
+	})
+
+	t.Run("фильтр по kind", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Kinds: []string{"procedural"}, Limit: 10})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 1 || len(items) != 1 || items[0].Id != aProc {
+			t.Fatalf("items/total = %+v/%d, want [aProc]/1", items, total)
+		}
+	})
+
+	t.Run("комбинация scope+kind", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Scopes: []string{"project:a"}, Kinds: []string{"semantic"}, Limit: 10})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 1 || len(items) != 1 || items[0].Id != aSem {
+			t.Fatalf("items/total = %+v/%d, want [aSem]/1", items, total)
+		}
+	})
+}
+
+func TestListSupersededVisibility(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	live, superseded, replacement := newID(t), newID(t), newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: replacement, Kind: memory.KindSemantic, Scope: "s", Content: "замена", CreatedAt: 3, UpdatedAt: 3}); err != nil {
+		t.Fatalf("Put replacement: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: live, Kind: memory.KindSemantic, Scope: "s", Content: "живая", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+		t.Fatalf("Put live: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "s", Content: "устаревшая", CreatedAt: 2, UpdatedAt: 2}); err != nil {
+		t.Fatalf("Put superseded: %v", err)
+	}
+	if err := s.Supersede(ctx, superseded, replacement); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	t.Run("по умолчанию superseded исключены", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Limit: 10})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 2 {
+			t.Fatalf("total = %d, want 2", total)
+		}
+		for _, m := range items {
+			if m.Id == superseded {
+				t.Errorf("items содержат superseded запись: %+v", items)
+			}
+		}
+	})
+
+	t.Run("IncludeSuperseded=true включает архивные, total растёт", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Limit: 10, IncludeSuperseded: true})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 3 || len(items) != 3 {
+			t.Fatalf("items/total = %+v/%d, want 3/3", items, total)
+		}
+	})
+}
+
+func TestListBoundaries(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	for i := 0; i < 3; i++ {
+		id := newID(t)
+		if err := s.Put(ctx, memory.Memory{Id: id, Kind: memory.KindSemantic, Scope: "s", Content: "c", CreatedAt: int64(i), UpdatedAt: int64(i)}); err != nil {
+			t.Fatalf("Put %d: %v", i, err)
+		}
+	}
+
+	t.Run("Limit<=0 использует дефолт", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Limit: 0})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 3 || len(items) != 3 {
+			t.Fatalf("items/total = %+v/%d, want 3/3 (дефолтный лимит покрывает все 3 записи)", items, total)
+		}
+	})
+
+	t.Run("Offset за пределами total даёт пустой items и корректный total", func(t *testing.T) {
+		items, total, err := s.List(ctx, BrowseFilter{Limit: 10, Offset: 100})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if total != 3 {
+			t.Errorf("total = %d, want 3", total)
+		}
+		if len(items) != 0 {
+			t.Errorf("items = %+v, want пусто", items)
+		}
+	})
+
+	t.Run("отрицательный Offset трактуется как 0", func(t *testing.T) {
+		items, _, err := s.List(ctx, BrowseFilter{Limit: 10, Offset: -5})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(items) != 3 {
+			t.Errorf("items = %+v, want 3 (Offset<0 -> 0)", items)
+		}
+	})
+}
+
+func TestStats(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	t.Run("пустая БД: нули и пустые карты", func(t *testing.T) {
+		stats, err := s.Stats(ctx)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if stats.Total != 0 || stats.Superseded != 0 {
+			t.Errorf("stats = %+v, want нули", stats)
+		}
+		if stats.ByScope == nil || len(stats.ByScope) != 0 {
+			t.Errorf("ByScope = %v, want пустая непустая карта", stats.ByScope)
+		}
+		if stats.ByKind == nil || len(stats.ByKind) != 0 {
+			t.Errorf("ByKind = %v, want пустая непустая карта", stats.ByKind)
+		}
+	})
+
+	aSem, aProc, bSem, superseded := newID(t), newID(t), newID(t), newID(t)
+	if err := s.Put(ctx, memory.Memory{Id: aSem, Kind: memory.KindSemantic, Scope: "project:a", Content: "c", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+		t.Fatalf("Put aSem: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: aProc, Kind: memory.KindProcedural, Scope: "project:a", Content: "c", CreatedAt: 2, UpdatedAt: 2}); err != nil {
+		t.Fatalf("Put aProc: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: bSem, Kind: memory.KindSemantic, Scope: "project:b", Content: "c", CreatedAt: 3, UpdatedAt: 3}); err != nil {
+		t.Fatalf("Put bSem: %v", err)
+	}
+	if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "project:a", Content: "c", CreatedAt: 4, UpdatedAt: 4}); err != nil {
+		t.Fatalf("Put superseded: %v", err)
+	}
+
+	t.Run("до supersede: 4 живых, разбивки по scope/kind", func(t *testing.T) {
+		stats, err := s.Stats(ctx)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if stats.Total != 4 || stats.Superseded != 0 {
+			t.Fatalf("stats = %+v, want Total=4 Superseded=0", stats)
+		}
+		if stats.ByScope["project:a"] != 3 || stats.ByScope["project:b"] != 1 {
+			t.Errorf("ByScope = %v, want project:a=3 project:b=1", stats.ByScope)
+		}
+		if stats.ByKind["semantic"] != 3 || stats.ByKind["procedural"] != 1 {
+			t.Errorf("ByKind = %v, want semantic=3 procedural=1", stats.ByKind)
+		}
+	})
+
+	if err := s.Supersede(ctx, superseded, aSem); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	t.Run("после supersede: живой счётчик падает, Superseded растёт", func(t *testing.T) {
+		stats, err := s.Stats(ctx)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if stats.Total != 3 {
+			t.Errorf("Total = %d, want 3", stats.Total)
+		}
+		if stats.Superseded != 1 {
+			t.Errorf("Superseded = %d, want 1", stats.Superseded)
+		}
+		if stats.ByScope["project:a"] != 2 {
+			t.Errorf("ByScope[project:a] = %d, want 2 (superseded запись больше не живая)", stats.ByScope["project:a"])
+		}
+	})
+}
+
 func TestEmbedMetaEmptyByDefault(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

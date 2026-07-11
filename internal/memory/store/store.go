@@ -9,6 +9,26 @@ import (
 	"agentmemory/internal/memory"
 )
 
+// BrowseFilter — параметры пагинируемого листинга памяти для read-only web-морды
+// (DESIGN.md §12). Живёт в пакете store (концерн read-пути store), а не в доменном
+// memory: memory.Query имеет другую семантику (кандидаты поиска, TokenBudget,
+// Summarize) и для browse-листинга не подходит.
+type BrowseFilter struct {
+	Scopes            []string // фильтр scope (m.scope IN (...)); пусто — все scope
+	Kinds             []string // фильтр kind; пусто — все типы
+	IncludeSuperseded bool     // false (дефолт) — только живые (superseded_by IS NULL)
+	Limit             int      // размер страницы; <=0 → дефолт (listDefaultLimit)
+	Offset            int      // смещение для пагинации; <0 трактовать как 0
+}
+
+// Stats — сводные счётчики памяти для дашборда web-морды (DESIGN.md §12).
+type Stats struct {
+	Total      int            // живых записей (superseded_by IS NULL)
+	Superseded int            // архивных (superseded_by IS NOT NULL)
+	ByScope    map[string]int // живые записи по scope
+	ByKind     map[string]int // живые записи по kind
+}
+
 // Store — единая точка доступа к хранилищу памяти: метаданные, лексический и
 // (в будущем) векторный индексы, граф связей.
 type Store interface {
@@ -19,6 +39,15 @@ type Store interface {
 	Neighbors(ctx context.Context, id string) ([]memory.Memory, error)                           // граф-обход
 	Supersede(ctx context.Context, oldID, newID string) error
 	Touch(ctx context.Context, id string) error // accessed_at++, access_count++
+	// List возвращает страницу записей под фильтр (для browse-морды), отсортированную
+	// по created_at DESC (новые первыми), и total — общее число записей под тот же
+	// фильтр БЕЗ учёта Limit/Offset (для пагинации). Заполняет Tags (для чипов в
+	// списке); Links НЕ грузит (тяжело для листинга — детальная карточка берёт их
+	// через Get). limit<=0 → дефолт listDefaultLimit (50); offset<0 → 0.
+	List(ctx context.Context, f BrowseFilter) (items []memory.Memory, total int, err error)
+	// Stats возвращает сводные счётчики (DESIGN.md §12, дашборд морды): всего живых,
+	// архивных, разбивки живых по scope и kind. Дёшево (агрегатные COUNT/GROUP BY).
+	Stats(ctx context.Context) (Stats, error)
 	// reindex-поддержка
 	EmbedMeta(ctx context.Context) (model string, dim int, err error)
 	ResetVectorIndex(ctx context.Context, model string, dim int) error
