@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -45,6 +46,32 @@ type RecallConfig struct {
 type MaintConfig struct {
 	DecayInterval    string `toml:"decay_interval"`    // напр. "24h"
 	ConsolidateAfter string `toml:"consolidate_after"` // напр. "168h"
+}
+
+// Durations парсит DecayInterval/ConsolidateAfter в time.Duration
+// (time.ParseDuration). Невалидная строка, а также непозитивная длительность
+// (<= 0 — time.ParseDuration успешно разбирает и "0s", и отрицательные значения
+// вроде "-1h") в любом из полей — ошибка с указанием, какое поле не годится;
+// вызывающий код (Load, Этап 4.3) должен считать это ошибкой конфигурации, а не
+// деградацией. Непозитивный decay_interval в частности недопустим за пределами
+// этого метода: Scheduler.Run передаёт его в time.NewTicker, который паникует
+// при d<=0.
+func (m MaintConfig) Durations() (decayInterval, consolidateAfter time.Duration, err error) {
+	decayInterval, err = time.ParseDuration(m.DecayInterval)
+	if err != nil {
+		return 0, 0, fmt.Errorf("maint.decay_interval %q: %w", m.DecayInterval, err)
+	}
+	if decayInterval <= 0 {
+		return 0, 0, fmt.Errorf("maint.decay_interval %q должен быть положительным", m.DecayInterval)
+	}
+	consolidateAfter, err = time.ParseDuration(m.ConsolidateAfter)
+	if err != nil {
+		return 0, 0, fmt.Errorf("maint.consolidate_after %q: %w", m.ConsolidateAfter, err)
+	}
+	if consolidateAfter <= 0 {
+		return 0, 0, fmt.Errorf("maint.consolidate_after %q должен быть положительным", m.ConsolidateAfter)
+	}
+	return decayInterval, consolidateAfter, nil
 }
 
 // ScopeConfig — идентичность инстанса и мультипроектность (DESIGN.md §2.1).
@@ -133,6 +160,10 @@ func Load(path string) (Config, error) {
 	}
 
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
+	}
+
+	if _, _, err := cfg.Maint.Durations(); err != nil {
 		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
 	}
 

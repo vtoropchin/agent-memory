@@ -77,20 +77,25 @@ func run() error {
 	r := recall.New(s, cfg.Recall, reasoner, embedder)
 	srv := mcp.NewServer(w, r, s, cfg.Scope)
 
-	// Embedder ≠ Noop: досчитываем вектора, отложенные предыдущими запусками (смена
-	// модели, ранее недоступный ollama и т.п.), в фоне — не блокируя старт MCP-сервера
-	// (DESIGN.md §9, §15). Горутина завершается по тому же ctx, что и сервер.
-	if embedder.Dim() > 0 {
-		go func() {
-			result, err := maint.NewReindexer(s, embedder).CheckAndReindex(ctx)
-			if err != nil {
-				log.Printf("memoryd: фоновый reindex: %v", err)
-				return
-			}
-			log.Printf("memoryd: фоновый reindex завершён: reindexed=%v embedded=%d failed=%d",
-				result.Reindexed, result.Embedded, result.Failed)
-		}()
+	// decay/consolidate/dedup-sweep/reindex по расписанию (DESIGN.md §11, §13):
+	// интервал и возраст консолидации уже провалидированы в config.Load, поэтому
+	// Durations() здесь не может вернуть ошибку — но всё равно проверяем её, а не
+	// игнорируем возврат. Scheduler.Run вызывает первый прогон немедленно и сам
+	// достаточен для досчёта векторов на старте (последний шаг RunOnce —
+	// CheckAndReindex, который no-op при Noop-embedder) — отдельной стартовой
+	// reindex-горутины не нужно.
+	decayInterval, consolidateAfter, err := cfg.Maint.Durations()
+	if err != nil {
+		return fmt.Errorf("разбор maint-таймингов: %w", err)
 	}
+	scheduler := maint.NewScheduler(
+		maint.NewDecayer(s, w),
+		maint.NewDedupSweeper(s),
+		maint.NewConsolidator(s, reasoner, w),
+		maint.NewReindexer(s, embedder),
+		decayInterval, consolidateAfter,
+	)
+	go scheduler.Run(ctx)
 
 	log.Printf("memoryd: запуск MCP-сервера (stdio), store=%s", cfg.Store.Path)
 	if err := srv.Run(ctx); err != nil {

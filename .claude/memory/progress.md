@@ -16,7 +16,9 @@ tags: [roadmap, progress]
 **Задача 3.5 (reindex при смене модели + досчёт очереди) закоммичена** (`8789db2`).
 **Задача 3.6 (связка Embedder в memoryd) выполнена и финализирована** в рабочем дереве
 (коммит в этой сессии) — **Этап 3 полностью закрыт, векторный слой работает end-to-end
-через бинарь**. Бэклог этапов 3–5 нарезан по файлам в `tasks/` (см. [[task-files]]);
+через бинарь**. **Задачи 4.1 (decay), 4.2 (dedup-sweep), 4.3 (планировщик) закоммичены —
+Этап 4 (Maintenance) полностью закрыт: все maint-джобы гоняются по расписанию из memoryd.**
+Бэклог этапов 3–5 нарезан по файлам в `tasks/` (см. [[task-files]]);
 **каждая задача выполняется в отдельной новой сессии** — указание пользователя.
 
 **Сделано на Этапе 3 (задача 3.6, ✅):** связка реального Embedder в `cmd/memoryd`. Новая
@@ -249,6 +251,44 @@ stdio: save→recall, деградация без ключа (Noop + warning, st
 после финализации этапа.
 
 **Сделано на Этапе 4** (по задачам tasks/4.x):
+- **4.3 (Планировщик джобов)** ✅ — **Этап 4 полностью закрыт**. Новый файл
+  `internal/memory/maint/scheduler.go`: тип `Scheduler` + `NewScheduler(d *Decayer,
+  ds *DedupSweeper, c *Consolidator, r *Reindexer, interval, consolidateAfter time.Duration)`
+  (порядок параметров = порядок выполнения джобов — по итогам арх-ревью). `RunOnce(ctx)`
+  последовательно гоняет Decay → Sweep → Consolidate → CheckAndReindex; ошибка одного джоба
+  логируется в stderr и НЕ блокирует остальные (§15), результаты всех четырёх — ОДНОЙ сводной
+  строкой лога (`maint: scheduler: прогон завершён: decay(...) dedup(...) consolidate(...)
+  reindex(...)`). Пороги Decay выведены из `consolidate_after`: `demoteAfter=consolidateAfter`
+  (эпизод теряет importance ровно когда становится кандидатом на консолидацию), `archiveAfter=
+  4×consolidateAfter` (запас, чтобы медленная консолидация успела забрать запись до архивации),
+  `limit=decaySweepLimit=500`; `Consolidate(consolidateAfter, 50)`. `Run(ctx)`: `RunOnce`
+  немедленно + тикер `interval`; выход по `ctx.Done()`; каждый прогон обёрнут в
+  `runOnceRecovered` (defer/recover) — паника джоба не роняет процесс memoryd. `config`:
+  метод `MaintConfig.Durations() (decayInterval, consolidateAfter time.Duration, err error)`
+  парсит `decay_interval`/`consolidate_after` через `time.ParseDuration`; **невалидная ИЛИ
+  непозитивная (`<=0`) строка → ошибка**, вызывается в `Load` (fail-fast на опечатке конфига,
+  симметрично неизвестному provider). `cmd/memoryd`: собирает Scheduler из уже созданных
+  `s/reasoner/w/embedder` и durations из `cfg.Maint`, запускает `go scheduler.Run(ctx)` тем же
+  ctx, что MCP-сервер. **Удалена ad-hoc стартовая reindex-горутина из 3.6** (`if embedder.Dim()>0
+  {…CheckAndReindex}`) — её роль теперь целиком покрывает немедленный первый `RunOnce`
+  (последний шаг — CheckAndReindex, no-op при Noop-embedder), иначе был двойной reindex на
+  старте (при смене модели — два полных прогона эмбеддинга). **Проверено (факты):** `CGO_ENABLED=1
+  go build/vet/test -tags sqlite_fts5 -count=1 ./...` — всё зелёное (10 пакетов). Тесты
+  `scheduler_test.go`: RunOnce вызывает все четыре джоба; ошибка одного (decay) не блокирует
+  остальные; паника внутри прогона перехватывается и Run корректно завершается по ctx.Done
+  (тикер не тестируется — тривиален). `config_test.go`: `"0s"`/`"-1h"` в decay_interval/
+  consolidate_after → ошибка Load/Durations, дефолты `24h`/`168h` валидны. **Арх-ревью
+  go-reviewer:** соответствует §5/§11/§13/§15; единственное отклонение (двойной reindex на
+  старте) устранено удалением ad-hoc-горутины, косметика (порядок параметров) устранена. **Code
+  review high:** 1 критбаг — непозитивный `decay_interval` (`"0s"`/`"-1h"` проходят
+  `ParseDuration`) → `time.NewTicker(<=0)` паникует В ГОЛОЙ горутине `go scheduler.Run` (вне
+  recover) → падение процесса на старте; закрыто валидацией `<=0` в `Durations()`. Симплификация:
+  дифф чист (дубль-горутина удалена). **e2e verify через ЖИВОЙ бинарь по MCP stdio:** (1) старт с
+  noop-конфигом → в stderr строка `maint: scheduler: прогон завершён: …`, stdout — ТОЛЬКО валидный
+  JSON-RPC (initialize + tools/list, все 4 инструмента memory_*), STDOUT_CLEAN; (2) старт с
+  `decay_interval="0s"` → чистый fail-fast (`…должен быть положительным`, exit=1), **паники нет**.
+  **Границы:** `mcp/recall/write/embed/store` не тронуты; логика самих джобов не менялась.
+
 - **4.2 (Dedup-sweep)** ✅ — ретроактивная чистка почти-дублей. Новый пакетный тип
   `maint.DedupSweeper{store}` + `NewDedupSweeper(s)`; единственная точка входа
   `Sweep(ctx) (DedupResult{Scanned,Superseded}, error)` в `internal/memory/maint/dedup.go`.
@@ -299,11 +339,10 @@ stdio: save→recall, деградация без ключа (Noop + warning, st
   в листинг Store); /code-review (high) — багов нет; /simplify — код чист, правок нет. `verify`
   неприменим: decay ещё не подключён к рантайму (планировщик/wiring — 4.3), покрыт юнит-тестами.
 
-**Следующий шаг:** 4.1 и 4.2 закрыты — весь maint-слой (Decay/Consolidate/Reindex/DedupSweep)
-готов как пакетные типы. Разблокирована **4.3 (Планировщик джобов)** — обе её зависимости (4.1,
-4.2) готовы; туда подключится периодический прогон `Decayer`/`Consolidator`/`Reindexer`/
-`DedupSweeper` (+ дефолты порогов decay). Параллельно — **Этап 5: 5.1 (импортёр файловой памяти)**
-разблокирован, **5.2** ждёт 5.1. Порядок — tasks/README.md. ollama+bge-m3 у пользователя есть.
+**Следующий шаг:** Этап 4 закрыт целиком (4.1/4.2/4.3). Остаётся **Этап 5 — догфудинг**:
+**5.1 (импортёр файловой памяти)** разблокирована (переносит `.claude/memory/*.md` в memoryd
+через MCP), **5.2 (подключение memoryd к проекту)** ждёт 5.1 (MP-2 готова). Порядок —
+tasks/README.md. ollama+bge-m3 у пользователя есть.
 
 **Как применять:** обновляй этот файл по мере закрытия задач/этапов. Отмечай, что реально
 собрано/протестировано/запущено (с фактами), а не только «сделано».
