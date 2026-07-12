@@ -100,6 +100,11 @@ const state = {
   showSuperseded: false,
   limit: 20,
   offset: 0,
+  total: 0,
+  exhausted: false, // все страницы просмотра уже подгружены
+  // controller: единственный признак «загрузка идёт» (не null ⇒ есть in-flight
+  // запрос) и одновременно ручка отмены для вытеснения при смене фильтров.
+  controller: null,
 };
 
 let statsCache = null;
@@ -179,7 +184,6 @@ function renderDashboard(stats) {
           onClick: function () {
             toggleFilter(state.kinds, kind);
             renderFilterCheckboxes(statsCache);
-            state.offset = 0;
             loadList();
           },
         },
@@ -199,7 +203,6 @@ function renderDashboard(stats) {
           onClick: function () {
             toggleFilter(state.scopes, scope);
             renderFilterCheckboxes(statsCache);
-            state.offset = 0;
             loadList();
           },
         },
@@ -243,14 +246,13 @@ function filterCheckbox(value, label, set) {
   input.addEventListener("change", function () {
     if (input.checked) set.add(value);
     else set.delete(value);
-    state.offset = 0;
     loadList();
   });
   const labelEl = el("label", { class: "ml-1 cursor-pointer select-none text-sm text-slate-700 dark:text-slate-300", attrs: { for: id }, text: label });
   return el("div", { class: "flex items-center" }, [input, labelEl]);
 }
 
-// --- список записей + пагинация ---
+// --- список записей + ленивая подгрузка (infinite scroll) ---
 
 function buildListQuery() {
   const p = new URLSearchParams();
@@ -266,99 +268,202 @@ function buildListQuery() {
   return p;
 }
 
-async function loadList() {
+// Постоянные узлы статуса/сентинела и наблюдатель создаются один раз
+// (setupInfiniteScroll) и живут между перезагрузками списка, чтобы
+// IntersectionObserver не терял цель при смене фильтров.
+let scrollObserver = null;
+let sentinelEl = null;
+let statusEl = null;
+
+function setupInfiniteScroll() {
+  const pagBox = document.getElementById("pagination");
+  const wrap = el("div", { class: "flex w-full flex-col items-center gap-2" });
+  statusEl = el("div", { class: "text-sm text-slate-500 dark:text-slate-400" });
+  // сентинел: тонкая полоса внизу списка; её появление во вьюпорте (с запасом
+  // rootMargin) триггерит подгрузку следующей страницы.
+  sentinelEl = el("div", { class: "h-px w-full", attrs: { "aria-hidden": "true" } });
+  wrap.appendChild(statusEl);
+  wrap.appendChild(sentinelEl);
+  pagBox.appendChild(wrap);
+
+  scrollObserver = new IntersectionObserver(
+    function (entries) {
+      for (let i = 0; i < entries.length; i++) {
+        if (entries[i].isIntersecting) {
+          fetchPage(false);
+          break;
+        }
+      }
+    },
+    { root: null, rootMargin: "300px 0px" }
+  );
+}
+
+// attachSentinel запускает наблюдение (unobserve+observe перезапускает коллбэк,
+// если сентинел всё ещё виден — доподгружает, пока не заполнит вьюпорт либо не
+// кончатся записи). detachSentinel останавливает подгрузку.
+function attachSentinel() {
+  if (!scrollObserver) return;
+  scrollObserver.unobserve(sentinelEl);
+  scrollObserver.observe(sentinelEl);
+}
+
+function detachSentinel() {
+  if (scrollObserver) scrollObserver.unobserve(sentinelEl);
+}
+
+// loadList — точка входа «с нуля»: смена фильтров/поиска/сброс/после удаления.
+// Прерывает текущую загрузку, сбрасывает пагинацию и грузит первую страницу.
+function loadList() {
+  if (state.controller) state.controller.abort();
+  state.controller = null;
+  state.offset = 0;
+  state.total = 0;
+  state.exhausted = false;
+
+  clear(document.getElementById("cards-container"));
+  clear(document.getElementById("results-summary"));
+  detachSentinel();
+  if (statusEl) statusEl.textContent = "";
+
+  fetchPage(true);
+}
+
+// fetchPage грузит ОДНУ страницу. isReset=true — первая страница (заменяет
+// список), иначе — дозагрузка (аппенд). Поиск (`/api/search`) не поддерживает
+// offset-пагинацию (контракт 6.2) — грузится одним запросом, без infinite scroll.
+async function fetchPage(isReset) {
   const listBox = document.getElementById("cards-container");
   const summaryBox = document.getElementById("results-summary");
-  const pagBox = document.getElementById("pagination");
-  clear(listBox);
-  clear(summaryBox);
-  clear(pagBox);
-  listBox.appendChild(el("div", { class: "text-sm text-slate-500 dark:text-slate-400", text: "загрузка…" }));
+  const q = state.query.trim();
+  const isSearch = q !== "";
+
+  if (state.controller) return; // загрузка уже идёт
+  if (!isReset && (state.exhausted || isSearch)) return;
+
+  const controller = new AbortController();
+  state.controller = controller;
+
+  if (isReset) {
+    listBox.appendChild(el("div", { class: "text-sm text-slate-500 dark:text-slate-400", text: "загрузка…" }));
+  } else if (statusEl) {
+    statusEl.textContent = "загрузка ещё…";
+  }
 
   try {
-    const q = state.query.trim();
-    let items, total;
-    if (q === "") {
-      const p = buildListQuery();
-      const data = await api("/api/memories?" + p.toString());
-      items = data.items;
-      total = data.total;
-    } else {
+    if (isSearch) {
       const p = buildListQuery();
       p.set("q", q);
       p.delete("offset");
-      const data = await api("/api/search?" + p.toString());
-      items = data.items;
-      total = items.length; // /api/search не отдаёт total/пагинацию — см. замечание в отчёте
+      const data = await api("/api/search?" + p.toString(), { signal: controller.signal });
+      if (state.controller !== controller) return; // вытеснено новой загрузкой
+      clear(listBox);
+      renderSearchResults(data.items || [], summaryBox, listBox);
+      state.exhausted = true;
+    } else {
+      const p = buildListQuery();
+      const data = await api("/api/memories?" + p.toString(), { signal: controller.signal });
+      if (state.controller !== controller) return; // вытеснено новой загрузкой
+      const items = data.items || [];
+      state.total = data.total;
+      if (isReset) clear(listBox);
+      if (isReset && items.length === 0) {
+        listBox.appendChild(emptyState("Записей нет — измени фильтры."));
+        state.exhausted = true;
+      } else {
+        items.forEach(function (item) {
+          listBox.appendChild(renderCard(item, false));
+        });
+      }
+      state.offset += items.length;
+      if (items.length === 0 || state.offset >= state.total) state.exhausted = true;
+      updateBrowseStatus(summaryBox);
     }
-    renderList(items, total, q !== "");
   } catch (err) {
-    clear(listBox);
-    showError(listBox, err);
+    if (err && err.name === "AbortError") return; // вытеснено новой загрузкой
+    if (state.controller !== controller) return;
+    if (isReset) {
+      clear(listBox);
+      showError(listBox, err);
+    } else {
+      // Ошибка дозагрузки: сентинел остаётся в зоне видимости и больше не
+      // триггерит observer сам по себе — снимаем его и даём явный ретрай,
+      // иначе подгрузка молча залипает (без авто-ретрая, чтобы не долбить
+      // упавший эндпоинт в цикле).
+      detachSentinel();
+      renderLoadMoreError(err);
+    }
+    return;
+  } finally {
+    // Сбрасываем только если нас не вытеснила новая загрузка (иначе она уже
+    // владеет state.controller и сама им управляет).
+    if (state.controller === controller) state.controller = null;
   }
+
+  // Дозагрузка следующей страницы по мере скролла — только в режиме просмотра.
+  if (!isSearch && !state.exhausted) attachSentinel();
+  else detachSentinel();
 }
 
-function renderList(items, total, isSearch) {
-  const listBox = document.getElementById("cards-container");
-  const summaryBox = document.getElementById("results-summary");
-  const pagBox = document.getElementById("pagination");
-  clear(listBox);
-  clear(summaryBox);
-  clear(pagBox);
+// emptyState — карточка-заглушка «ничего нет» (общая для пустого просмотра и
+// пустого поиска — отличается только текстом).
+function emptyState(text) {
+  return el("div", {
+    class: "rounded-md border border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400",
+    text: text,
+  });
+}
 
+// renderLoadMoreError — ошибка дозагрузки со строкой-статусом и кнопкой
+// повтора (ручной ретрай текущей страницы просмотра).
+function renderLoadMoreError(err) {
+  if (!statusEl) return;
+  clear(statusEl);
+  statusEl.appendChild(
+    el("span", {
+      class: "text-red-700 dark:text-red-400",
+      text: "ошибка подгрузки: " + (err && err.message ? err.message : String(err)) + " ",
+    })
+  );
+  statusEl.appendChild(
+    el("button", {
+      class: BTN_SECONDARY,
+      attrs: { type: "button" },
+      text: "Повторить",
+      onClick: function () {
+        clear(statusEl);
+        fetchPage(false);
+      },
+    })
+  );
+}
+
+// updateBrowseStatus — сводка сверху («показано N из TOTAL») и строка снизу
+// («все записи загружены», когда страниц больше нет).
+function updateBrowseStatus(summaryBox) {
+  summaryBox.textContent = "показано " + state.offset + " из " + state.total;
+  if (!statusEl) return;
+  statusEl.textContent =
+    state.exhausted && state.total > 0 ? "все записи загружены (" + state.total + ")" : "";
+}
+
+// renderSearchResults — выдача поиска (без пагинации, см. контракт 6.2).
+function renderSearchResults(items, summaryBox, listBox) {
+  if (statusEl) statusEl.textContent = "";
   if (items.length === 0) {
-    listBox.appendChild(
-      el("div", {
-        class: "rounded-md border border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400",
-        text: isSearch ? "По запросу ничего не найдено." : "Записей нет — измени фильтры.",
-      })
-    );
+    summaryBox.textContent = "";
+    listBox.appendChild(emptyState("По запросу ничего не найдено."));
     return;
   }
-
   items.forEach(function (item) {
-    listBox.appendChild(renderCard(item, isSearch));
+    listBox.appendChild(renderCard(item, true));
   });
-
-  if (isSearch) {
-    // /api/search не отдаёт total и режет выдачу по limit — если пришло
-    // ровно limit элементов, значит, выдача, вероятно, обрезана и это не
-    // "найдено всё": не должно молча выглядеть как полный результат (DESIGN.md
-    // §15). Пагинации тоже нет в контракте 6.2 (см. замечание в отчёте).
-    summaryBox.textContent =
-      items.length === state.limit
-        ? "показаны первые " + items.length + " совпадений (уточни запрос)"
-        : "найдено: " + items.length;
-    return;
-  }
-
-  const shownFrom = total === 0 ? 0 : state.offset + 1;
-  const shownTo = Math.min(state.offset + state.limit, total);
-  summaryBox.textContent = "показано " + shownFrom + "–" + shownTo + " из " + total;
-
-  const prevBtn = el("button", {
-    class: "rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40 dark:border-slate-600",
-    attrs: { type: "button" },
-    text: "← назад",
-    onClick: function () {
-      state.offset = Math.max(0, state.offset - state.limit);
-      loadList();
-    },
-  });
-  if (state.offset <= 0) prevBtn.disabled = true;
-
-  const nextBtn = el("button", {
-    class: "rounded-md border border-slate-300 px-3 py-1 text-sm disabled:opacity-40 dark:border-slate-600",
-    attrs: { type: "button" },
-    text: "вперёд →",
-    onClick: function () {
-      state.offset = state.offset + state.limit;
-      loadList();
-    },
-  });
-  if (state.offset + state.limit >= total) nextBtn.disabled = true;
-
-  pagBox.appendChild(el("div", { class: "flex items-center gap-2" }, [prevBtn, nextBtn]));
+  // /api/search не отдаёт total и режет выдачу по limit — ровно limit элементов
+  // означает вероятную обрезку, а не «найдено всё» (DESIGN.md §15).
+  summaryBox.textContent =
+    items.length === state.limit
+      ? "показаны первые " + items.length + " совпадений (уточни запрос)"
+      : "найдено: " + items.length;
 }
 
 function renderCard(item, isSearch) {
@@ -660,7 +765,6 @@ function setupFilterControls() {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(function () {
       state.query = searchInput.value;
-      state.offset = 0;
       loadList();
     }, 400);
   });
@@ -668,7 +772,6 @@ function setupFilterControls() {
     if (ev.key === "Enter") {
       clearTimeout(debounceTimer);
       state.query = searchInput.value;
-      state.offset = 0;
       loadList();
     }
   });
@@ -676,7 +779,6 @@ function setupFilterControls() {
   const supersededToggle = document.getElementById("toggle-superseded");
   supersededToggle.addEventListener("change", function () {
     state.showSuperseded = supersededToggle.checked;
-    state.offset = 0;
     loadList();
   });
 
@@ -685,7 +787,6 @@ function setupFilterControls() {
     state.scopes.clear();
     state.kinds.clear();
     state.showSuperseded = false;
-    state.offset = 0;
     searchInput.value = "";
     supersededToggle.checked = false;
     renderFilterCheckboxes(statsCache);
@@ -703,6 +804,7 @@ function setupFilterControls() {
 
 document.addEventListener("DOMContentLoaded", function () {
   setupFilterControls();
+  setupInfiniteScroll();
   loadStats();
   loadList();
 });
