@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"os"
@@ -185,12 +186,89 @@ func TestDoInit_ExistingFileSkippedWithoutForce(t *testing.T) {
 func TestDoInit_UnknownAgent(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
-	err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode"}, &out)
+	err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "bogus"}, &out)
 	if err == nil {
 		t.Fatalf("doInit с неизвестным Agent = nil error, хочу ошибку")
 	}
-	if !strings.Contains(err.Error(), "opencode") || !strings.Contains(err.Error(), "claude") {
+	if !strings.Contains(err.Error(), "bogus") || !strings.Contains(err.Error(), "claude") {
 		t.Errorf("ошибка не упоминает неизвестный агент/список поддерживаемых: %v", err)
+	}
+}
+
+// TestDoInit_OpencodeTarget проверяет, что при Agent="opencode" doInit пишет
+// opencode.json (local MCP-сервер agentmemory, форма которого отличается от
+// .mcp.json Claude Code — единый массив command, environment вместо env) и
+// SKILL.md по opencode-specific пути .opencode/skills/memoryd/SKILL.md.
+func TestDoInit_OpencodeTarget(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode"}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	ocPath := filepath.Join(dir, "opencode.json")
+	ocRaw, err := os.ReadFile(ocPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", ocPath, err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(ocRaw, &raw); err != nil {
+		t.Fatalf("opencode.json невалиден: %v\n%s", err, ocRaw)
+	}
+
+	mcp, ok := raw["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("opencode.json.mcp отсутствует или не объект: %s", ocRaw)
+	}
+	srv, ok := mcp["agentmemory"].(map[string]any)
+	if !ok {
+		t.Fatalf("opencode.json.mcp.agentmemory отсутствует или не объект: %s", ocRaw)
+	}
+	if srv["type"] != "local" {
+		t.Errorf("mcp.agentmemory.type = %v, хочу local", srv["type"])
+	}
+	cmd, ok := srv["command"].([]any)
+	if !ok {
+		t.Fatalf("mcp.agentmemory.command не массив: %v", srv["command"])
+	}
+	if len(cmd) == 0 || cmd[0] == "" {
+		t.Errorf("mcp.agentmemory.command[0] пуст: %v", cmd)
+	}
+	var cmdStrs []string
+	for _, c := range cmd {
+		s, _ := c.(string)
+		cmdStrs = append(cmdStrs, s)
+	}
+	joined := strings.Join(cmdStrs, " ")
+	if !strings.Contains(joined, "-config") || !strings.Contains(joined, "agentmemory.toml") {
+		t.Errorf("mcp.agentmemory.command не содержит -config agentmemory.toml: %v", cmd)
+	}
+	if srv["enabled"] != true {
+		t.Errorf("mcp.agentmemory.enabled = %v, хочу true", srv["enabled"])
+	}
+	env, ok := srv["environment"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcp.agentmemory.environment не объект: %v", srv["environment"])
+	}
+	if env["DEEPSEEK_API_KEY"] != "{env:DEEPSEEK_API_KEY}" {
+		t.Errorf("mcp.agentmemory.environment.DEEPSEEK_API_KEY = %v, хочу {env:DEEPSEEK_API_KEY}", env["DEEPSEEK_API_KEY"])
+	}
+
+	skillPath := filepath.Join(dir, ".opencode", "skills", "memoryd", "SKILL.md")
+	skillRaw, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", skillPath, err)
+	}
+	skill := string(skillRaw)
+	if !strings.HasPrefix(skill, "---\nname: memoryd\ndescription:") {
+		t.Errorf("SKILL.md не начинается с валидного фронтматтера name/description")
+	}
+	if !strings.Contains(skill, "myproj") {
+		t.Errorf("SKILL.md не упоминает имя проекта: %s", skill)
+	}
+	if !strings.Contains(skill, "memory_recall") {
+		t.Errorf("SKILL.md не упоминает memory_recall: %s", skill)
 	}
 }
 
@@ -329,6 +407,25 @@ func TestPromptInit_EmptyInputUsesDefaults(t *testing.T) {
 	}
 	if cfg.DeepseekKey != "" {
 		t.Errorf("DeepseekKey = %q, хочу пусто (Enter пропускает)", cfg.DeepseekKey)
+	}
+}
+
+// TestPromptChoice проверяет выбор опции по номеру и дефолт при пустом вводе.
+func TestPromptChoice(t *testing.T) {
+	options := []string{"claude", "opencode"}
+
+	var out bytes.Buffer
+	sc := bufio.NewScanner(strings.NewReader("2\n"))
+	got := promptChoice(sc, &out, "агентское приложение", options, "claude")
+	if got != "opencode" {
+		t.Errorf("promptChoice(%q) = %q, хочу opencode", "2", got)
+	}
+
+	var out2 bytes.Buffer
+	sc2 := bufio.NewScanner(strings.NewReader("\n"))
+	got2 := promptChoice(sc2, &out2, "агентское приложение", options, "claude")
+	if got2 != "claude" {
+		t.Errorf("promptChoice(пустой ввод) = %q, хочу дефолт claude", got2)
 	}
 }
 

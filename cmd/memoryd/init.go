@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -91,10 +92,9 @@ type mcpServerSpec struct {
 }
 
 // agentTarget описывает одно агентское приложение и то, как оно раскладывает
-// артефакты AgentMemory в проекте: MCP-конфиг и скил-инструкцию. Сейчас в
-// agentRegistry только claude (Claude Code), но структура рассчитана на то,
-// чтобы добавить opencode/codex одной записью — их форматы MCP-конфига и
-// расположение скилов пока не реализованы.
+// артефакты AgentMemory в проекте: MCP-конфиг и скил-инструкцию. В
+// agentRegistry — claude (Claude Code) и opencode; структура рассчитана на то,
+// чтобы добавить следующее приложение (например codex) ещё одной записью.
 type agentTarget struct {
 	label string // человекочитаемое имя для промптов/вывода
 
@@ -115,7 +115,16 @@ var agentRegistry = map[string]agentTarget{
 		skillPath: func(dir string) string {
 			return filepath.Join(dir, ".claude", "skills", "memoryd", "SKILL.md")
 		},
-		renderSkill: renderClaudeSkill,
+		renderSkill: renderSkillMD,
+	},
+	"opencode": {
+		label:           "opencode",
+		mcpConfigPath:   func(dir string) string { return filepath.Join(dir, "opencode.json") },
+		renderMCPConfig: renderOpencodeJSON,
+		skillPath: func(dir string) string {
+			return filepath.Join(dir, ".opencode", "skills", "memoryd", "SKILL.md")
+		},
+		renderSkill: renderSkillMD,
 	},
 }
 
@@ -218,8 +227,7 @@ func promptInit(in io.Reader, out io.Writer, cfg initConfig) initConfig {
 	sc := bufio.NewScanner(in)
 
 	if cfg.Agent == "" {
-		fmt.Fprintf(out, "агентские приложения: %s\n", strings.Join(agentKeys(), ", "))
-		cfg.Agent = promptLine(sc, out, "агентское приложение", defaultAgentKey)
+		cfg.Agent = promptChoice(sc, out, "агентское приложение", agentKeys(), defaultAgentKey)
 	}
 	if cfg.Project == "" {
 		cfg.Project = promptLine(sc, out, "имя проекта", dirBaseName(cfg.Dir))
@@ -234,7 +242,7 @@ func promptInit(in io.Reader, out io.Writer, cfg initConfig) initConfig {
 		cfg.StorePath = promptLine(sc, out, "путь к файлу БД", defaultStorePath)
 	}
 	if cfg.DeepseekKey == "" {
-		fmt.Fprintln(out, "ключ DeepSeek API эхается в терминал при вводе (маскировка требует x/term, вне stdlib) — можно пропустить и задать позже через .env")
+		fmt.Fprintln(out, "ключ DeepSeek виден в терминале при вводе — можно пропустить и указать позже в .env")
 		cfg.DeepseekKey = promptLine(sc, out, "DeepSeek API key (Enter — пропустить)", "")
 	}
 	return cfg
@@ -256,6 +264,39 @@ func promptLine(sc *bufio.Scanner, out io.Writer, question, def string) string {
 		return def
 	}
 	return line
+}
+
+// promptChoice печатает options пронумерованным списком (1) claude, 2)
+// opencode, ...) и читает одну строку из sc: пустой ввод/EOF — def; корректный
+// номер 1..len(options) — соответствующая опция; точное имя опции (для
+// устойчивости, если пользователь набрал название вручную) — та же опция;
+// любой другой ввод — def (без повторного запроса, поведение как у promptLine).
+func promptChoice(sc *bufio.Scanner, out io.Writer, question string, options []string, def string) string {
+	fmt.Fprintf(out, "%s:\n", question)
+	for i, opt := range options {
+		fmt.Fprintf(out, "  %d) %s\n", i+1, opt)
+	}
+	fmt.Fprintf(out, "выбор [%s]: ", def)
+
+	if !sc.Scan() {
+		return def
+	}
+	line := strings.TrimSpace(sc.Text())
+	if line == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(line); err == nil {
+		if n >= 1 && n <= len(options) {
+			return options[n-1]
+		}
+		return def
+	}
+	for _, opt := range options {
+		if line == opt {
+			return opt
+		}
+	}
+	return def
 }
 
 // dirBaseName — базовое имя абсолютного пути dir как кандидат в имя проекта,
@@ -298,7 +339,7 @@ func doInit(cfg initConfig, out io.Writer) error {
 	if exe, err := os.Executable(); err == nil {
 		command = exe
 	} else {
-		fmt.Fprintf(out, "предупреждение: os.Executable() недоступен (%v), в MCP-конфиге подставлена команда \"memoryd\" (расчёт на PATH)\n", err)
+		fmt.Fprintf(out, "не удалось определить путь к memoryd (%v) — в MCP-конфиг записана команда \"memoryd\", проверь, что она доступна в PATH\n", err)
 	}
 
 	mcpContent, err := target.renderMCPConfig(command)
@@ -386,6 +427,50 @@ func renderMCPJSON(command string) (string, error) {
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("сборка .mcp.json: %w", err)
+	}
+	return string(b) + "\n", nil
+}
+
+// opencodeConfigFile / opencodeServerSpec — форма opencode.json для local MCP-
+// сервера (opencode-документация). В отличие от .mcp.json у Claude Code:
+//   - command — единый массив [команда, аргументы...], а не раздельные
+//     command+args;
+//   - интерполяция env — синтаксис "{env:VAR}", а не shell-style "${VAR:-}";
+//   - поле окружения называется environment, а не env.
+type opencodeConfigFile struct {
+	Schema string                        `json:"$schema"`
+	MCP    map[string]opencodeServerSpec `json:"mcp"`
+}
+
+type opencodeServerSpec struct {
+	Type        string            `json:"type"`
+	Command     []string          `json:"command"`
+	Enabled     bool              `json:"enabled"`
+	Environment map[string]string `json:"environment"`
+}
+
+// renderOpencodeJSON собирает opencode.json (local MCP-сервер agentmemory)
+// через encoding/json — гарантированно валидный JSON с отступом 2 пробела.
+// Путь к agentmemory.toml — относительный: opencode запускает local MCP-
+// процесс с рабочим каталогом = корень workspace (в его исходниках cwd
+// незаданного mcp.cwd резолвится в baseDir — корень инстанса), откуда и
+// подхватывается "agentmemory.toml". Абсолютный указатель уровня
+// ${CLAUDE_PROJECT_DIR} у opencode не нужен — своего аналога он не задаёт.
+func renderOpencodeJSON(command string) (string, error) {
+	cfg := opencodeConfigFile{
+		Schema: "https://opencode.ai/config.json",
+		MCP: map[string]opencodeServerSpec{
+			"agentmemory": {
+				Type:        "local",
+				Command:     []string{command, "-config", "agentmemory.toml"},
+				Enabled:     true,
+				Environment: map[string]string{"DEEPSEEK_API_KEY": "{env:DEEPSEEK_API_KEY}"},
+			},
+		},
+	}
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("сборка opencode.json: %w", err)
 	}
 	return string(b) + "\n", nil
 }

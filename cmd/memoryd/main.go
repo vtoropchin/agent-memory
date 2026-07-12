@@ -154,11 +154,11 @@ func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 	case "deepseek":
 		key := os.Getenv(deepseekAPIKeyEnv)
 		if key == "" {
-			log.Printf("memoryd: reasoner.provider=deepseek, но %s пуст — работаю без Reasoner (Noop)", deepseekAPIKeyEnv)
+			log.Printf("memoryd: reasoner.provider=deepseek, но %s пуст — суммаризация отключена", deepseekAPIKeyEnv)
 			return reason.NewNoop(), nil
 		}
 		if cfg.Model == "" {
-			log.Printf("memoryd: reasoner.provider=deepseek, но reasoner.model пуст — работаю без Reasoner (Noop)")
+			log.Printf("memoryd: reasoner.provider=deepseek, но reasoner.model пуст — суммаризация отключена")
 			return reason.NewNoop(), nil
 		}
 		return reason.NewDeepSeek(key, cfg.Model)
@@ -181,7 +181,7 @@ func newEmbedder(ctx context.Context, cfg config.EmbedderConfig) (embed.Embedder
 	case "ollama":
 		e, err := embed.NewOllama(ctx, cfg.BaseURL, cfg.Model)
 		if err != nil {
-			log.Printf("memoryd: embedder.provider=ollama, но сервер недоступен или модель не подтянута (%v) — работаю без Embedder (Noop, recall на FTS5)", err)
+			log.Printf("memoryd: embedder.provider=ollama, но ollama недоступна или модель не загружена (%v) — векторный поиск отключён, recall на полнотекстовом", err)
 			return embed.NewNoop(), nil
 		}
 		return e, nil
