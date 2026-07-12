@@ -20,9 +20,9 @@ const KIND_LABEL = { semantic: "семантика", episodic: "эпизод", p
 // --- стили кнопок (стандартный компонент Tailwind: solid primary danger +
 // secondary). Литеральные строки классов нужны Tailwind-сканеру @source ---
 const BTN_DANGER =
-  "inline-flex items-center gap-x-1.5 rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-50 dark:bg-red-700 dark:hover:bg-red-600";
+  "inline-flex items-center gap-x-1 rounded bg-red-600 px-2 py-1 text-xs font-semibold text-white shadow-sm hover:bg-red-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-50 dark:bg-red-700 dark:hover:bg-red-600";
 const BTN_SECONDARY =
-  "inline-flex items-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:opacity-50 dark:bg-slate-700 dark:text-slate-100 dark:ring-slate-600 dark:hover:bg-slate-600";
+  "inline-flex items-center rounded bg-white px-2 py-1 text-xs font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:opacity-50 dark:bg-slate-700 dark:text-slate-100 dark:ring-slate-600 dark:hover:bg-slate-600";
 
 // --- маленький DOM-хелпер: строит элементы без innerHTML, чтобы весь
 // пользовательский текст шёл через textContent (жёсткое требование задачи) ---
@@ -476,7 +476,7 @@ function renderDeleteControl(id) {
           },
           onClick: renderConfirm,
         },
-        [icon(TRASH_PATH, "-ml-0.5 size-5"), el("span", { text: "Удалить (в архив)" })]
+        [icon(TRASH_PATH, "-ml-0.5 size-4"), el("span", { text: "Удалить (в архив)" })]
       )
     );
   }
@@ -505,7 +505,7 @@ function renderDeleteControl(id) {
           }
         },
       },
-      [icon(TRASH_PATH, "-ml-0.5 size-5"), el("span", { text: "Да, удалить" })]
+      [icon(TRASH_PATH, "-ml-0.5 size-4"), el("span", { text: "Да, удалить" })]
     );
     const cancelBtn = el(
       "button",
