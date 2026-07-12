@@ -11,7 +11,9 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/store"
+	"agentmemory/internal/memory/write"
 )
 
 func newTestWebStore(t *testing.T) store.Store {
@@ -28,6 +30,12 @@ func newTestWebStore(t *testing.T) store.Store {
 func newTestID(t *testing.T) string {
 	t.Helper()
 	return ulid.Make().String()
+}
+
+// newTestWebHandler собирает handler web-морды для теста поверх s, с
+// write.Writer на embed.NewNoop() (Forget не требует эмбеддера).
+func newTestWebHandler(s store.Store) http.Handler {
+	return newWebHandler(s, write.New(s, embed.NewNoop()))
 }
 
 // putTestMemory кладёт в s запись памяти с разумными дефолтами, переопределяя
@@ -52,11 +60,17 @@ func putTestMemory(t *testing.T, s store.Store, mutate func(*memory.Memory)) mem
 	return m
 }
 
-func getJSON(t *testing.T, url string, out any) *http.Response {
+// doJSON — общий хелпер для getJSON/deleteJSON: делает запрос method к url и,
+// если out != nil, декодирует JSON-тело ответа в out.
+func doJSON(t *testing.T, method, url string, out any) *http.Response {
 	t.Helper()
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(method, url, nil)
 	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
+		t.Fatalf("NewRequest %s %s: %v", method, url, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
 	}
 	if out != nil {
 		defer resp.Body.Close()
@@ -65,6 +79,11 @@ func getJSON(t *testing.T, url string, out any) *http.Response {
 		}
 	}
 	return resp
+}
+
+func getJSON(t *testing.T, url string, out any) *http.Response {
+	t.Helper()
+	return doJSON(t, http.MethodGet, url, out)
 }
 
 func TestHandleStats(t *testing.T) {
@@ -77,7 +96,7 @@ func TestHandleStats(t *testing.T) {
 		t.Fatalf("Supersede: %v", err)
 	}
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	var got statsResponse
@@ -108,7 +127,7 @@ func TestHandleListMemories_Pagination(t *testing.T) {
 		putTestMemory(t, s, func(m *memory.Memory) {})
 	}
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	var page1 memoriesResponse
@@ -147,7 +166,7 @@ func TestHandleListMemories_Filters(t *testing.T) {
 		t.Fatalf("Supersede: %v", err)
 	}
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	var byScope memoriesResponse
@@ -188,7 +207,7 @@ func TestHandleListMemories_EmptyFilterParamsIgnored(t *testing.T) {
 		putTestMemory(t, s, func(m *memory.Memory) {})
 	}
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	var got memoriesResponse
@@ -207,7 +226,7 @@ func TestHandleSearch_EmptyScopeParamIgnored(t *testing.T) {
 	s := newTestWebStore(t)
 	putTestMemory(t, s, func(m *memory.Memory) { m.Content = "уникальная фраза про жирафов" })
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	var found searchResponse
@@ -236,7 +255,7 @@ func TestHandleGetMemory(t *testing.T) {
 		t.Fatalf("Put (со связью): %v", err)
 	}
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	var card memoryCardResponse
@@ -264,6 +283,102 @@ func TestHandleGetMemory(t *testing.T) {
 	}
 }
 
+// deleteJSON шлёт DELETE и декодирует JSON-тело ответа в out (если не nil).
+func deleteJSON(t *testing.T, url string, out any) *http.Response {
+	t.Helper()
+	return doJSON(t, http.MethodDelete, url, out)
+}
+
+// TestHandleForgetMemory — DELETE /api/memories/{id} мягко удаляет живую
+// запись (тумстоун через write.Writer.Forget): 200 {ok:true,id:...}, запись
+// выпадает из живого списка, а Store напрямую показывает superseded_by == id.
+func TestHandleForgetMemory(t *testing.T) {
+	s := newTestWebStore(t)
+	m := putTestMemory(t, s, func(m *memory.Memory) {})
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var got forgetResponse
+	resp := deleteJSON(t, srv.URL+"/api/memories/"+m.Id, &got)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200", resp.StatusCode)
+	}
+	if !got.Ok || got.Id != m.Id {
+		t.Errorf("тело = %+v, хочу {ok:true id:%s}", got, m.Id)
+	}
+
+	// Выпала из живого списка.
+	var list memoriesResponse
+	getJSON(t, srv.URL+"/api/memories", &list)
+	for _, item := range list.Items {
+		if item.Id == m.Id {
+			t.Errorf("запись %q всё ещё в живом списке после forget", m.Id)
+		}
+	}
+
+	// Store напрямую подтверждает тумстоун.
+	after, err := s.Get(context.Background(), m.Id)
+	if err != nil {
+		t.Fatalf("Get после forget: %v", err)
+	}
+	if after.SupersededBy == nil || *after.SupersededBy != m.Id {
+		t.Errorf("SupersededBy = %v, хочу указатель на саму запись %q (тумстоун)", after.SupersededBy, m.Id)
+	}
+}
+
+// TestHandleForgetMemory_NotFound — DELETE несуществующего id -> 404 с
+// JSON-телом ошибки.
+func TestHandleForgetMemory_NotFound(t *testing.T) {
+	s := newTestWebStore(t)
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var got errResponse
+	resp := deleteJSON(t, srv.URL+"/api/memories/01ARZ3NDEKTSV4RRFFQ69G5FAV", &got)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("статус = %d, хочу 404", resp.StatusCode)
+	}
+	if got.Error == "" {
+		t.Error("error пуст, хочу непустое сообщение")
+	}
+}
+
+// TestHandleForgetMemory_AlreadyArchivedIdempotent — DELETE уже архивной
+// записи (superseded_by указывает на настоящую заменяющую запись, а не на
+// себя) должен быть идемпотентным: 200 {ok:true}, но указатель supersededBy
+// не должен переписываться в self-тумстоун — иначе provenance (кем реально
+// заменена запись) теряется.
+func TestHandleForgetMemory_AlreadyArchivedIdempotent(t *testing.T) {
+	s := newTestWebStore(t)
+	x := putTestMemory(t, s, func(m *memory.Memory) {})
+	y := putTestMemory(t, s, func(m *memory.Memory) {})
+	if err := s.Supersede(context.Background(), x.Id, y.Id); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var got forgetResponse
+	resp := deleteJSON(t, srv.URL+"/api/memories/"+x.Id, &got)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200", resp.StatusCode)
+	}
+	if !got.Ok || got.Id != x.Id {
+		t.Errorf("тело = %+v, хочу {ok:true id:%s}", got, x.Id)
+	}
+
+	after, err := s.Get(context.Background(), x.Id)
+	if err != nil {
+		t.Fatalf("Get после forget: %v", err)
+	}
+	if after.SupersededBy == nil || *after.SupersededBy != y.Id {
+		t.Errorf("SupersededBy = %v, хочу указатель на %q (provenance сохранён, не self-тумстоун)", after.SupersededBy, y.Id)
+	}
+}
+
 // TestHandleGetMemory_EmbeddingDegradesWithoutVectorLayer — карточка записи
 // без векторного слоя (нет вектора, ResetVectorIndex не вызывался) деградирует:
 // embedding.embedded=false, semanticNeighbors — пустой массив (не null),
@@ -272,7 +387,7 @@ func TestHandleGetMemory_EmbeddingDegradesWithoutVectorLayer(t *testing.T) {
 	s := newTestWebStore(t)
 	m := putTestMemory(t, s, func(m *memory.Memory) {})
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/memories/" + m.Id)
@@ -325,7 +440,7 @@ func TestHandleGetMemory_SemanticNeighborsWithVectors(t *testing.T) {
 		t.Fatalf("PutVector near: %v", err)
 	}
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	var card memoryCardResponse
@@ -350,7 +465,7 @@ func TestHandleGetMemory_NullableFieldsAndCamelCase(t *testing.T) {
 	s := newTestWebStore(t)
 	m := putTestMemory(t, s, func(m *memory.Memory) {})
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/memories/" + m.Id)
@@ -394,7 +509,7 @@ func TestHandleSearch(t *testing.T) {
 	putTestMemory(t, s, func(m *memory.Memory) { m.Content = "уникальная фраза про жирафов" })
 	putTestMemory(t, s, func(m *memory.Memory) { m.Content = "нечто совсем другое" })
 
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	var found searchResponse
@@ -429,7 +544,7 @@ func TestHandleSearch(t *testing.T) {
 
 func TestUnknownAPIPathNotFound(t *testing.T) {
 	s := newTestWebStore(t)
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/api/does-not-exist")
@@ -454,7 +569,7 @@ func TestUnknownAPIPathNotFound(t *testing.T) {
 
 func TestStaticIndexServed(t *testing.T) {
 	s := newTestWebStore(t)
-	srv := httptest.NewServer(newWebHandler(s))
+	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/")

@@ -40,8 +40,8 @@ function clear(node) {
 
 // --- API ---
 
-async function api(path) {
-  const resp = await fetch(path);
+async function api(path, opts) {
+  const resp = await fetch(path, opts);
   let body = null;
   try {
     body = await resp.json();
@@ -53,6 +53,12 @@ async function api(path) {
     throw new Error(msg);
   }
   return body;
+}
+
+// apiDelete — мягкое удаление записи (DELETE /api/memories/{id}): запись
+// становится архивной (тумстоун), но не стирается безвозвратно.
+function apiDelete(path) {
+  return api(path, { method: "DELETE" });
 }
 
 // --- глобальное состояние фильтров/пагинации ---
@@ -418,6 +424,88 @@ function vectorStatusBadge(embedding) {
   });
 }
 
+// renderDeleteControl — кнопка мягкого удаления записи с двухшаговым
+// инлайн-подтверждением (без нативного confirm, чтобы стиль совпадал с
+// остальной модалкой). Первый клик заменяет кнопку на «Точно удалить? Да/Отмена».
+function renderDeleteControl(id) {
+  const box = el("div", { class: "mt-4 border-t border-slate-200 pt-3 dark:border-slate-700" });
+  const errorBox = el("div", { class: "mb-2" });
+
+  function renderIdle() {
+    clear(box);
+    clear(errorBox);
+    box.appendChild(errorBox);
+    box.appendChild(
+      el(
+        "button",
+        {
+          class:
+            "rounded-md border border-red-300 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950",
+          attrs: {
+            type: "button",
+            title: "мягкое удаление: запись уходит в архив (superseded), история сохраняется",
+          },
+          text: "Удалить (в архив)",
+          onClick: renderConfirm,
+        },
+        []
+      )
+    );
+  }
+
+  function renderConfirm() {
+    clear(box);
+    box.appendChild(errorBox);
+
+    const yesBtn = el(
+      "button",
+      {
+        class:
+          "rounded-md border border-red-300 bg-red-600 px-3 py-1.5 text-sm text-white hover:bg-red-700 disabled:opacity-50 dark:border-red-800",
+        attrs: { type: "button" },
+        text: "Да",
+        onClick: async function () {
+          yesBtn.disabled = true;
+          cancelBtn.disabled = true;
+          try {
+            await apiDelete("/api/memories/" + encodeURIComponent(id));
+            closeModal();
+            loadStats();
+            loadList();
+          } catch (err) {
+            showError(errorBox, err);
+            yesBtn.disabled = false;
+            cancelBtn.disabled = false;
+          }
+        },
+      },
+      []
+    );
+    const cancelBtn = el(
+      "button",
+      {
+        class:
+          "rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700",
+        attrs: { type: "button" },
+        text: "Отмена",
+        onClick: renderIdle,
+      },
+      []
+    );
+
+    box.appendChild(
+      el("div", { class: "flex items-center gap-2" }, [
+        el("span", { class: "text-sm text-red-700 dark:text-red-400", text: "Точно удалить?" }),
+        yesBtn,
+        cancelBtn,
+      ])
+    );
+  }
+
+  renderIdle();
+  return box;
+}
+
 function renderCardModal(card) {
   const content = document.getElementById("modal-content");
   clear(content);
@@ -475,6 +563,12 @@ function renderCardModal(card) {
     el("dd", { text: m.id }),
   ]);
   content.appendChild(metaList);
+
+  // --- удаление (мягкое, в архив) — только для живых записей; архивную
+  // архивировать повторно нечего ---
+  if (!m.supersededBy) {
+    content.appendChild(renderDeleteControl(m.id));
+  }
 
   // --- граф связей: links (исходящие, с типом отношения) + neighbors (полные карточки соседей) ---
   if (m.links && m.links.length > 0) {

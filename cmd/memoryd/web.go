@@ -1,9 +1,12 @@
-// Подкоманда `memoryd web` — read-only HTTP-морда просмотра памяти (DESIGN.md
-// §12, Этап 6, задача 6.2). Открывает тот же общий файл БД, что и MCP-сервер
+// Подкоманда `memoryd web` — HTTP-морда просмотра памяти (DESIGN.md §12,
+// Этап 6, задача 6.2). Открывает тот же общий файл БД, что и MCP-сервер
 // (WAL + busy_timeout безопасны для параллельных читателей), и отдаёт JSON API
 // поверх read-методов Store (List/Stats/Get/Neighbors/SearchLexical) плюс
-// статический фронтенд (сам фронтенд — задача 6.3). Никаких write-операций:
-// правок памяти из браузера в этой версии нет.
+// статический фронтенд (сам фронтенд — задача 6.3). Чтение по-прежнему
+// доминирует; единственная write-операция — мягкое удаление записи
+// (`DELETE /api/memories/{id}`) через доменный `write.Writer.Forget` (тумстоун,
+// та же семантика, что у MCP-инструмента `memory_forget`): правок содержимого
+// и создания новых записей из браузера нет, hard DELETE не делается.
 package main
 
 import (
@@ -26,7 +29,9 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
+	memembed "agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/store"
+	"agentmemory/internal/memory/write"
 )
 
 // defaultWebAddr — адрес прослушивания `memoryd web` по умолчанию: только
@@ -73,9 +78,11 @@ func runWeb(args []string, stdout io.Writer) error {
 		}
 	}()
 
+	w := write.New(s, memembed.NewNoop())
+
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: newWebHandler(s),
+		Handler: newWebHandler(s, w),
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -107,13 +114,16 @@ func runWeb(args []string, stdout io.Writer) error {
 
 // newWebHandler собирает мультиплексор web-морды: JSON API под /api/ (см.
 // каждый handler) + статика (embed.FS) на /. API-роуты регистрируются до
-// файлового хендлера, чтобы /api/* не перехватывался статикой.
-func newWebHandler(s store.Store) http.Handler {
+// файлового хендлера, чтобы /api/* не перехватывался статикой. w используется
+// только для мягкого удаления (DELETE /api/memories/{id}) — остальные роуты
+// целиком read-only поверх s.
+func newWebHandler(s store.Store, w *write.Writer) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/stats", handleStats(s))
 	mux.HandleFunc("GET /api/memories", handleListMemories(s))
 	mux.HandleFunc("GET /api/memories/{id}", handleGetMemory(s))
+	mux.HandleFunc("DELETE /api/memories/{id}", handleForgetMemory(s, w))
 	mux.HandleFunc("GET /api/search", handleSearch(s))
 	// Catch-all для неизвестных /api/*-путей: без него они проваливаются в
 	// файловый хендлер на "/" и отдают plain-text 404 вместо JSON-ошибки.
@@ -362,6 +372,59 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 			},
 			SemanticNeighbors: semanticNeighbors,
 		})
+	}
+}
+
+// forgetResponse — тело ответа DELETE /api/memories/{id}.
+type forgetResponse struct {
+	Ok bool   `json:"ok"`
+	Id string `json:"id"`
+}
+
+// handleForgetMemory — мягкое удаление записи (тумстоун) через доменный
+// write.Writer.Forget: та же семантика, что у MCP-инструмента memory_forget
+// (Store.Supersede(id, id)), никакого hard DELETE. Пустой replacedBy — запись
+// помечена заменённой самой собой и выпадает из recall/списка живых, но
+// строка/связи/история остаются в БД. Идемпотентна для уже архивной записи
+// (SupersededBy != nil): Forget не вызывается повторно, иначе Supersede(id, id)
+// затёр бы указатель на настоящую заменяющую запись self-тумстоуном и стёр бы
+// provenance. Между Get и Forget есть окно TOCTOU под конкурентной записью —
+// на локальном single-user инструменте худший случай не хуже прежнего
+// поведения, усложнять транзакцией ради этого не нужно.
+func handleForgetMemory(s store.Store, w *write.Writer) http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if strings.TrimSpace(id) == "" {
+			writeErr(rw, http.StatusBadRequest, fmt.Errorf("параметр id обязателен"))
+			return
+		}
+
+		m, err := s.Get(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeErr(rw, http.StatusNotFound, fmt.Errorf("запись %q не найдена", id))
+				return
+			}
+			writeErr(rw, http.StatusInternalServerError, fmt.Errorf("get %q: %w", id, err))
+			return
+		}
+
+		if m.SupersededBy != nil {
+			// Уже архивна — повторное удаление успешно и ничего не разрушает.
+			writeJSON(rw, http.StatusOK, forgetResponse{Ok: true, Id: id})
+			return
+		}
+
+		if err := w.Forget(r.Context(), id, ""); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeErr(rw, http.StatusNotFound, fmt.Errorf("запись %q не найдена", id))
+				return
+			}
+			writeErr(rw, http.StatusInternalServerError, fmt.Errorf("forget %q: %w", id, err))
+			return
+		}
+
+		writeJSON(rw, http.StatusOK, forgetResponse{Ok: true, Id: id})
 	}
 }
 

@@ -328,11 +328,14 @@ DeepSeek chat (OpenAI-совместимый) в роли текстового �
 
 Транспорт: MCP over stdio (`/cmd/memoryd`).
 
-**Read-only web-морда.** `memoryd web` (Этап 6, `cmd/memoryd`) поднимает отдельный HTTP-режим
-того же бинаря поверх того же файла БД: JSON API (`/api/stats`, `/api/memories`,
-`/api/memories/{id}`, `/api/search`) только на read-методах Store (`List`/`Stats`/`Get`/
-`Neighbors`/`SearchLexical`, а также `VectorStatus`/`SemanticNeighbors` для карточки записи) —
-никаких Put/Update/Supersede из браузера. Слушает по умолчанию только `127.0.0.1:7070`
+**Web-морда (read + мягкое удаление).** `memoryd web` (Этап 6, `cmd/memoryd`) поднимает отдельный
+HTTP-режим того же бинаря поверх того же файла БД: JSON API (`/api/stats`, `/api/memories`,
+`/api/memories/{id}`, `/api/search`) на read-методах Store (`List`/`Stats`/`Get`/`Neighbors`/
+`SearchLexical`, а также `VectorStatus`/`SemanticNeighbors` для карточки записи) — правок
+содержимого и создания новых записей из браузера нет. Единственная write-операция —
+`DELETE /api/memories/{id}`: мягкое удаление через доменный `write.Writer.Forget` (та же
+семантика, что у MCP-инструмента `memory_forget` — тумстоун `Store.Supersede(id, id)`); hard
+DELETE не делается, история и связи сохраняются. Слушает по умолчанию только `127.0.0.1:7070`
 (localhost, наружу не выставляется); поиск (`/api/search`) — лексический (FTS5), гибридный
 векторный поиск вне этой версии. Карточка записи (`/api/memories/{id}`, задача 6.4) при этом
 показывает статус вектора и KNN-соседей по cosine — read-only чтение уже сохранённых векторов
@@ -409,11 +412,13 @@ Decay, dedup-sweep, планировщик джобов.
 задачи, `memory_save`/`memory_update`/`memory_forget` по ходу) — так любой проект, не
 только сам AgentMemory, может подключить себе долговременную память в пару команд.
 
-**Этап 6 — Web-морда (read-only viewer).**
+**Этап 6 — Web-морда (viewer + мягкое удаление).**
 `memoryd web` — просмотр памяти в браузере: подкоманда поднимает HTTP-сервер поверх того же
-общего файла БД (§12), JSON API только на read-методах Store и статический фронтенд (задача
+общего файла БД (§12), JSON API на read-методах Store и статический фронтенд (задача
 6.3) поверх него — дашборд статистики, постраничный список с фильтрами по scope/kind,
-карточка записи с соседями по графу связей, лексический поиск.
+карточка записи с соседями по графу связей, лексический поиск. Единственная write-операция —
+мягкое удаление записи (`DELETE /api/memories/{id}`, тумстоун через доменный `Writer.Forget`,
+та же семантика, что у `memory_forget`).
 
 ---
 
