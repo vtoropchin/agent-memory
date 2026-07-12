@@ -89,7 +89,7 @@ API из 6.2.
 | Задача | Файл | Статус |
 |--------|------|--------|
 | 8.1 Explain-трасса ранжирования | [8.1-recall-explain.md](8.1-recall-explain.md) | ✅ выполнена |
-| 8.2 Фильтры recall по тегам и датам | [8.2-recall-filters.md](8.2-recall-filters.md) | ⬜ ожидает |
+| 8.2 Фильтры recall по тегам и датам | [8.2-recall-filters.md](8.2-recall-filters.md) | ✅ выполнена |
 | 8.3 Русская морфология в FTS5 (спайк + реализация) | [8.3-fts-russian-morphology.md](8.3-fts-russian-morphology.md) | ⬜ ожидает |
 | 8.4 OpenAI-совместимый Embedder | [8.4-openai-embedder.md](8.4-openai-embedder.md) | ⬜ ожидает |
 

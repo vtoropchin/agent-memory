@@ -307,6 +307,199 @@ func TestSearchLexicalScopes(t *testing.T) {
 	})
 }
 
+// TestSearchLexicalTagsFilter проверяет OR-семантику Query.Tags (задача 8.2):
+// запись проходит, если имеет хотя бы один из перечисленных тегов.
+func TestSearchLexicalTagsFilter(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	stackID, goID, bothID, noneID := newID(t), newID(t), newID(t), newID(t)
+	for _, tc := range []struct {
+		id   string
+		tags []string
+	}{
+		{stackID, []string{"стек"}},
+		{goID, []string{"go"}},
+		{bothID, []string{"стек", "go"}},
+		{noneID, nil},
+	} {
+		if err := s.Put(ctx, memory.Memory{
+			Id: tc.id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "заметка про инструменты проекта", Importance: 3,
+			CreatedAt: 1, UpdatedAt: 1, Tags: tc.tags,
+		}); err != nil {
+			t.Fatalf("Put %s: %v", tc.id, err)
+		}
+	}
+
+	t.Run("один тег", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{Text: "заметка", Tags: []string{"стек"}, Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		got := map[string]bool{}
+		for _, c := range cands {
+			got[c.Memory.Id] = true
+		}
+		if len(got) != 2 || !got[stackID] || !got[bothID] {
+			t.Fatalf("candidates = %+v, want [stackID bothID]", cands)
+		}
+	})
+
+	t.Run("несколько тегов — OR", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{Text: "заметка", Tags: []string{"стек", "go"}, Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		got := map[string]bool{}
+		for _, c := range cands {
+			got[c.Memory.Id] = true
+		}
+		if len(got) != 3 || !got[stackID] || !got[goID] || !got[bothID] {
+			t.Fatalf("candidates = %+v, want [stackID goID bothID]", cands)
+		}
+	})
+
+	t.Run("несуществующий тег — пусто", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{Text: "заметка", Tags: []string{"нет-такого-тега"}, Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		if len(cands) != 0 {
+			t.Fatalf("candidates = %+v, want пусто", cands)
+		}
+	})
+}
+
+// TestSearchLexicalCreatedAtFilter проверяет, что CreatedAfter/CreatedBefore
+// (задача 8.2) отсекают записи по границам, включая саму границу (>=/<=).
+func TestSearchLexicalCreatedAtFilter(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	old, mid, recent := newID(t), newID(t), newID(t)
+	for _, tc := range []struct {
+		id string
+		ts int64
+	}{
+		{old, 100},
+		{mid, 200},
+		{recent, 300},
+	} {
+		if err := s.Put(ctx, memory.Memory{
+			Id: tc.id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "хронологическая заметка", Importance: 3,
+			CreatedAt: tc.ts, UpdatedAt: tc.ts,
+		}); err != nil {
+			t.Fatalf("Put %s: %v", tc.id, err)
+		}
+	}
+
+	t.Run("CreatedAfter отсекает более старые, включая границу", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{Text: "хронологическая", CreatedAfter: 200, Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		got := map[string]bool{}
+		for _, c := range cands {
+			got[c.Memory.Id] = true
+		}
+		if len(got) != 2 || !got[mid] || !got[recent] {
+			t.Fatalf("candidates = %+v, want [mid recent] (CreatedAfter=200 включает границу)", cands)
+		}
+	})
+
+	t.Run("CreatedBefore отсекает более свежие, включая границу", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{Text: "хронологическая", CreatedBefore: 200, Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		got := map[string]bool{}
+		for _, c := range cands {
+			got[c.Memory.Id] = true
+		}
+		if len(got) != 2 || !got[old] || !got[mid] {
+			t.Fatalf("candidates = %+v, want [old mid] (CreatedBefore=200 включает границу)", cands)
+		}
+	})
+
+	t.Run("CreatedAfter и CreatedBefore вместе — диапазон", func(t *testing.T) {
+		cands, err := s.SearchLexical(ctx, memory.Query{Text: "хронологическая", CreatedAfter: 200, CreatedBefore: 200, Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchLexical: %v", err)
+		}
+		if len(cands) != 1 || cands[0].Memory.Id != mid {
+			t.Fatalf("candidates = %+v, want [mid]", cands)
+		}
+	})
+}
+
+// TestSearchLexicalCombinedFilters проверяет, что scope+kind+tag+даты работают
+// одновременно (AND между разными видами фильтров, задача 8.2) — запись должна
+// пройти ВСЕ условия сразу, а не хотя бы одно.
+func TestSearchLexicalCombinedFilters(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	match := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: match, Kind: memory.KindProcedural, Scope: "project:agentmemory",
+		Content: "комбинированный рецепт сборки", Importance: 3,
+		CreatedAt: 200, UpdatedAt: 200, Tags: []string{"стек"},
+	}); err != nil {
+		t.Fatalf("Put match: %v", err)
+	}
+
+	// Не совпадает по kind.
+	wrongKind := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: wrongKind, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+		Content: "комбинированный факт", Importance: 3,
+		CreatedAt: 200, UpdatedAt: 200, Tags: []string{"стек"},
+	}); err != nil {
+		t.Fatalf("Put wrongKind: %v", err)
+	}
+	// Не совпадает по scope.
+	wrongScope := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: wrongScope, Kind: memory.KindProcedural, Scope: "project:other",
+		Content: "комбинированный рецепт в другом проекте", Importance: 3,
+		CreatedAt: 200, UpdatedAt: 200, Tags: []string{"стек"},
+	}); err != nil {
+		t.Fatalf("Put wrongScope: %v", err)
+	}
+	// Не совпадает по тегу.
+	wrongTag := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: wrongTag, Kind: memory.KindProcedural, Scope: "project:agentmemory",
+		Content: "комбинированный рецепт без нужного тега", Importance: 3,
+		CreatedAt: 200, UpdatedAt: 200, Tags: []string{"другое"},
+	}); err != nil {
+		t.Fatalf("Put wrongTag: %v", err)
+	}
+	// Не совпадает по дате (слишком старая).
+	wrongDate := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: wrongDate, Kind: memory.KindProcedural, Scope: "project:agentmemory",
+		Content: "комбинированный рецепт устаревший", Importance: 3,
+		CreatedAt: 50, UpdatedAt: 50, Tags: []string{"стек"},
+	}); err != nil {
+		t.Fatalf("Put wrongDate: %v", err)
+	}
+
+	cands, err := s.SearchLexical(ctx, memory.Query{
+		Text: "комбинированный", Scope: "project:agentmemory",
+		Kinds: []string{"procedural"}, Tags: []string{"стек"},
+		CreatedAfter: 100, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("SearchLexical: %v", err)
+	}
+	if len(cands) != 1 || cands[0].Memory.Id != match {
+		t.Fatalf("candidates = %+v, want [match] (только запись, прошедшая все фильтры сразу)", cands)
+	}
+}
+
 func TestSupersede(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -820,6 +1013,152 @@ func TestSearchVectorScopesAndSuperseded(t *testing.T) {
 			t.Errorf("candidates = %+v, want содержать %q и %q", cands, mine, replacement)
 		}
 	})
+}
+
+// TestSearchVectorTagsFilter проверяет, что SearchVector уважает Query.Tags так же,
+// как SearchLexical (задача 8.2, DESIGN.md §8: оба источника фильтруют одинаково через
+// общий metaFilters), поверх живого sqlite-vec. Все три записи одинаково близки к
+// вектору запроса, чтобы единственной переменной был тег.
+func TestSearchVectorTagsFilter(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 2); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	stackID, goID, bothID := newID(t), newID(t), newID(t)
+	for _, tc := range []struct {
+		id   string
+		tags []string
+	}{
+		{stackID, []string{"стек"}},
+		{goID, []string{"go"}},
+		{bothID, []string{"стек", "go"}},
+	} {
+		if err := s.Put(ctx, memory.Memory{
+			Id: tc.id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "c", CreatedAt: 1, UpdatedAt: 1, Tags: tc.tags,
+		}); err != nil {
+			t.Fatalf("Put %s: %v", tc.id, err)
+		}
+		if err := s.PutVector(ctx, tc.id, []float32{1, 0}); err != nil {
+			t.Fatalf("PutVector %s: %v", tc.id, err)
+		}
+	}
+
+	t.Run("один тег", func(t *testing.T) {
+		cands, err := s.SearchVector(ctx, []float32{1, 0}, memory.Query{Tags: []string{"стек"}, Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchVector: %v", err)
+		}
+		got := map[string]bool{}
+		for _, c := range cands {
+			got[c.Memory.Id] = true
+		}
+		if len(got) != 2 || !got[stackID] || !got[bothID] {
+			t.Fatalf("candidates = %+v, want [stackID bothID]", cands)
+		}
+	})
+
+	t.Run("несуществующий тег — пусто", func(t *testing.T) {
+		cands, err := s.SearchVector(ctx, []float32{1, 0}, memory.Query{Tags: []string{"нет-такого-тега"}, Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchVector: %v", err)
+		}
+		if len(cands) != 0 {
+			t.Fatalf("candidates = %+v, want пусто", cands)
+		}
+	})
+}
+
+// TestSearchVectorTagsFilterKBeforeFilterPad проверяет решение по k-before-filter
+// (задача 8.2, см. vectorTagFilterPad): при активном Tags-фильтре и Limit меньше
+// числа тегированных записей SearchVector всё равно должен вернуть все подходящие по
+// тегу записи в пределах Limit, а не недобрать их из-за узкого k=Limit в KNN. Кладём
+// много "шумовых" записей БЕЗ нужного тега ближе по дистанции, чем тегированные —
+// без запаса k=Limit в KNN тегированные записи не попали бы даже в кандидаты.
+func TestSearchVectorTagsFilterKBeforeFilterPad(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 2); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	const limit = 2
+	// Шум: ближе к вектору запроса (меньшая дистанция), без искомого тега — их
+	// больше, чем limit, поэтому голый k=limit в KNN целиком вытеснил бы тегированные.
+	for i := 0; i < limit+1; i++ {
+		id := newID(t)
+		if err := s.Put(ctx, memory.Memory{
+			Id: id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "шум", CreatedAt: int64(i), UpdatedAt: int64(i),
+		}); err != nil {
+			t.Fatalf("Put шум %s: %v", id, err)
+		}
+		if err := s.PutVector(ctx, id, []float32{1, 0}); err != nil {
+			t.Fatalf("PutVector шум %s: %v", id, err)
+		}
+	}
+
+	tagged := newID(t)
+	if err := s.Put(ctx, memory.Memory{
+		Id: tagged, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+		Content: "нужная запись", CreatedAt: 100, UpdatedAt: 100, Tags: []string{"стек"},
+	}); err != nil {
+		t.Fatalf("Put tagged: %v", err)
+	}
+	// Дальше по дистанции, чем весь шум (дальше от [1,0]).
+	if err := s.PutVector(ctx, tagged, []float32{0, 1}); err != nil {
+		t.Fatalf("PutVector tagged: %v", err)
+	}
+
+	cands, err := s.SearchVector(ctx, []float32{1, 0}, memory.Query{Tags: []string{"стек"}, Limit: limit})
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if len(cands) != 1 || cands[0].Memory.Id != tagged {
+		t.Fatalf("candidates = %+v, want [tagged] (запас k должен был подтянуть тегированную запись из-за шумовых кандидатов ближе неё)", cands)
+	}
+}
+
+// TestSearchVectorCreatedAtFilter проверяет, что SearchVector уважает
+// CreatedAfter/CreatedBefore так же, как SearchLexical (задача 8.2).
+func TestSearchVectorCreatedAtFilter(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "test-model", 2); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	old, recent := newID(t), newID(t)
+	for _, tc := range []struct {
+		id string
+		ts int64
+	}{
+		{old, 100},
+		{recent, 300},
+	} {
+		if err := s.Put(ctx, memory.Memory{
+			Id: tc.id, Kind: memory.KindSemantic, Scope: "project:agentmemory",
+			Content: "c", CreatedAt: tc.ts, UpdatedAt: tc.ts,
+		}); err != nil {
+			t.Fatalf("Put %s: %v", tc.id, err)
+		}
+		if err := s.PutVector(ctx, tc.id, []float32{1, 0}); err != nil {
+			t.Fatalf("PutVector %s: %v", tc.id, err)
+		}
+	}
+
+	cands, err := s.SearchVector(ctx, []float32{1, 0}, memory.Query{CreatedAfter: 200, Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if len(cands) != 1 || cands[0].Memory.Id != recent {
+		t.Fatalf("candidates = %+v, want [recent]", cands)
+	}
 }
 
 func TestSearchVectorWithoutVecTable(t *testing.T) {

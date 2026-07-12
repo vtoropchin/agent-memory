@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -427,6 +428,112 @@ func TestHandleRecall_ExplainReachesQuery(t *testing.T) {
 	mdNoExplain := textOf(withoutExplain)
 	if strings.Contains(mdNoExplain, "· via") {
 		t.Errorf("без explain бриф не должен содержать трассу ранжирования:\n%s", mdNoExplain)
+	}
+}
+
+// TestParseRecallDuration проверяет парсинг recallInput.CreatedAfter/CreatedBefore
+// (задача 8.2): пустая строка выключает фильтр, валидная длительность даёт
+// now-длительность, невалидный формат — внятную ошибку (а не панику).
+func TestParseRecallDuration(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("пустая строка — фильтр выключен", func(t *testing.T) {
+		got, err := parseRecallDuration("", now)
+		if err != nil {
+			t.Fatalf("parseRecallDuration(\"\"): %v", err)
+		}
+		if got != 0 {
+			t.Fatalf("parseRecallDuration(\"\") = %d, want 0", got)
+		}
+	})
+
+	t.Run("валидная длительность — now минус длительность", func(t *testing.T) {
+		got, err := parseRecallDuration("168h", now)
+		if err != nil {
+			t.Fatalf("parseRecallDuration(\"168h\"): %v", err)
+		}
+		want := now.Add(-168 * time.Hour).Unix()
+		if got != want {
+			t.Fatalf("parseRecallDuration(\"168h\") = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("невалидный формат — ошибка, не паника", func(t *testing.T) {
+		_, err := parseRecallDuration("вчера", now)
+		if err == nil {
+			t.Fatal("parseRecallDuration(\"вчера\") должен вернуть ошибку")
+		}
+	})
+}
+
+// TestHandleRecall_InvalidCreatedAfterReturnsError проверяет, что невалидный
+// created_after не роняет сервер, а возвращается внятной ошибкой инструмента.
+func TestHandleRecall_InvalidCreatedAfterReturnsError(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	_, _, err := srv.handleRecall(ctx, nil, recallInput{
+		Query: "x", Scope: "project:agentmemory", CreatedAfter: "не-длительность",
+	})
+	if err == nil {
+		t.Fatal("handleRecall с невалидным created_after должен вернуть ошибку, получили nil")
+	}
+}
+
+// TestHandleRecall_TagsAndDateFiltersReachQuery — часть B задачи 8.2: recallInput.Tags
+// и CreatedAfter (относительная длительность) доезжают до memory.Query и реально
+// сужают выдачу — запись должна пройти оба фильтра сразу, а не хотя бы один.
+func TestHandleRecall_TagsAndDateFiltersReachQuery(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	saveWithTag := func(content string, tags []string) string {
+		t.Helper()
+		res, _, err := srv.handleSave(ctx, nil, saveInput{
+			Kind: "semantic", Content: content, Scope: "project:agentmemory", Tags: tags,
+		})
+		if err != nil {
+			t.Fatalf("handleSave(%q): %v", content, err)
+		}
+		return extractID(t, textOf(res))
+	}
+	setCreatedAt := func(id string, ts int64) {
+		t.Helper()
+		m, err := srv.store.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("store.Get(%q): %v", id, err)
+		}
+		m.CreatedAt = ts
+		if err := srv.store.Put(ctx, m); err != nil {
+			t.Fatalf("store.Put(%q): %v", id, err)
+		}
+	}
+
+	now := time.Now().Unix()
+	matchID := saveWithTag("МАРКЕРFILTER подходит по тегу и по дате", []string{"стек"})
+	wrongTagID := saveWithTag("МАРКЕРFILTER не подходит по тегу", []string{"другое"})
+	wrongDateID := saveWithTag("МАРКЕРFILTER не подходит по дате", []string{"стек"})
+
+	setCreatedAt(matchID, now-60)          // минута назад — свежая
+	setCreatedAt(wrongTagID, now-60)       // свежая, но тег не тот
+	setCreatedAt(wrongDateID, now-100_000) // больше суток назад
+
+	res, _, err := srv.handleRecall(ctx, nil, recallInput{
+		Query: "МАРКЕРFILTER", Scope: "project:agentmemory",
+		Tags: []string{"стек"}, CreatedAfter: "1h",
+	})
+	if err != nil {
+		t.Fatalf("handleRecall: %v", err)
+	}
+	md := textOf(res)
+	if !strings.Contains(md, "подходит по тегу и по дате") {
+		t.Errorf("бриф должен содержать запись, прошедшую оба фильтра:\n%s", md)
+	}
+	if strings.Contains(md, "не подходит по тегу") {
+		t.Errorf("бриф не должен содержать запись с чужим тегом:\n%s", md)
+	}
+	if strings.Contains(md, "не подходит по дате") {
+		t.Errorf("бриф не должен содержать устаревшую запись:\n%s", md)
 	}
 }
 

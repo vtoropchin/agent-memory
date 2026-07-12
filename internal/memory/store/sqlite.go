@@ -30,6 +30,19 @@ const listDefaultLimit = 50
 // SemanticNeighbors) — иначе якорь (дистанция 0) вытесняет настоящего соседа.
 const semanticNeighborsPad = 5
 
+// vectorTagFilterPad — множитель запаса k, запрашиваемого у sqlite-vec KNN в
+// SearchVector, когда активен фильтр Query.Tags (задача 8.2). sqlite-vec обрезает по
+// k ДО применения внешних фильтров (тот же k-before-filter, что и в
+// SemanticNeighbors выше) — при узком тег-фильтре среди k ближайших по вектору
+// могло не оказаться ни одной подходящей по тегу записи, хотя дальше по дистанции
+// такие есть. Кратный (не аддитивный, как semanticNeighborsPad) запас — потому что
+// здесь k пропорционален произвольному Query.Limit, а не фиксированному k соседей;
+// эвристика не даёт точных гарантий покрытия (тег может не встретиться и в
+// увеличенном k), но заметно снижает вероятность недобора кандидатов на типичных
+// объёмах памяти. Внешний LIMIT ? после WHERE обрезает результат обратно до
+// исходного limit.
+const vectorTagFilterPad = 5
+
 // schema — DDL хранилища (DESIGN.md §4). Идемпотентен: все объекты создаются
 // через IF NOT EXISTS, поэтому Open можно вызывать многократно на одном файле.
 //
@@ -410,9 +423,29 @@ func kindPredicate(kinds []string) (clause string, args []any) {
 	return "m.kind IN (" + strings.Join(placeholders, ",") + ")", args
 }
 
+// tagsPredicate строит условие "хотя бы один из тегов" (OR-семантика, Query.Tags,
+// задача 8.2) через EXISTS-подзапрос к таблице tags — единая точка для metaFilters,
+// как и scopePredicate/kindPredicate, чтобы SearchLexical и SearchVector фильтровали
+// по тегам одинаково (DESIGN.md §8). EXISTS, а не JOIN — запись не должна
+// задваиваться, если совпало сразу несколько перечисленных тегов. Пустой набор tags
+// → пустой clause (без фильтра).
+func tagsPredicate(tags []string) (clause string, args []any) {
+	if len(tags) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, len(tags))
+	args = make([]any, len(tags))
+	for i, t := range tags {
+		placeholders[i] = "?"
+		args[i] = t
+	}
+	return "EXISTS (SELECT 1 FROM tags t WHERE t.memory_id = m.id AND t.tag IN (" + strings.Join(placeholders, ",") + "))", args
+}
+
 // metaFilters строит общие для SearchLexical и SearchVector фильтры-предикаты по полям
 // Query — кроме полнотекстового/векторного MATCH: мягкое забывание (superseded_by IS
-// NULL), scope (через scopePredicate), kind, свежесть (since). Единая точка гарантирует,
+// NULL), scope (через scopePredicate), kind, свежесть (since), теги (OR, задача 8.2),
+// дата создания (CreatedAfter/CreatedBefore, задача 8.2). Единая точка гарантирует,
 // что лексический и векторный источники recall отбирают кандидатов одинаково (DESIGN.md
 // §8) — новый фильтр добавляется в одном месте, а не синхронно в двух.
 //
@@ -431,6 +464,18 @@ func metaFilters(q memory.Query) (conds []string, args []any) {
 	if q.SinceTs > 0 {
 		conds = append(conds, "m.created_at >= ?")
 		args = append(args, q.SinceTs)
+	}
+	if clause, tagArgs := tagsPredicate(q.Tags); clause != "" {
+		conds = append(conds, clause)
+		args = append(args, tagArgs...)
+	}
+	if q.CreatedAfter > 0 {
+		conds = append(conds, "m.created_at >= ?")
+		args = append(args, q.CreatedAfter)
+	}
+	if q.CreatedBefore > 0 {
+		conds = append(conds, "m.created_at <= ?")
+		args = append(args, q.CreatedBefore)
 	}
 	return conds, args
 }
@@ -536,6 +581,11 @@ func sanitizeFTSQuery(text string) string {
 // вызывался), возвращает (nil, nil) без ошибки — деградация до чистого FTS5, а не
 // падение recall (DESIGN.md §15).
 //
+// k-before-filter при активном Query.Tags (задача 8.2): в MATCH запрашивается
+// limit*vectorTagFilterPad вместо limit (см. константу), а внешний LIMIT ? обрезает
+// уже отфильтрованный результат обратно до исходного limit — иначе увеличенный запас
+// вернул бы больше кандидатов, чем просил вызывающий код.
+//
 // Как и SearchLexical, Tags кандидатов не заполняются (read-hot-path, см. коммент там).
 func (s *sqliteStore) SearchVector(ctx context.Context, vec []float32, q memory.Query) ([]memory.Candidate, error) {
 	// Пустой вектор запроса — не с чем сравнивать: деградируем до пустого векторного
@@ -563,6 +613,10 @@ func (s *sqliteStore) SearchVector(ctx context.Context, vec []float32, q memory.
 	if limit <= 0 {
 		limit = 50
 	}
+	knnK := limit
+	if len(q.Tags) > 0 {
+		knnK = limit * vectorTagFilterPad
+	}
 
 	conds, args := metaFilters(q)
 
@@ -574,8 +628,10 @@ func (s *sqliteStore) SearchVector(ctx context.Context, vec []float32, q memory.
 		FROM knn JOIN memories m ON m.id = knn.memory_id
 		WHERE ` + strings.Join(conds, " AND ") + `
 		ORDER BY knn.distance ASC
+		LIMIT ?
 	`
-	queryArgs := append([]any{blob, limit}, args...)
+	queryArgs := append([]any{blob, knnK}, args...)
+	queryArgs = append(queryArgs, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {

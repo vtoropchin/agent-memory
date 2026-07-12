@@ -19,6 +19,7 @@ func buildInstructions(scope config.ScopeConfig) string {
 
 	b.WriteString("AgentMemory — долговременная память агента. 4 инструмента: memory_save, memory_recall, memory_update, memory_forget.\n\n")
 	b.WriteString("- memory_recall — вызывай в начале задачи: возвращает Markdown-бриф релевантной памяти по смыслу запроса.\n")
+	b.WriteString("- memory_recall поддерживает фильтры tags (хотя бы один из тегов) и created_after/created_before (длительность назад от сейчас, напр. \"168h\" = за неделю).\n")
 	b.WriteString("- memory_save — сохраняй один атомарный факт/событие/процедуру (1–3 предложения) за вызов, не сваливай несколько фактов в одну запись.\n")
 	b.WriteString("- memory_update — правка существующего факта (содержание, важность, теги).\n")
 	b.WriteString("- memory_forget — мягкое удаление (тумстоун): запись перестаёт участвовать в recall, история сохраняется.\n\n")
