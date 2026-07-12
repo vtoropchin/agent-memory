@@ -50,7 +50,7 @@ memoryd init
 разложит:
 
 - MCP-конфиг (`.mcp.json` для Claude Code или `opencode.json` для opencode);
-- скил-инструкцию «Протокол работы с памятью» (когда звать recall/save/update/forget);
+- скил-инструкцию «Протокол работы с памятью» (см. [раздел ниже](#скил-протокол-работы-с-памятью));
 - `agentmemory.toml` со введёнными настройками;
 - `.env` с ключом DeepSeek (если ввёл) — с правами `0600` и строкой в `.gitignore`.
 
@@ -73,6 +73,33 @@ memoryd web
 и открыть `http://127.0.0.1:7070` — дашборд статистики, список записей с фильтрами по
 scope/kind, карточка записи с соседями по графу и лексический поиск. Слушает только
 localhost.
+
+## Скил «Протокол работы с памятью»
+
+Мало дать агенту четыре MCP-инструмента — он должен знать, когда их трогать. Поэтому
+`memoryd init`, кроме конфига, кладёт в проект скил — файл `SKILL.md` с `name: memoryd`:
+
+- Claude Code — `.claude/skills/memoryd/SKILL.md`
+- opencode — `.opencode/skills/memoryd/SKILL.md`
+
+Тело скила одно для всех приложений (различаются только путь файла и формат MCP-конфига),
+и агентское приложение подхватывает его само — по полю `description` оно понимает, когда
+протокол релевантен. Что внутри:
+
+- **Когда звать.** `memory_recall` — в начале любой задачи, чтобы подтянуть решения и
+  прогресс прошлых сессий. `memory_save` — по ходу и в конце, по одному атомарному факту
+  (1–3 предложения) за вызов. `memory_update` — когда факт изменился. `memory_forget` —
+  когда устарел или ошибочен (мягкое удаление).
+- **Правила scope.** `save` без явного scope пишет в `project:<name>`; `recall` без scope
+  ищет в `project:<name>` + `user:*`; явный scope перекрывает дефолт. Проектные
+  факты, решения и грабли — в `project:<name>`; общие привычки пользователя — в `user:*`.
+- **Если сервера нет.** Когда инструменты `memory_*` в сессии не видны (MCP-сервер не
+  поднят или не одобрен приложением) или reasoner/embedder деградировали — продолжать
+  задачу без долговременной памяти, предупредив об этом.
+
+Этот скил — обобщённая версия того, по которому сам AgentMemory ведёт свою разработку
+(`.claude/skills/dev`): проект хранит рабочую память в собственном `memoryd` и тем самым
+проверяет себя на себе.
 
 ## Использование
 
@@ -146,21 +173,11 @@ MVP: только SQLite+FTS5, без вектора и без LLM).
 
 ## Как это устроено
 
-```
-Agent ── MCP tools (stdio) ── Memory API (save/recall/update/forget)
-                                     │
-                    ┌────────────────┼────────────────┐
-                  Writer           Recall            Maint
-                (дедуп,        (FTS5+vec → RRF →   (decay,
-                классификация,   ранжирование →     consolidation,
-                связывание)      Markdown-бриф)      reindex)
-                    └────────────────┼────────────────┘
-                              Store: SQLite (metadata + FTS5 + vec)
-                                     │              │
-                                 Embedder        Reasoner
-                            (ollama/bge-m3,   (DeepSeek chat,
-                              опционален)       опционален)
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="Архитектура AgentMemory: агент вызывает MCP-инструменты memory_save/recall/update/forget; роутер internal/mcp направляет их в Writer (запись), Recall (поиск) и Maint (фоновые джобы); все три работают поверх Store — единого файла SQLite; Embedder (ollama) и Reasoner (DeepSeek) подключены пунктиром как опциональные слои" width="900">
+</p>
+
+<p align="center"><sub>Исходник для правок — <a href="docs/architecture.drawio">docs/architecture.drawio</a> (открывается в <a href="https://app.diagrams.net">draw.io</a>)</sub></p>
 
 - **Store** — единый SQLite-файл: таблица `memories`, FTS5-индекс, опциональная
   vec-таблица (`sqlite-vec`), всё за интерфейсом `Store`.

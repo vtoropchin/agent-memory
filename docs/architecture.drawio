@@ -1,0 +1,93 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="AgentMemory" id="agentmemory-arch">
+    <mxGraphModel dx="1200" dy="800" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1000" pageHeight="760" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="card" value="" style="rounded=1;arcSize=3;html=0;fillColor=#ffffff;strokeColor=#d0d7de;" vertex="1" parent="1">
+          <mxGeometry x="8" y="6" width="984" height="758" as="geometry" />
+        </mxCell>
+
+        <mxCell id="title" value="AgentMemory — архитектура" style="text;html=0;align=center;verticalAlign=middle;fontSize=22;fontStyle=1;fontColor=#1f2328;" vertex="1" parent="1">
+          <mxGeometry x="300" y="16" width="400" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="Долговременная память для ИИ-агентов · MCP-инструменты поверх SQLite" style="text;html=0;align=center;verticalAlign=middle;fontSize=12;fontColor=#656d76;" vertex="1" parent="1">
+          <mxGeometry x="250" y="44" width="500" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="agent" value="Агент&#10;другая сессия · другой агент" style="rounded=1;arcSize=12;whiteSpace=wrap;html=0;fillColor=#dbeafe;strokeColor=#3b82f6;fontColor=#1e3a8a;fontSize=13;fontStyle=1;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="80" width="280" height="52" as="geometry" />
+        </mxCell>
+
+        <mxCell id="tools" value="MCP-инструменты (stdio)&#10;memory_save · memory_recall · memory_update · memory_forget" style="rounded=1;arcSize=40;whiteSpace=wrap;html=0;fillColor=#f3e8ff;strokeColor=#a855f7;fontColor=#6b21a8;fontSize=12;fontFamily=Courier New;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="200" y="158" width="600" height="46" as="geometry" />
+        </mxCell>
+
+        <mxCell id="router" value="internal/mcp — роутинг вызовов, JSON-схемы&#10;при initialize отдаёт протокол-инструкцию любому MCP-клиенту" style="rounded=1;arcSize=10;whiteSpace=wrap;html=0;fillColor=#faf5ff;strokeColor=#a855f7;fontColor=#6b21a8;fontSize=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="200" y="230" width="600" height="48" as="geometry" />
+        </mxCell>
+
+        <mxCell id="writer" value="Writer  ·  internal/memory/write — запись&#10;&#10;• приём: kind · content · importance · tags · scope&#10;• дедуп в scope: FTS5 + SimHash по content&#10;• обновить · supersede (мягко) · вставить&#10;• связать [[links]] — граф записей&#10;• индекс: FTS5 всегда; вектор — если есть Embedder" style="rounded=1;arcSize=6;whiteSpace=wrap;html=0;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fillColor=#dcfce7;strokeColor=#22c55e;fontColor=#14532d;fontSize=11;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="320" width="290" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="recall" value="Recall  ·  internal/memory/recall — поиск&#10;&#10;• кандидаты: FTS5 (лексика) + vec (смысл)&#10;• слияние: Reciprocal Rank Fusion (k ≈ 60)&#10;• ранжир: relevance · importance · recency · access&#10;• сборка: Markdown-бриф под token_budget&#10;• опц.: суммаризация через Reasoner" style="rounded=1;arcSize=6;whiteSpace=wrap;html=0;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fillColor=#fef3c7;strokeColor=#f59e0b;fontColor=#78350f;fontSize=11;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="355" y="320" width="290" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="maint" value="Maint  ·  internal/memory/maint — фоновые джобы&#10;&#10;• decay: старые episodic → вес ↓ → архив&#10;• dedup-sweep: почти-дубли (SimHash)&#10;• consolidation: episodic → semantic&#10;• reindex: при смене Embedder-модели&#10;&#10;по расписанию из memoryd (scheduler)" style="rounded=1;arcSize=6;whiteSpace=wrap;html=0;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fillColor=#fce7f3;strokeColor=#ec4899;fontColor=#831843;fontSize=11;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="670" y="320" width="290" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="embedder" value="Embedder&#10;ollama · bge-m3&#10;(опциональный слой)&#10;&#10;• эмбеддинг при save / запросе&#10;• reindex в Maint&#10;• нет ollama → recall на FTS5" style="rounded=1;arcSize=8;whiteSpace=wrap;html=0;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fillColor=#ccfbf1;strokeColor=#0d9488;fontColor=#134e4a;fontSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="560" width="200" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="store" value="Store — единый файл SQLite&#10;WAL + busy_timeout · метаданные + FTS5 + vec&#10;&#10;memories · tags · links&#10;memories_fts (FTS5) · memories_vec (vec0) · embed_meta&#10;&#10;vec-таблица — только при включённом Embedder · superseded_by вместо DELETE" style="rounded=1;arcSize=6;whiteSpace=wrap;html=0;align=center;verticalAlign=middle;fillColor=#e2e8f0;strokeColor=#475569;fontColor=#334155;fontSize=11;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="270" y="560" width="460" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reasoner" value="Reasoner&#10;DeepSeek chat&#10;(опциональный слой)&#10;&#10;• суммаризация выдачи recall&#10;• консолидация episodic → semantic&#10;• нет ключа → без LLM-слоя" style="rounded=1;arcSize=8;whiteSpace=wrap;html=0;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fillColor=#cffafe;strokeColor=#0891b2;fontColor=#164e63;fontSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="560" width="200" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_agent_tools" value="MCP over stdio" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#475569;strokeWidth=1.6;fontColor=#656d76;fontSize=10;endArrow=classic;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="agent" target="tools">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_tools_router" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#475569;strokeWidth=1.6;endArrow=classic;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="tools" target="router">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_router_writer" value="save · update · forget" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#7c3aed;strokeWidth=1.8;fontColor=#7c3aed;fontSize=10;endArrow=classic;exitX=0.25;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="router" target="writer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_router_recall" value="recall" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#7c3aed;strokeWidth=1.8;fontColor=#7c3aed;fontSize=10;endArrow=classic;exitX=0.6;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="router" target="recall">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_writer_store" value="пишет" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#475569;strokeWidth=2;fontColor=#334155;fontSize=11;fontStyle=1;endArrow=classic;exitX=0.5;exitY=1;entryX=0.15;entryY=0;" edge="1" parent="1" source="writer" target="store">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_store_recall" value="читает" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#475569;strokeWidth=2;fontColor=#334155;fontSize=11;fontStyle=1;endArrow=classic;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="store" target="recall">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_maint_store" value="обслуживает" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#475569;strokeWidth=2;fontColor=#334155;fontSize=11;fontStyle=1;startArrow=classic;endArrow=classic;exitX=0.5;exitY=1;entryX=0.85;entryY=0;" edge="1" parent="1" source="maint" target="store">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_embedder_writer" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#0d9488;strokeWidth=1.8;dashed=1;dashPattern=6 4;endArrow=classic;exitX=0.5;exitY=0;entryX=0.15;entryY=1;" edge="1" parent="1" source="embedder" target="writer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_reasoner_maint" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;strokeColor=#0891b2;strokeWidth=1.8;dashed=1;dashPattern=6 4;endArrow=classic;exitX=0.5;exitY=0;entryX=0.85;entryY=1;" edge="1" parent="1" source="reasoner" target="maint">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="→ основной поток (запись · чтение · обслуживание)      ⇢ опциональный слой: при недоступности деградирует (recall на FTS5, без сводки), а не падает&#10;kind: semantic · episodic · procedural      scope: user:* · project:&lt;name&gt; · agent:self — recall фильтруется по scope      слияние кандидатов: RRF" style="text;html=0;align=left;verticalAlign=middle;fontSize=10;fontColor=#374151;" vertex="1" parent="1">
+          <mxGeometry x="40" y="722" width="920" height="34" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
