@@ -157,6 +157,12 @@ type initConfig struct {
 // из диспетчера в main.go для тестируемости.
 func runInit(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	fs.SetOutput(out)
+	fs.Usage = func() {
+		fmt.Fprintln(out, "устанавливает память в проект: генерирует MCP-конфиг, скил-инструкцию и agentmemory.toml.")
+		fmt.Fprintln(out, "Использование: memoryd init [флаги]")
+		fs.PrintDefaults()
+	}
 	project := fs.String("project", "", "имя проекта (дефолт — базовое имя каталога -dir)")
 	dir := fs.String("dir", ".", "каталог, в который скаффолдить артефакты")
 	force := fs.Bool("force", false, "перезаписывать существующие файлы")

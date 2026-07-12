@@ -1,16 +1,59 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
 )
+
+func TestWriteUsage(t *testing.T) {
+	var buf bytes.Buffer
+	writeUsage(&buf)
+	out := buf.String()
+
+	wantSubstrings := []string{
+		"memoryd init",
+		"memoryd web",
+		"-config",
+		"-db",
+		"DEEPSEEK_API_KEY",
+		"stdio",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(out, want) {
+			t.Errorf("writeUsage() вывод не содержит %q; вывод:\n%s", want, out)
+		}
+	}
+}
+
+func TestIsHelpArg(t *testing.T) {
+	tests := []struct {
+		arg  string
+		want bool
+	}{
+		{"-h", true},
+		{"-help", true},
+		{"--help", true},
+		{"help", true},
+		{"init", false},
+		{"web", false},
+		{"-config", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isHelpArg(tt.arg); got != tt.want {
+			t.Errorf("isHelpArg(%q) = %v, хочу %v", tt.arg, got, tt.want)
+		}
+	}
+}
 
 func TestNewReasoner(t *testing.T) {
 	tests := []struct {

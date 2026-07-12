@@ -55,6 +55,12 @@ var webFS embed.FS
 // лексически (без ollama/DeepSeek).
 func runWeb(args []string, stdout io.Writer) error {
 	flagSet := flag.NewFlagSet("web", flag.ExitOnError)
+	flagSet.SetOutput(stdout)
+	flagSet.Usage = func() {
+		fmt.Fprintln(stdout, "поднимает HTTP-морду для просмотра и поиска памяти в браузере (read-only).")
+		fmt.Fprintln(stdout, "Использование: memoryd web [флаги]")
+		flagSet.PrintDefaults()
+	}
 	addr := flagSet.String("addr", defaultWebAddr, "адрес прослушивания HTTP")
 	configPath := flagSet.String("config", "", "путь к TOML-конфигу (опционально)")
 	dbPath := flagSet.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")

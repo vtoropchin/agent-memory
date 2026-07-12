@@ -7,11 +7,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"text/tabwriter"
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/mcp"
@@ -28,6 +30,14 @@ import (
 const deepseekAPIKeyEnv = "DEEPSEEK_API_KEY"
 
 func main() {
+	// Справка верхнего уровня — перехватывается до диспетчеризации init/web и
+	// до log.SetOutput(os.Stderr): сервер ещё не стартовал, поэтому печать в
+	// stdout здесь безопасна и не портит протокол MCP.
+	if len(os.Args) >= 2 && isHelpArg(os.Args[1]) {
+		writeUsage(os.Stdout)
+		return
+	}
+
 	// `memoryd init` — скаффолдинг .mcp.json + agentmemory.toml (задача 5.3),
 	// диспетчеризуется до разбора серверных флагов и работы с конфигом/store,
 	// поэтому `memoryd`, `memoryd -config ...`, `memoryd -db ...` не затронуты.
@@ -188,4 +198,48 @@ func newEmbedder(ctx context.Context, cfg config.EmbedderConfig) (embed.Embedder
 	default:
 		return nil, fmt.Errorf("неизвестный embedder.provider %q", cfg.Provider)
 	}
+}
+
+// isHelpArg проверяет, что arg — один из стандартных способов запросить
+// справку верхнего уровня.
+func isHelpArg(arg string) bool {
+	switch arg {
+	case "-h", "-help", "--help", "help":
+		return true
+	default:
+		return false
+	}
+}
+
+// writeUsage печатает справку верхнего уровня memoryd: что это, три формы
+// запуска, флаги серверного режима и подкоманды. Вынесена из main для
+// тестируемости.
+func writeUsage(w io.Writer) {
+	fmt.Fprintln(w, "memoryd — сервер долговременной памяти для ИИ-агентов (MCP поверх SQLite).")
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "Использование:")
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  memoryd [-config <path>] [-db <path>]\tзапуск MCP-сервера (режим по умолчанию, транспорт stdio)")
+	fmt.Fprintln(tw, "  memoryd init [флаги]\tустановить память в проект (генерирует MCP-конфиг и скил)")
+	fmt.Fprintln(tw, "  memoryd web [флаги]\tHTTP-морда для просмотра памяти в браузере")
+	tw.Flush()
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "Режим сервера (по умолчанию):")
+	tw = tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  -config <path>\tпуть к TOML-конфигу (опционально)")
+	fmt.Fprintln(tw, "  -db <path>\tпуть к файлу SQLite, переопределяет store.path из конфига")
+	tw.Flush()
+	fmt.Fprintln(w, "  ключ DeepSeek берётся из переменной окружения DEEPSEEK_API_KEY или из .env")
+	fmt.Fprintln(w, "  рядом с конфигом; вектор (ollama) опционален, при недоступности recall")
+	fmt.Fprintln(w, "  работает на полнотекстовом поиске.")
+	fmt.Fprintln(w)
+
+	fmt.Fprintln(w, "Подкоманды:")
+	tw = tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  init\tустановщик памяти в проект (агентское приложение, ollama, DeepSeek-ключ)")
+	fmt.Fprintln(tw, "  web\tHTTP-морда для просмотра и поиска памяти")
+	tw.Flush()
+	fmt.Fprintln(w, "  memoryd init -h и memoryd web -h — подробности по флагам каждой.")
 }
