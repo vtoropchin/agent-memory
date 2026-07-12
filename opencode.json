@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "agentmemory": {
+      "type": "local",
+      "command": [
+        "/Users/vladimir/.local/bin/memoryd",
+        "-config",
+        "agentmemory.toml"
+      ],
+      "enabled": true,
+      "environment": {
+        "DEEPSEEK_API_KEY": "{env:DEEPSEEK_API_KEY}"
+      }
+    }
+  }
+}
