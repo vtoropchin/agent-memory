@@ -29,6 +29,40 @@ const (
 	defaultStorePath     = "~/.agentmemory/memory.db"
 )
 
+// Значения initConfig.Hooks — какие хуки Claude Code подключить для
+// ambient-режима (авто-recall, DESIGN.md §12, задача 7.2). hooksOptions —
+// порядок вариантов в интерактивном промпте (первый — дефолт: session-start
+// один покрывает основной сценарий «recall в начале задачи» дешевле всего;
+// prompt-submit добавляет цену на каждое сообщение, поэтому не дефолт).
+const (
+	hooksSessionStart = "session-start"
+	hooksBoth         = "session-start+prompt-submit"
+	hooksNone         = "none"
+)
+
+var hooksOptions = []string{hooksSessionStart, hooksBoth, hooksNone}
+
+// hookEventMapping — одно событие Claude Code (ключ секции `hooks` в
+// settings.json) и соответствующее значение флага `-event` подкоманды
+// `memoryd hook`.
+type hookEventMapping struct {
+	ClaudeEvent  string // "SessionStart" | "UserPromptSubmit"
+	MemorydEvent string // "session-start" | "prompt-submit"
+}
+
+// hookEventsByChoice — какие события подключает каждое значение
+// initConfig.Hooks. hooksNone намеренно отсутствует — для него подключать
+// нечего.
+var hookEventsByChoice = map[string][]hookEventMapping{
+	hooksSessionStart: {
+		{ClaudeEvent: "SessionStart", MemorydEvent: "session-start"},
+	},
+	hooksBoth: {
+		{ClaudeEvent: "SessionStart", MemorydEvent: "session-start"},
+		{ClaudeEvent: "UserPromptSubmit", MemorydEvent: "prompt-submit"},
+	},
+}
+
 // configTomlTemplate — шаблон agentmemory.toml по образцу корневого
 // agentmemory.toml/config.example.toml (DESIGN.md §13). Константа-строка, а не
 // toml.Marshal — так сохраняются комментарии. %[1]s — экранированное имя
@@ -150,6 +184,7 @@ type initConfig struct {
 	OllamaModel   string
 	StorePath     string
 	DeepseekKey   string
+	Hooks         string // "" | session-start | session-start+prompt-submit | none (см. hooksOptions)
 	Force         bool
 }
 
@@ -171,6 +206,7 @@ func runInit(args []string, out io.Writer) error {
 	ollamaModel := fs.String("ollama-model", "", "модель эмбеддингов ollama (дефолт "+defaultOllamaModel+")")
 	store := fs.String("store", "", "путь к файлу SQLite (дефолт "+defaultStorePath+")")
 	deepseekKey := fs.String("deepseek-key", "", "ключ DeepSeek API — пишется в <dir>/.env (осторожно: попадёт в историю shell)")
+	hooks := fs.String("hooks", "", fmt.Sprintf("хуки Claude Code для ambient-режима (%s); дефолт %s в интерактивном режиме, %s без него", strings.Join(hooksOptions, ", "), hooksSessionStart, hooksNone))
 	noInput := fs.Bool("no-input", false, "не спрашивать интерактивно — использовать только флаги и дефолты")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора
 
@@ -183,6 +219,7 @@ func runInit(args []string, out io.Writer) error {
 		OllamaModel:   *ollamaModel,
 		StorePath:     *store,
 		DeepseekKey:   *deepseekKey,
+		Hooks:         *hooks,
 	}
 
 	if !*noInput && isInteractiveStdin() {
@@ -250,6 +287,11 @@ func promptInit(in io.Reader, out io.Writer, cfg initConfig) initConfig {
 	if cfg.DeepseekKey == "" {
 		fmt.Fprintln(out, "ключ DeepSeek виден в терминале при вводе — можно пропустить и указать позже в .env")
 		cfg.DeepseekKey = promptLine(sc, out, "DeepSeek API key (Enter — пропустить)", "")
+	}
+	// Ambient-режим через хуки харнесса — только для Claude Code (задача 7.2);
+	// у opencode аналога хуков нет, доInit сам честно сообщит об этом в выводе.
+	if cfg.Agent == "claude" && cfg.Hooks == "" {
+		cfg.Hooks = promptChoice(sc, out, "подключить автоматический recall через хуки Claude Code (ambient-режим)", hooksOptions, hooksSessionStart)
 	}
 	return cfg
 }
@@ -379,6 +421,19 @@ func doInit(cfg initConfig, out io.Writer) error {
 		if err := ensureGitignoreEntry(filepath.Join(cfg.Dir, ".gitignore"), ".env", out); err != nil {
 			return err
 		}
+	}
+
+	if cfg.Agent == "claude" {
+		if mappings, ok := hookEventsByChoice[cfg.Hooks]; ok {
+			if err := setupClaudeHooks(cfg.Dir, command, mappings, out); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Ambient-режим (авто-recall через хуки) — механика харнесса Claude
+		// Code; у второго поддерживаемого приложения (opencode) аналога нет —
+		// честно сообщаем об этом, а не молчим (задача 7.2).
+		fmt.Fprintf(out, "ambient-режим (авто-recall через хуки) поддерживает только Claude Code — для %s недоступен\n", target.label)
 	}
 
 	fmt.Fprintf(out, "проект: %s\n", project)
@@ -542,4 +597,131 @@ func ensureGitignoreEntry(path, entry string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "обновлено: %s (добавлена строка %q)\n", path, entry)
 	return nil
+}
+
+// hookConfigAnchor — путь к agentmemory.toml, который подставляется в команду
+// хука: ${CLAUDE_PROJECT_DIR} — тот же приём, что уже используется для
+// mcpServerArgs (.mcp.json) — Claude Code подставляет его на абсолютный корень
+// проекта; ":-." — фолбэк на текущий каталог, если переменная почему-то не
+// задана (симметрично mcpServerArgs).
+const hookConfigAnchor = "${CLAUDE_PROJECT_DIR:-.}/agentmemory.toml"
+
+// buildHookCommand собирает shell-команду одной matcher-записи хука:
+// абсолютный путь к бинарю memoryd (memorydPath — тот же, что уже разрешён в
+// doInit для .mcp.json, см. os.Executable()/фолбэк на "memoryd" из PATH) +
+// подкоманда `hook` с нужным -event и -config. memorydPath обёрнут в кавычки
+// (%q) — путь может содержать пробелы.
+func buildHookCommand(memorydPath, event string) string {
+	return fmt.Sprintf("%q hook -event %s -config %s", memorydPath, event, hookConfigAnchor)
+}
+
+// setupClaudeHooks мержит в <dir>/.claude/settings.json команды `memoryd hook`
+// для событий из mappings (DESIGN.md §12, задача 7.2) и печатает в out, что
+// именно обновлено.
+func setupClaudeHooks(dir, memorydPath string, mappings []hookEventMapping, out io.Writer) error {
+	eventCommands := make(map[string]string, len(mappings))
+	claudeEvents := make([]string, 0, len(mappings))
+	for _, m := range mappings {
+		eventCommands[m.ClaudeEvent] = buildHookCommand(memorydPath, m.MemorydEvent)
+		claudeEvents = append(claudeEvents, m.ClaudeEvent)
+	}
+
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := mergeClaudeHooks(settingsPath, eventCommands); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "обновлено: %s (хуки: %s)\n", settingsPath, strings.Join(claudeEvents, ", "))
+	return nil
+}
+
+// hookMatcherEntry — одна matcher-запись в массиве события секции `hooks`
+// settings.json Claude Code: matcher (пустая строка — срабатывает всегда) +
+// список команд. Сама команда описана как map[string]any, а не отдельным
+// типом с полями type/command — так merge не теряет чужие ключи вроде
+// "timeout" у уже существующих записей при пере-сериализации.
+type hookMatcherEntry struct {
+	Matcher string           `json:"matcher"`
+	Hooks   []map[string]any `json:"hooks"`
+}
+
+// mergeClaudeHooks дописывает в settingsPath команды из eventCommands (ключ —
+// имя события Claude Code, значение — shell-команда), не трогая остальные
+// ключи файла верхнего уровня и остальные события/matcher-записи секции
+// `hooks` (DESIGN.md §12, задача 7.2). Существующий settingsPath парсится как
+// map[string]json.RawMessage — все ключи, кроме "hooks", остаются как есть
+// байт-в-байт; сама секция "hooks" разбирается точечно только на глубину
+// событие -> []hookMatcherEntry, поэтому события, которые эта функция не
+// трогает (Stop, PreToolUse и т.п.), проходят через неё без потерь.
+// Идемпотентно: если для события уже есть matcher-запись с точно такой же
+// командой — новая не добавляется. Битый существующий JSON — ошибка, файл не
+// создаётся и не перезаписывается.
+func mergeClaudeHooks(settingsPath string, eventCommands map[string]string) error {
+	raw := map[string]json.RawMessage{}
+	existing, err := os.ReadFile(settingsPath)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(existing, &raw); err != nil {
+			return fmt.Errorf("разбор %q: %w", settingsPath, err)
+		}
+	case os.IsNotExist(err):
+		// файла нет — начинаем с пустого объекта верхнего уровня
+	default:
+		return fmt.Errorf("чтение %q: %w", settingsPath, err)
+	}
+
+	hooksSection := map[string][]hookMatcherEntry{}
+	if rawHooks, ok := raw["hooks"]; ok {
+		if err := json.Unmarshal(rawHooks, &hooksSection); err != nil {
+			return fmt.Errorf("разбор секции hooks в %q: %w", settingsPath, err)
+		}
+	}
+
+	// Сортированный порядок событий — детерминированный вывод/тесты.
+	events := make([]string, 0, len(eventCommands))
+	for ev := range eventCommands {
+		events = append(events, ev)
+	}
+	sort.Strings(events)
+
+	for _, event := range events {
+		command := eventCommands[event]
+		if hasHookCommand(hooksSection[event], command) {
+			continue // идемпотентность: команда уже вписана
+		}
+		hooksSection[event] = append(hooksSection[event], hookMatcherEntry{
+			Matcher: "",
+			Hooks:   []map[string]any{{"type": "command", "command": command}},
+		})
+	}
+
+	hooksRaw, err := json.Marshal(hooksSection)
+	if err != nil {
+		return fmt.Errorf("сборка секции hooks: %w", err)
+	}
+	raw["hooks"] = hooksRaw
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("сборка %q: %w", settingsPath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		return fmt.Errorf("создание каталога %q: %w", filepath.Dir(settingsPath), err)
+	}
+	if err := os.WriteFile(settingsPath, append(out, '\n'), 0o644); err != nil {
+		return fmt.Errorf("запись %q: %w", settingsPath, err)
+	}
+	return nil
+}
+
+// hasHookCommand проверяет, есть ли среди matcher-записей entries хотя бы
+// одна команда, точно равная command.
+func hasHookCommand(entries []hookMatcherEntry, command string) bool {
+	for _, e := range entries {
+		for _, h := range e.Hooks {
+			if cmd, _ := h["command"].(string); cmd == command {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -61,25 +61,7 @@ func runRecall(args []string, out io.Writer) error {
 	}
 	loadDotEnvForConfig(*configPath, "memoryd recall")
 
-	s, err := store.Open(cfg.Store.Path)
-	if err != nil {
-		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
-	}
-	defer func() {
-		if err := s.Close(); err != nil {
-			log.Printf("memoryd recall: закрытие хранилища: %v", err)
-		}
-	}()
-
 	ctx := context.Background()
-	reasoner, err := newReasoner(cfg.Reasoner)
-	if err != nil {
-		return fmt.Errorf("создание reasoner: %w", err)
-	}
-	embedder, err := newEmbedder(ctx, cfg.Embedder)
-	if err != nil {
-		return fmt.Errorf("создание embedder: %w", err)
-	}
 
 	// Разрешение scope — той же логикой, что resolveRecallScopes в internal/mcp
 	// (приоритет явного набора над дефолтом инстанса): здесь единственный явный
@@ -91,8 +73,7 @@ func runRecall(args []string, out io.Writer) error {
 		scopes = cfg.Scope.RecallScopes()
 	}
 
-	r := recall.New(s, cfg.Recall, reasoner, embedder)
-	brief, err := r.Recall(ctx, memory.Query{
+	brief, err := doRecall(ctx, cfg, "memoryd recall", memory.Query{
 		Text:        query,
 		Scopes:      scopes,
 		Kinds:       splitCSV(*kindsFlag),
@@ -116,6 +97,41 @@ func runRecall(args []string, out io.Writer) error {
 	}
 	fmt.Fprintln(out, brief.Markdown)
 	return nil
+}
+
+// doRecall выполняет один Recall над уже загруженным cfg: открывает
+// хранилище, создаёт reasoner/embedder через newReasoner/newEmbedder (та же
+// деградация до Noop, что у серверного режима — предупреждения только в
+// stderr), выполняет q и закрывает хранилище перед возвратом. logPrefix —
+// префикс сообщения в лог о закрытии хранилища (у recall/hook он разный).
+// Общий приватный хелпер для `memoryd recall` (runRecall выше) и `memoryd
+// hook` (runHook, задача 7.2, hook.go) — единственная точка, открывающая
+// store+reasoner+embedder для recall-пути в CLI-режиме; caller сам решает,
+// что делать с cfg.Store.Path (напр. runRecall применяет поверх него -db) и с
+// Query.Scopes (recall — флаг -scopes, hook — дефолт инстанса напрямую).
+// maint-планировщик здесь не запускается — это не демон.
+func doRecall(ctx context.Context, cfg config.Config, logPrefix string, q memory.Query) (memory.Brief, error) {
+	s, err := store.Open(cfg.Store.Path)
+	if err != nil {
+		return memory.Brief{}, fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			log.Printf("%s: закрытие хранилища: %v", logPrefix, err)
+		}
+	}()
+
+	reasoner, err := newReasoner(cfg.Reasoner)
+	if err != nil {
+		return memory.Brief{}, fmt.Errorf("создание reasoner: %w", err)
+	}
+	embedder, err := newEmbedder(ctx, cfg.Embedder)
+	if err != nil {
+		return memory.Brief{}, fmt.Errorf("создание embedder: %w", err)
+	}
+
+	r := recall.New(s, cfg.Recall, reasoner, embedder)
+	return r.Recall(ctx, q)
 }
 
 // runSave разбирает флаги подкоманды `save` и выполняет один Save, печатая

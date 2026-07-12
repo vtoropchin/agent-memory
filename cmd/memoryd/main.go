@@ -80,6 +80,18 @@ func main() {
 		return
 	}
 
+	// `memoryd hook` — обёртка над recall-путём для хуков Claude Code
+	// (SessionStart/UserPromptSubmit, задача 7.2). В отличие от recall/save,
+	// ошибка НЕ приводит к os.Exit(1) — только к логу в stderr: хук обязан
+	// завершаться нулевым кодом при любой ошибке (нет конфига/БД, битый
+	// stdin), иначе он мог бы сломать старт или ход сессии агента.
+	if len(os.Args) >= 2 && os.Args[1] == "hook" {
+		if err := runHook(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			log.Printf("memoryd hook: %v", err)
+		}
+		return
+	}
+
 	// Транспорт MCP использует stdout для протокола — всё логирование только в
 	// stderr, иначе лог-строки повредят JSON-RPC поток.
 	log.SetOutput(os.Stderr)
@@ -236,6 +248,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  memoryd web [флаги]\tHTTP-морда для просмотра памяти в браузере")
 	fmt.Fprintln(tw, "  memoryd recall [флаги] \"<запрос>\"\tразовый поиск по памяти (Markdown-бриф в stdout)")
 	fmt.Fprintln(tw, "  memoryd save [флаги]\tразовое сохранение факта в память")
+	fmt.Fprintln(tw, "  memoryd hook -event <name> [флаги]\tхук Claude Code (session-start|prompt-submit), JSON события на stdin")
 	tw.Flush()
 	fmt.Fprintln(w)
 
@@ -255,6 +268,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  web\tHTTP-морда для просмотра и поиска памяти")
 	fmt.Fprintln(tw, "  recall\tодноразовый recall из shell/скрипта/хука агента (флаг -quiet — для хуков)")
 	fmt.Fprintln(tw, "  save\tодноразовый save из shell/скрипта; -content - читает факт из stdin")
+	fmt.Fprintln(tw, "  hook\tхук-режим для .claude/settings.json (см. `memoryd init`): любая ошибка → пустой stdout, exit 0")
 	tw.Flush()
-	fmt.Fprintln(w, "  memoryd init -h, memoryd web -h, memoryd recall -h, memoryd save -h — подробности по флагам каждой.")
+	fmt.Fprintln(w, "  memoryd init -h, memoryd web -h, memoryd recall -h, memoryd save -h, memoryd hook -h — подробности по флагам каждой.")
 }

@@ -374,6 +374,7 @@ func TestPromptInit_FlagsSkipPrompts(t *testing.T) {
 		OllamaModel:   "preset-model",
 		StorePath:     "/preset/path.db",
 		DeepseekKey:   "preset-key",
+		Hooks:         "none",
 	}
 	got := promptInit(in, &out, cfg)
 	if got != cfg {
@@ -442,6 +443,250 @@ func TestRunInit_NonInteractive_DoesNotBlock(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "agentmemory.toml")); err != nil {
 		t.Errorf("agentmemory.toml не создан: %v", err)
+	}
+}
+
+// TestDoInit_HooksSessionStartWritesSettingsJSON проверяет, что при
+// Hooks="session-start" doInit пишет секцию hooks в .claude/settings.json с
+// командой memoryd hook -event session-start (задача 7.2), и что повторный
+// init не дублирует запись (идемпотентность).
+func TestDoInit_HooksSessionStartWritesSettingsJSON(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksSessionStart}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", settingsPath, err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("settings.json невалиден: %v\n%s", err, raw)
+	}
+	hooks, ok := settings["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings.json.hooks отсутствует или не объект: %s", raw)
+	}
+	sessionStart, ok := hooks["SessionStart"].([]any)
+	if !ok || len(sessionStart) != 1 {
+		t.Fatalf("settings.json.hooks.SessionStart = %v, хочу один matcher-элемент", hooks["SessionStart"])
+	}
+	if _, hasPromptSubmit := hooks["UserPromptSubmit"]; hasPromptSubmit {
+		t.Errorf("settings.json.hooks содержит UserPromptSubmit при Hooks=%q, не должен", hooksSessionStart)
+	}
+	entry, ok := sessionStart[0].(map[string]any)
+	if !ok {
+		t.Fatalf("SessionStart[0] не объект: %v", sessionStart[0])
+	}
+	entryHooks, ok := entry["hooks"].([]any)
+	if !ok || len(entryHooks) != 1 {
+		t.Fatalf("SessionStart[0].hooks = %v, хочу один элемент", entry["hooks"])
+	}
+	cmdObj, ok := entryHooks[0].(map[string]any)
+	if !ok {
+		t.Fatalf("SessionStart[0].hooks[0] не объект: %v", entryHooks[0])
+	}
+	if cmdObj["type"] != "command" {
+		t.Errorf("hooks[0].type = %v, хочу command", cmdObj["type"])
+	}
+	cmd, _ := cmdObj["command"].(string)
+	if !strings.Contains(cmd, "hook -event session-start") || !strings.Contains(cmd, "agentmemory.toml") {
+		t.Errorf("hooks[0].command = %q, хочу упоминание \"hook -event session-start\" и agentmemory.toml", cmd)
+	}
+
+	// Повторный init (идемпотентность) не должен задублировать запись.
+	var out2 bytes.Buffer
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksSessionStart, Force: true}, &out2); err != nil {
+		t.Fatalf("doInit повторно: %v", err)
+	}
+	raw2, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", settingsPath, err)
+	}
+	var settings2 map[string]any
+	if err := json.Unmarshal(raw2, &settings2); err != nil {
+		t.Fatalf("settings.json невалиден после повтора: %v\n%s", err, raw2)
+	}
+	hooks2 := settings2["hooks"].(map[string]any)
+	sessionStart2 := hooks2["SessionStart"].([]any)
+	if len(sessionStart2) != 1 {
+		t.Errorf("повторный init задублировал matcher-записи SessionStart: %v", sessionStart2)
+	}
+}
+
+// TestDoInit_HooksBothWritesBothEvents проверяет, что
+// Hooks="session-start+prompt-submit" пишет обе секции события.
+func TestDoInit_HooksBothWritesBothEvents(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksBoth}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", settingsPath, err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("settings.json невалиден: %v\n%s", err, raw)
+	}
+	hooks := settings["hooks"].(map[string]any)
+	if _, ok := hooks["SessionStart"]; !ok {
+		t.Errorf("settings.json.hooks не содержит SessionStart: %s", raw)
+	}
+	if _, ok := hooks["UserPromptSubmit"]; !ok {
+		t.Errorf("settings.json.hooks не содержит UserPromptSubmit: %s", raw)
+	}
+}
+
+// TestDoInit_HooksNoneDoesNotTouchSettingsJSON проверяет, что Hooks="none" (и
+// пустое значение по умолчанию) не создают .claude/settings.json вовсе.
+func TestDoInit_HooksNoneDoesNotTouchSettingsJSON(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksNone}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Errorf("settings.json создан при Hooks=none: err=%v", err)
+	}
+}
+
+// TestDoInit_HooksMergePreservesExistingSettings проверяет ключевое свойство
+// merge (задача 7.2): существующий settings.json с чужими верхнеуровневыми
+// ключами и чужими хуками (другое событие, другой matcher/timeout) не теряет
+// их после того, как doInit дописывает свою секцию SessionStart.
+func TestDoInit_HooksMergePreservesExistingSettings(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	existing := `{
+  "permissions": {"allow": ["Bash(go test:*)"]},
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo pretooluse", "timeout": 5}]}
+    ],
+    "SessionStart": [
+      {"matcher": "compact", "hooks": [{"type": "command", "command": "echo custom-compact-hook"}]}
+    ]
+  }
+}`
+	if err := os.WriteFile(settingsPath, []byte(existing), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksSessionStart}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("чтение: %v", err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("settings.json невалиден: %v\n%s", err, raw)
+	}
+
+	perms, ok := settings["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("чужой верхнеуровневый ключ permissions потерян: %s", raw)
+	}
+	if allow, _ := perms["allow"].([]any); len(allow) != 1 || allow[0] != "Bash(go test:*)" {
+		t.Errorf("permissions.allow повреждён: %v", perms["allow"])
+	}
+
+	hooks := settings["hooks"].(map[string]any)
+	preToolUse, ok := hooks["PreToolUse"].([]any)
+	if !ok || len(preToolUse) != 1 {
+		t.Fatalf("чужое событие PreToolUse потеряно: %v", hooks["PreToolUse"])
+	}
+	ptEntry := preToolUse[0].(map[string]any)
+	if ptEntry["matcher"] != "Bash" {
+		t.Errorf("PreToolUse[0].matcher = %v, хочу Bash", ptEntry["matcher"])
+	}
+	ptHooks := ptEntry["hooks"].([]any)
+	ptCmd := ptHooks[0].(map[string]any)
+	if ptCmd["command"] != "echo pretooluse" || ptCmd["timeout"] != float64(5) {
+		t.Errorf("PreToolUse[0].hooks[0] повреждён: %v", ptCmd)
+	}
+
+	sessionStart := hooks["SessionStart"].([]any)
+	if len(sessionStart) != 2 {
+		t.Fatalf("SessionStart = %v, хочу 2 matcher-записи (чужая compact + новая пустая)", sessionStart)
+	}
+	var foundCustom, foundOurs bool
+	for _, e := range sessionStart {
+		entry := e.(map[string]any)
+		entryHooks := entry["hooks"].([]any)
+		cmd, _ := entryHooks[0].(map[string]any)["command"].(string)
+		if entry["matcher"] == "compact" && cmd == "echo custom-compact-hook" {
+			foundCustom = true
+		}
+		if strings.Contains(cmd, "hook -event session-start") {
+			foundOurs = true
+		}
+	}
+	if !foundCustom {
+		t.Errorf("чужая matcher-запись SessionStart[compact] потеряна: %v", sessionStart)
+	}
+	if !foundOurs {
+		t.Errorf("новая matcher-запись memoryd hook не добавлена: %v", sessionStart)
+	}
+}
+
+// TestDoInit_HooksMalformedExistingSettingsErrorsWithoutWrite проверяет, что
+// битый JSON в существующем settings.json — ошибка, а не перезапись/потеря
+// файла.
+func TestDoInit_HooksMalformedExistingSettingsErrorsWithoutWrite(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	const broken = "{ не валидный json"
+	if err := os.WriteFile(settingsPath, []byte(broken), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksSessionStart}, &out)
+	if err == nil {
+		t.Fatalf("doInit = nil error, хочу ошибку разбора settings.json")
+	}
+
+	raw, readErr := os.ReadFile(settingsPath)
+	if readErr != nil {
+		t.Fatalf("чтение: %v", readErr)
+	}
+	if string(raw) != broken {
+		t.Errorf("settings.json изменён после ошибки: %q", raw)
+	}
+}
+
+// TestDoInit_HooksOpencodeNotesUnsupported проверяет, что для opencode init не
+// пишет settings.json (у opencode нет аналога хуков), а честно сообщает об
+// этом в выводе (задача 7.2).
+func TestDoInit_HooksOpencodeNotesUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	var out bytes.Buffer
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode", Hooks: hooksSessionStart}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Errorf("settings.json создан для opencode: err=%v", err)
+	}
+	if !strings.Contains(out.String(), "только Claude Code") {
+		t.Errorf("вывод не сообщает об отсутствии ambient-режима у opencode: %s", out.String())
 	}
 }
 
