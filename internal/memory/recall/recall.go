@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -104,16 +105,40 @@ var sections = []section{
 	{memory.KindEpisodic, "Recent context (episodic)"},
 }
 
-// rrfEntry — запись, слитая из одного или нескольких источников, с накопленным RRF-score.
+// rrfEntry — запись, слитая из одного или нескольких источников, с накопленным
+// RRF-score. sources хранит ВСЕ источники, давшие эту запись (в порядке первого
+// появления при слиянии в fuseRRF) — нужно для Explain (задача 8.1), само
+// ранжирование по sources не зависит.
 type rrfEntry struct {
-	mem memory.Memory
-	rrf float64
+	mem     memory.Memory
+	rrf     float64
+	sources []string
 }
 
 // scoredCandidate — запись с итоговым final-score после наложения бизнес-сигналов.
+// explain дублирует уже вычисленные в rank() слагаемые — собирается всегда (это то
+// же самое вычисление, что и final, без пересчёта), а рендерится в бриф только при
+// Query.Explain (см. selectByBudget).
 type scoredCandidate struct {
-	mem   memory.Memory
-	final float64
+	mem     memory.Memory
+	final   float64
+	explain Explain
+}
+
+// Explain — трасса ранжирования одной записи брифа (DESIGN.md §8, §12, задача 8.1):
+// собирается в rank() для каждой выжившей записи и рендерится в Markdown-бриф под
+// каждой строкой, если задан Query.Explain. Все поля — уже вычисленные в rank()
+// величины (RRF-слияние + разложение final на слагаемые после весов
+// config.RecallWeights), а не отдельный пересчёт: Relevance+Importance+Recency+Access
+// равно Final с точностью до округления при печати (formatExplainLine).
+type Explain struct {
+	Sources    []string // источники кандидата, слитые в эту запись: "lexical", "vector" (memory.Candidate.Source)
+	RRF        float64  // сырой (ненормированный) RRF-скор слияния — Σ 1/(k+rank) по источникам
+	Relevance  float64  // w_relevance * rrf_norm
+	Importance float64  // w_importance * (importance/5)
+	Recency    float64  // w_recency * recency_decay
+	Access     float64  // w_access * log1p(access_count)
+	Final      float64  // итог (Relevance+Importance+Recency+Access), по которому отсортирован бриф
 }
 
 // Recall выполняет read path целиком: кандидаты -> RRF-слияние -> ранжирование ->
@@ -152,14 +177,14 @@ func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, er
 		return scored[i].mem.CreatedAt > scored[j].mem.CreatedAt
 	})
 
-	included, collapsed := selectByBudget(scored, budget)
+	included, collapsed := selectByBudget(scored, budget, q.Explain)
 
 	for _, c := range included {
 		// Touch — best-effort: ошибка усиления доступа не должна ронять recall.
 		_ = r.store.Touch(ctx, c.mem.Id)
 	}
 
-	brief := buildBrief(included, collapsed)
+	brief := buildBrief(included, collapsed, q.Explain)
 	if q.Summarize {
 		brief = r.withSummary(ctx, brief)
 	}
@@ -240,6 +265,12 @@ func fuseRRF(sources ...[]memory.Candidate) []rrfEntry {
 				order = append(order, c.Memory.Id)
 			}
 			e.rrf += 1.0 / float64(rrfK+rank)
+			// Explain (задача 8.1): запись сохраняет ВСЕ источники, а не только
+			// первый встреченный — порядок внешнего цикла (лексика, затем вектор,
+			// см. вызов в Recall) уже даёт детерминированный порядок в срезе.
+			if !slices.Contains(e.sources, c.Source) {
+				e.sources = append(e.sources, c.Source)
+			}
 		}
 	}
 
@@ -272,12 +303,25 @@ func (r *Recaller) rank(entries []rrfEntry) []scoredCandidate {
 		recency := recencyDecay(e.mem, now)
 		accessBoost := math.Log1p(float64(e.mem.AccessCount))
 
-		final := r.weights.Relevance*rrfNorm +
-			r.weights.Importance*importanceNorm +
-			r.weights.Recency*recency +
-			r.weights.Access*accessBoost
+		relevanceTerm := r.weights.Relevance * rrfNorm
+		importanceTerm := r.weights.Importance * importanceNorm
+		recencyTerm := r.weights.Recency * recency
+		accessTerm := r.weights.Access * accessBoost
+		final := relevanceTerm + importanceTerm + recencyTerm + accessTerm
 
-		result = append(result, scoredCandidate{mem: e.mem, final: final})
+		result = append(result, scoredCandidate{
+			mem:   e.mem,
+			final: final,
+			explain: Explain{
+				Sources:    e.sources,
+				RRF:        e.rrf,
+				Relevance:  relevanceTerm,
+				Importance: importanceTerm,
+				Recency:    recencyTerm,
+				Access:     accessTerm,
+				Final:      final,
+			},
+		})
 	}
 	return result
 }
@@ -310,7 +354,10 @@ type briefItem struct {
 // Бюджет должен покрывать не только сами строки, но и Markdown-обвязку финального
 // брифа — верхний заголовок, заголовки секций попавших kind'ов, разделители между
 // блоками и строку "свёрнуто ещё N" (иначе бриф систематически превышает
-// token_budget на размер этой обвязки — DESIGN.md §15: честность выдачи). Алгоритм:
+// token_budget на размер этой обвязки — DESIGN.md §15: честность выдачи). explain
+// добавляет к каждой строке довесок-трассу ранжирования (задача 8.1) ДО оценки
+// стоимости — иначе бюджет считался бы нечестно относительно фактического размера
+// выдачи. Алгоритм:
 //  1. Жадно набираем строки без учёта обвязки — верхняя граница набора, тот же
 //     порядок отбора, что и раньше (останавливаемся на первой не влезшей строке,
 //     без случайных пропусков середины списка).
@@ -320,14 +367,18 @@ type briefItem struct {
 //  3. Пока фактическая стоимость собранного брифа (composeMarkdown, т.е. реальный
 //     Markdown с обвязкой) не укладывается в бюджет — обрезаем с хвоста наименее
 //     релевантные записи, но не ниже одной.
-func selectByBudget(scored []scoredCandidate, budget int) ([]briefItem, int) {
+func selectByBudget(scored []scoredCandidate, budget int, explain bool) ([]briefItem, int) {
 	if len(scored) == 0 {
 		return nil, 0
 	}
 
 	items := make([]briefItem, len(scored))
 	for i, c := range scored {
-		items[i] = briefItem{mem: c.mem, line: formatLine(c.mem)}
+		line := formatLine(c.mem)
+		if explain {
+			line += "\n" + formatExplainLine(c.explain)
+		}
+		items[i] = briefItem{mem: c.mem, line: line}
 	}
 
 	var included []briefItem
@@ -346,7 +397,7 @@ func selectByBudget(scored []scoredCandidate, budget int) ([]briefItem, int) {
 
 	for len(included) > 1 {
 		collapsed := len(items) - len(included)
-		if _, cost := composeMarkdown(included, collapsed); cost <= budget {
+		if _, cost := composeMarkdown(included, collapsed, explain); cost <= budget {
 			break
 		}
 		included = included[:len(included)-1]
@@ -368,6 +419,18 @@ func formatLine(m memory.Memory) string {
 		text = *m.Summary
 	}
 	return fmt.Sprintf("- %s [★%d]", text, m.Importance)
+}
+
+// formatExplainLine форматирует explain-довесок под строкой записи брифа
+// (DESIGN.md §8, §12, задача 8.1): источники кандидата и разложение итогового
+// скора на уже взвешенные слагаемые — без пересчёта, те же величины, что явно
+// посчитаны в rank() и сохранены в scoredCandidate.explain. Округление до 2-3
+// знаков — только для читаемости строки, сумма Relevance+Importance+Recency+Access
+// равна Final с точностью до этого округления.
+func formatExplainLine(e Explain) string {
+	via := strings.Join(e.Sources, "+")
+	return fmt.Sprintf("  · via %s · rrf %.3f · rel %.2f + imp %.2f + rec %.2f + acc %.2f = %.2f",
+		via, e.RRF, e.Relevance, e.Importance, e.Recency, e.Access, e.Final)
 }
 
 // composeBody собирает тело брифа: секции по kind в фиксированном порядке
@@ -404,17 +467,24 @@ func composeBody(included []briefItem, collapsed int) string {
 // runes/4 это меняет итог не более чем на доли токена), затем в заголовок
 // подставляется посчитанное число. Используется и для измерения стоимости в
 // selectByBudget, и для финальной сборки в buildBrief — единая точка правды.
-func composeMarkdown(included []briefItem, collapsed int) (string, int) {
+// explain=true добавляет заголовку пометку "(explain)" (задача 8.1) — сами строки
+// записей к этому моменту уже несут explain-довесок (см. selectByBudget), здесь
+// только маркируется заголовок; explain=false даёт байт-в-байт прежний заголовок.
+func composeMarkdown(included []briefItem, collapsed int, explain bool) (string, int) {
 	body := composeBody(included, collapsed)
+	suffix := ""
+	if explain {
+		suffix = " (explain)"
+	}
 
-	draftHeader := fmt.Sprintf("## Релевантная память (%d записей, ~%d токенов)", len(included), 0)
+	draftHeader := fmt.Sprintf("## Релевантная память (%d записей, ~%d токенов)%s", len(included), 0, suffix)
 	draft := draftHeader
 	if body != "" {
 		draft = draftHeader + "\n\n" + body
 	}
 	approxTokens := estimateTokens(draft)
 
-	header := fmt.Sprintf("## Релевантная память (%d записей, ~%d токенов)", len(included), approxTokens)
+	header := fmt.Sprintf("## Релевантная память (%d записей, ~%d токенов)%s", len(included), approxTokens, suffix)
 	md := header
 	if body != "" {
 		md = header + "\n\n" + body
@@ -423,8 +493,8 @@ func composeMarkdown(included []briefItem, collapsed int) (string, int) {
 }
 
 // buildBrief собирает итоговый memory.Brief из отобранных записей (DESIGN.md §8).
-func buildBrief(included []briefItem, collapsed int) memory.Brief {
-	md, approxTokens := composeMarkdown(included, collapsed)
+func buildBrief(included []briefItem, collapsed int, explain bool) memory.Brief {
+	md, approxTokens := composeMarkdown(included, collapsed, explain)
 	return memory.Brief{
 		Markdown:     md,
 		Count:        len(included),

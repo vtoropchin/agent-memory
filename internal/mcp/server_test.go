@@ -393,6 +393,43 @@ func TestScopeIsolationE2E(t *testing.T) {
 	}
 }
 
+// TestHandleRecall_ExplainReachesQuery проверяет часть B задачи 8.1: поле
+// recallInput.Explain доезжает до memory.Query.Explain — handleRecall с
+// explain=true возвращает бриф с explain-довеском ("· via ..."), а с explain=false
+// (или не переданным вовсе) — обычный бриф без него.
+func TestHandleRecall_ExplainReachesQuery(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	if _, _, err := srv.handleSave(ctx, nil, saveInput{
+		Kind: "semantic", Content: "МАРКЕРEXPLAIN факт для проверки MCP-поля explain", Scope: "project:agentmemory",
+	}); err != nil {
+		t.Fatalf("handleSave: %v", err)
+	}
+
+	withExplain, _, err := srv.handleRecall(ctx, nil, recallInput{
+		Query: "МАРКЕРEXPLAIN факт", Scope: "project:agentmemory", Explain: true,
+	})
+	if err != nil {
+		t.Fatalf("handleRecall (explain=true): %v", err)
+	}
+	mdExplain := textOf(withExplain)
+	if !strings.Contains(mdExplain, "· via") {
+		t.Errorf("explain=true должен добавить трассу ранжирования в бриф:\n%s", mdExplain)
+	}
+
+	withoutExplain, _, err := srv.handleRecall(ctx, nil, recallInput{
+		Query: "МАРКЕРEXPLAIN факт", Scope: "project:agentmemory",
+	})
+	if err != nil {
+		t.Fatalf("handleRecall (без explain): %v", err)
+	}
+	mdNoExplain := textOf(withoutExplain)
+	if strings.Contains(mdNoExplain, "· via") {
+		t.Errorf("без explain бриф не должен содержать трассу ранжирования:\n%s", mdNoExplain)
+	}
+}
+
 // --- вспомогательные функции ---
 
 // textOf извлекает текст первого текстового блока результата инструмента —

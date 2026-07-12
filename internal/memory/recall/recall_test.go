@@ -3,7 +3,10 @@ package recall
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -797,5 +800,136 @@ func TestRecall_NoopEmbedderNeverCallsEmbed(t *testing.T) {
 	}
 	if brief.Count != 1 {
 		t.Errorf("Count = %d, want 1", brief.Count)
+	}
+}
+
+// explainLineRe разбирает explain-довесок, собранный formatExplainLine (задача
+// 8.1): "  · via <источники> · rrf <r> · rel <a> + imp <b> + rec <c> + acc <d> = <f>".
+var explainLineRe = regexp.MustCompile(
+	`· via (\S+) · rrf (-?[\d.]+) · rel (-?[\d.]+) \+ imp (-?[\d.]+) \+ rec (-?[\d.]+) \+ acc (-?[\d.]+) = (-?[\d.]+)`)
+
+// explainLineFor находит explain-строку, относящуюся к записи, чей маркер
+// summary/content встречается в md первым после neederMarker, и разбирает её поля.
+func explainLineFor(t *testing.T, md, marker string) (sources string, rrf, rel, imp, rec, acc, final float64) {
+	t.Helper()
+	idx := strings.Index(md, marker)
+	if idx == -1 {
+		t.Fatalf("маркер %q не найден в брифе:\n%s", marker, md)
+	}
+	rest := md[idx:]
+	m := explainLineRe.FindStringSubmatch(rest)
+	if m == nil {
+		t.Fatalf("explain-строка не найдена после маркера %q в брифе:\n%s", marker, md)
+	}
+	parse := func(s string) float64 {
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			t.Fatalf("разбор числа %q: %v", s, err)
+		}
+		return v
+	}
+	return m[1], parse(m[2]), parse(m[3]), parse(m[4]), parse(m[5]), parse(m[6]), parse(m[7])
+}
+
+// TestRecall_ExplainFalse_BriefByteIdentical проверяет требование задачи 8.1:
+// Query.Explain=false не должен ни на байт менять бриф (никакого регресса формата
+// для существующих клиентов) — сравниваем бриф с явным Explain=false и без него
+// вовсе (нулевое значение) для одного и того же запроса.
+func TestRecall_ExplainFalse_BriefByteIdentical(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:explain-off"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "запись без явного explain в запросе", Summary: strPtr("Факт без explain"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+
+	withoutField, err := r.Recall(ctx, memory.Query{Text: "запись explain", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall (без Explain): %v", err)
+	}
+	explicitFalse, err := r.Recall(ctx, memory.Query{Text: "запись explain", Scope: scope, Explain: false})
+	if err != nil {
+		t.Fatalf("Recall (Explain: false): %v", err)
+	}
+	if withoutField.Markdown != explicitFalse.Markdown {
+		t.Fatalf("бриф с Explain=false должен быть байт-в-байт идентичен:\n%q\nvs\n%q",
+			withoutField.Markdown, explicitFalse.Markdown)
+	}
+	if strings.Contains(withoutField.Markdown, "· via") || strings.Contains(withoutField.Markdown, "(explain)") {
+		t.Errorf("бриф при Explain=false не должен содержать explain-довески:\n%s", withoutField.Markdown)
+	}
+}
+
+// TestRecall_ExplainTrue_ShowsSourcesAndSumMatchesFinal проверяет саму задачу 8.1:
+// заголовок брифа помечен "(explain)", explain-строка под каждой записью содержит
+// корректные источники (запись, найденная и лексикой, и вектором -> "lexical+vector";
+// запись, найденная только лексикой -> "lexical") и сумма слагаемых Relevance+
+// Importance+Recency+Access сходится с Final (допуск на округление печати).
+func TestRecall_ExplainTrue_ShowsSourcesAndSumMatchesFinal(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:explain-on"
+
+	if err := s.ResetVectorIndex(ctx, "fake-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	bothID, lexicalOnlyID := newID(t), newID(t)
+	putMemory(t, ctx, s, memory.Memory{
+		Id: bothID, Kind: memory.KindSemantic, Scope: scope,
+		Content: "уникальныймаркерexplain общий термин поиска", Summary: strPtr("Найдена обоими источниками explain"),
+		Importance: 4, CreatedAt: 1000, UpdatedAt: 1000,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: lexicalOnlyID, Kind: memory.KindSemantic, Scope: scope,
+		Content: "уникальныймаркерexplain общий термин поиска", Summary: strPtr("Найдена только лексикой explain"),
+		Importance: 2, CreatedAt: 900, UpdatedAt: 900,
+	})
+	if err := s.PutVector(ctx, bothID, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	fe := &fakeEmbedder{dim: 3, vec: []float32{1, 0, 0}}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), fe,
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{
+		Text: "уникальныймаркерexplain общий термин поиска", Scope: scope, Explain: true,
+	})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if brief.Count != 2 {
+		t.Fatalf("Count = %d, want 2: brief=%+v", brief.Count, brief)
+	}
+	if !strings.HasPrefix(brief.Markdown, "## Релевантная память") || !strings.Contains(strings.SplitN(brief.Markdown, "\n", 2)[0], "(explain)") {
+		t.Fatalf("заголовок брифа должен быть помечен (explain):\n%s", brief.Markdown)
+	}
+
+	sourcesBoth, rrfBoth, relBoth, impBoth, recBoth, accBoth, finalBoth :=
+		explainLineFor(t, brief.Markdown, "Найдена обоими источниками explain")
+	if sourcesBoth != "lexical+vector" {
+		t.Errorf("sources для записи, найденной обоими источниками = %q, want lexical+vector", sourcesBoth)
+	}
+	if sum := relBoth + impBoth + recBoth + accBoth; math.Abs(sum-finalBoth) > 0.02 {
+		t.Errorf("сумма слагаемых %v (=%.3f) не сходится с final %.3f", []float64{relBoth, impBoth, recBoth, accBoth}, sum, finalBoth)
+	}
+	if rrfBoth <= 0 {
+		t.Errorf("rrf для найденной записи должен быть положительным, got %v", rrfBoth)
+	}
+
+	sourcesLex, _, relLex, impLex, recLex, accLex, finalLex :=
+		explainLineFor(t, brief.Markdown, "Найдена только лексикой explain")
+	if sourcesLex != "lexical" {
+		t.Errorf("sources для записи, найденной только лексикой = %q, want lexical", sourcesLex)
+	}
+	if sum := relLex + impLex + recLex + accLex; math.Abs(sum-finalLex) > 0.02 {
+		t.Errorf("сумма слагаемых %v (=%.3f) не сходится с final %.3f", []float64{relLex, impLex, recLex, accLex}, sum, finalLex)
 	}
 }

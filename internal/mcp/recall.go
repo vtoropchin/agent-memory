@@ -19,6 +19,7 @@ func (s *Server) handleRecall(ctx context.Context, _ *sdkmcp.CallToolRequest, in
 		Kinds:       in.Kinds,
 		TokenBudget: in.TokenBudget,
 		Summarize:   in.Summarize,
+		Explain:     in.Explain,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("memory_recall: %w", err)

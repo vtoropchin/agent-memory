@@ -48,6 +48,7 @@ type recallInput struct {
 	Kinds       []string `json:"kinds,omitempty" jsonschema:"фильтр по типу памяти; пусто — искать по всем типам"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"бюджет токенов на бриф (по умолчанию берётся из конфига)"`
 	Summarize   bool     `json:"summarize,omitempty" jsonschema:"дополнительно сжать бриф в короткую LLM-сводку (### Сводка) поверх списка записей"`
+	Explain     bool     `json:"explain,omitempty" jsonschema:"добавить к каждой записи трассу ранжирования: источники (lexical/vector), RRF и разложение итогового скора — для отладки и тюнинга весов"`
 }
 
 func recallInputSchema() *jsonschema.Schema {
