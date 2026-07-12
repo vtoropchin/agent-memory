@@ -17,6 +17,13 @@ const KIND_BADGE_CLASS_DEFAULT = "bg-slate-100 text-slate-800 dark:bg-slate-700 
 
 const KIND_LABEL = { semantic: "семантика", episodic: "эпизод", procedural: "процедура" };
 
+// --- стили кнопок (стандартный компонент Tailwind: solid primary danger +
+// secondary). Литеральные строки классов нужны Tailwind-сканеру @source ---
+const BTN_DANGER =
+  "inline-flex items-center gap-x-1.5 rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-50 dark:bg-red-700 dark:hover:bg-red-600";
+const BTN_SECONDARY =
+  "inline-flex items-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:opacity-50 dark:bg-slate-700 dark:text-slate-100 dark:ring-slate-600 dark:hover:bg-slate-600";
+
 // --- маленький DOM-хелпер: строит элементы без innerHTML, чтобы весь
 // пользовательский текст шёл через textContent (жёсткое требование задачи) ---
 function el(tag, opts, children) {
@@ -37,6 +44,29 @@ function el(tag, opts, children) {
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
+
+// --- SVG-иконка: статичная разметка (не пользовательские данные) строится через
+// createElementNS, а не innerHTML, чтобы не нарушать правило «текст только через
+// textContent». cls — Tailwind-классы иконки (напр. "-ml-0.5 size-5") ---
+const SVG_NS = "http://www.w3.org/2000/svg";
+function icon(pathD, cls) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", cls);
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(SVG_NS, "path");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("d", pathD);
+  svg.appendChild(p);
+  return svg;
+}
+// Heroicons «trash» (outline).
+const TRASH_PATH =
+  "m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0";
 
 // --- API ---
 
@@ -439,16 +469,14 @@ function renderDeleteControl(id) {
       el(
         "button",
         {
-          class:
-            "rounded-md border border-red-300 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950",
+          class: BTN_DANGER,
           attrs: {
             type: "button",
             title: "мягкое удаление: запись уходит в архив (superseded), история сохраняется",
           },
-          text: "Удалить (в архив)",
           onClick: renderConfirm,
         },
-        []
+        [icon(TRASH_PATH, "-ml-0.5 size-5"), el("span", { text: "Удалить (в архив)" })]
       )
     );
   }
@@ -460,10 +488,8 @@ function renderDeleteControl(id) {
     const yesBtn = el(
       "button",
       {
-        class:
-          "rounded-md border border-red-300 bg-red-600 px-3 py-1.5 text-sm text-white hover:bg-red-700 disabled:opacity-50 dark:border-red-800",
+        class: BTN_DANGER,
         attrs: { type: "button" },
-        text: "Да",
         onClick: async function () {
           yesBtn.disabled = true;
           cancelBtn.disabled = true;
@@ -479,13 +505,12 @@ function renderDeleteControl(id) {
           }
         },
       },
-      []
+      [icon(TRASH_PATH, "-ml-0.5 size-5"), el("span", { text: "Да, удалить" })]
     );
     const cancelBtn = el(
       "button",
       {
-        class:
-          "rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700",
+        class: BTN_SECONDARY,
         attrs: { type: "button" },
         text: "Отмена",
         onClick: renderIdle,
