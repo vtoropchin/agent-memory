@@ -78,7 +78,7 @@ API из 6.2.
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| 7.1 CLI-подкоманды `recall`/`save` | [7.1-cli-recall-save.md](7.1-cli-recall-save.md) | ⬜ ожидает |
+| 7.1 CLI-подкоманды `recall`/`save` | [7.1-cli-recall-save.md](7.1-cli-recall-save.md) | ✅ выполнена |
 | 7.2 `memoryd hook` + генерация хуков в `init` | [7.2-init-hooks.md](7.2-init-hooks.md) | ⬜ ожидает |
 
 ## Этап 8 — Качество recall

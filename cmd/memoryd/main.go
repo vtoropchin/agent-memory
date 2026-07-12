@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"text/tabwriter"
 
@@ -60,6 +59,27 @@ func main() {
 		return
 	}
 
+	// `memoryd recall` / `memoryd save` — one-shot CLI поверх read/write path
+	// (задача 7.1), диспетчеризуются симметрично init/web, до разбора серверных
+	// флагов. В отличие от web, им нужны reasoner/embedder (newReasoner/newEmbedder
+	// из этого файла) — как и серверному режиму, деградация обоих до Noop уходит
+	// предупреждением в stderr (log.Printf пишет в os.Stderr по умолчанию, здесь
+	// это ещё не переопределялось), а не в stdout, куда пишется только результат.
+	if len(os.Args) >= 2 && os.Args[1] == "recall" {
+		if err := runRecall(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "memoryd recall: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "save" {
+		if err := runSave(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "memoryd save: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Транспорт MCP использует stdout для протокола — всё логирование только в
 	// stderr, иначе лог-строки повредят JSON-RPC поток.
 	log.SetOutput(os.Stderr)
@@ -78,16 +98,7 @@ func run() error {
 	// .env рядом с конфигом (или в текущем каталоге, если -config не задан) —
 	// раскладывается `memoryd init` (задача 5.4). Загрузить ДО newReasoner,
 	// иначе DEEPSEEK_API_KEY туда не долетит. Значение ключа в лог не попадает.
-	dotenvDir := "."
-	if *configPath != "" {
-		dotenvDir = filepath.Dir(*configPath)
-	}
-	dotenvPath := filepath.Join(dotenvDir, ".env")
-	if loaded, err := loadDotEnv(dotenvPath); err != nil {
-		log.Printf("memoryd: загрузка %s: %v", dotenvPath, err)
-	} else if loaded {
-		log.Printf("memoryd: переменные окружения подхвачены из %s", dotenvPath)
-	}
+	loadDotEnvForConfig(*configPath, "memoryd")
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -223,6 +234,8 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  memoryd [-config <path>] [-db <path>]\tзапуск MCP-сервера (режим по умолчанию, транспорт stdio)")
 	fmt.Fprintln(tw, "  memoryd init [флаги]\tустановить память в проект (генерирует MCP-конфиг и скил)")
 	fmt.Fprintln(tw, "  memoryd web [флаги]\tHTTP-морда для просмотра памяти в браузере")
+	fmt.Fprintln(tw, "  memoryd recall [флаги] \"<запрос>\"\tразовый поиск по памяти (Markdown-бриф в stdout)")
+	fmt.Fprintln(tw, "  memoryd save [флаги]\tразовое сохранение факта в память")
 	tw.Flush()
 	fmt.Fprintln(w)
 
@@ -240,6 +253,8 @@ func writeUsage(w io.Writer) {
 	tw = tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "  init\tустановщик памяти в проект (агентское приложение, ollama, DeepSeek-ключ)")
 	fmt.Fprintln(tw, "  web\tHTTP-морда для просмотра и поиска памяти")
+	fmt.Fprintln(tw, "  recall\tодноразовый recall из shell/скрипта/хука агента (флаг -quiet — для хуков)")
+	fmt.Fprintln(tw, "  save\tодноразовый save из shell/скрипта; -content - читает факт из stdin")
 	tw.Flush()
-	fmt.Fprintln(w, "  memoryd init -h и memoryd web -h — подробности по флагам каждой.")
+	fmt.Fprintln(w, "  memoryd init -h, memoryd web -h, memoryd recall -h, memoryd save -h — подробности по флагам каждой.")
 }

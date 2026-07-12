@@ -1,0 +1,236 @@
+// Подкоманды `memoryd recall` / `memoryd save` — одноразовые CLI-обёртки над
+// read/write path памяти (DESIGN.md §12, задача 7.1). В отличие от MCP-режима
+// (стартует раз на сессию агента и живёт демоном) и `memoryd web` (read-only
+// HTTP), это one-shot вызовы из терминала/скрипта — прежде всего для хуков
+// агентского харнесса (SessionStart/UserPromptSubmit, задача 7.2), которым
+// нужно дёрнуть память одной командой без поднятия MCP-транспорта. Один
+// прогон = открыть Store → выполнить → Close; фоновый maintenance-планировщик
+// (maint.Scheduler) здесь не запускается — это не демон.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"strings"
+
+	"agentmemory/internal/config"
+	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/recall"
+	"agentmemory/internal/memory/store"
+	"agentmemory/internal/memory/write"
+)
+
+// runRecall разбирает флаги подкоманды `recall` и выполняет один Recall,
+// печатая готовый бриф в out. Вынесена из диспетчера в main.go для
+// тестируемости (по образцу runInit/runWeb). out — единственное, куда пишется
+// результат (Markdown или JSON); предупреждения о деградации reasoner/embedder
+// (newReasoner/newEmbedder) уходят через log.Printf в stderr по умолчанию.
+func runRecall(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("recall", flag.ExitOnError)
+	fs.SetOutput(out)
+	fs.Usage = func() {
+		fmt.Fprintln(out, "разовый поиск по памяти: печатает готовый Markdown-бриф в stdout.")
+		fmt.Fprintln(out, "Использование: memoryd recall [флаги] \"<запрос>\"")
+		fs.PrintDefaults()
+	}
+	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
+	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
+	scopesFlag := fs.String("scopes", "", "пространства через запятую (пусто — дефолт инстанса из [scope])")
+	kindsFlag := fs.String("kinds", "", "типы через запятую: semantic,episodic,procedural (пусто — все)")
+	budget := fs.Int("budget", 0, "бюджет токенов брифа (0 — дефолт из [recall])")
+	jsonOut := fs.Bool("json", false, "печатать сырой JSON вместо Markdown")
+	quiet := fs.Bool("quiet", false, "при пустой выдаче — пустой stdout и exit 0 (для хуков)")
+	summarize := fs.Bool("summarize", false, "суммировать бриф через Reasoner (по умолчанию выключено — латентность хука)")
+	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
+
+	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if query == "" {
+		return fmt.Errorf("recall: запрос не задан — memoryd recall \"<запрос>\"")
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return fmt.Errorf("загрузка конфига: %w", err)
+	}
+	if *dbPath != "" {
+		cfg.Store.Path = *dbPath
+	}
+	loadDotEnvForConfig(*configPath, "memoryd recall")
+
+	s, err := store.Open(cfg.Store.Path)
+	if err != nil {
+		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			log.Printf("memoryd recall: закрытие хранилища: %v", err)
+		}
+	}()
+
+	ctx := context.Background()
+	reasoner, err := newReasoner(cfg.Reasoner)
+	if err != nil {
+		return fmt.Errorf("создание reasoner: %w", err)
+	}
+	embedder, err := newEmbedder(ctx, cfg.Embedder)
+	if err != nil {
+		return fmt.Errorf("создание embedder: %w", err)
+	}
+
+	// Разрешение scope — той же логикой, что resolveRecallScopes в internal/mcp
+	// (приоритет явного набора над дефолтом инстанса): здесь единственный явный
+	// источник — флаг -scopes, поэтому дублировать back-compat-ветку с
+	// одиночным полем Scope (актуальную только для входа MCP-инструмента) не
+	// нужно — сам дефолт всё равно берётся из общего config.ScopeConfig.RecallScopes().
+	scopes := splitCSV(*scopesFlag)
+	if len(scopes) == 0 {
+		scopes = cfg.Scope.RecallScopes()
+	}
+
+	r := recall.New(s, cfg.Recall, reasoner, embedder)
+	brief, err := r.Recall(ctx, memory.Query{
+		Text:        query,
+		Scopes:      scopes,
+		Kinds:       splitCSV(*kindsFlag),
+		TokenBudget: *budget,
+		Summarize:   *summarize,
+	})
+	if err != nil {
+		return fmt.Errorf("recall: %w", err)
+	}
+
+	if *quiet && brief.Count == 0 {
+		return nil
+	}
+
+	if *jsonOut {
+		enc := json.NewEncoder(out)
+		if err := enc.Encode(brief); err != nil {
+			return fmt.Errorf("recall: сериализация JSON: %w", err)
+		}
+		return nil
+	}
+	fmt.Fprintln(out, brief.Markdown)
+	return nil
+}
+
+// runSave разбирает флаги подкоманды `save` и выполняет один Save, печатая
+// одну строку результата в out (`saved <id>` либо `merged <id>` — по образцу
+// вывода memimport). Вынесена из диспетчера в main.go для тестируемости.
+// stdin читается только когда -content равен "-".
+func runSave(args []string, stdin io.Reader, out io.Writer) error {
+	fs := flag.NewFlagSet("save", flag.ExitOnError)
+	fs.SetOutput(out)
+	fs.Usage = func() {
+		fmt.Fprintln(out, "разовое сохранение факта в память.")
+		fmt.Fprintln(out, "Использование: memoryd save -kind <kind> -content <текст|-> [флаги]")
+		fs.PrintDefaults()
+	}
+	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
+	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
+	kindFlag := fs.String("kind", "", "тип факта: semantic|episodic|procedural (обязателен)")
+	contentFlag := fs.String("content", "", "текст факта (обязателен); \"-\" — читать из stdin")
+	importance := fs.Int("importance", 0, "важность 1..5 (0 — дефолт 3)")
+	tagsFlag := fs.String("tags", "", "теги через запятую")
+	scopeFlag := fs.String("scope", "", "пространство записи (пусто — домашний scope инстанса из [scope])")
+	sourceFlag := fs.String("source", "", "источник факта (пусто — \"cli\")")
+	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
+
+	content := *contentFlag
+	if content == "-" {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return fmt.Errorf("save: чтение содержимого из stdin: %w", err)
+		}
+		content = string(b)
+	}
+
+	source := *sourceFlag
+	if source == "" {
+		source = "cli"
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return fmt.Errorf("загрузка конфига: %w", err)
+	}
+	if *dbPath != "" {
+		cfg.Store.Path = *dbPath
+	}
+	loadDotEnvForConfig(*configPath, "memoryd save")
+
+	s, err := store.Open(cfg.Store.Path)
+	if err != nil {
+		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			log.Printf("memoryd save: закрытие хранилища: %v", err)
+		}
+	}()
+
+	ctx := context.Background()
+	// Embedder — реальный из фабрики (симметрично серверному режиму): вектор
+	// пишется сразу, если провайдер доступен; при недоступной ollama — штатная
+	// деградация write path (Writer.Save просто откладывает вектор для
+	// фонового досчёта, DESIGN.md §7.4, §9). Reasoner здесь не нужен — save не
+	// суммирует и не консолидирует.
+	embedder, err := newEmbedder(ctx, cfg.Embedder)
+	if err != nil {
+		return fmt.Errorf("создание embedder: %w", err)
+	}
+
+	scope := *scopeFlag
+	if scope == "" {
+		// Явный scope не передан — подставляем "домашний" scope инстанса. Если
+		// мультипроектность выключена (project не задан), SaveScope() вернёт ""
+		// и Writer.Save сам вернёт write.ErrEmptyScope.
+		scope = cfg.Scope.SaveScope()
+	}
+
+	w := write.New(s, embedder)
+	id, merged, err := w.Save(ctx, write.SaveInput{
+		Kind:       memory.Kind(*kindFlag),
+		Scope:      scope,
+		Content:    content,
+		Importance: *importance,
+		Tags:       splitCSV(*tagsFlag),
+		Source:     source,
+	})
+	if err != nil {
+		return fmt.Errorf("save: %w", err)
+	}
+
+	if merged {
+		fmt.Fprintf(out, "merged %s\n", id)
+	} else {
+		fmt.Fprintf(out, "saved %s\n", id)
+	}
+	return nil
+}
+
+// splitCSV разбирает список через запятую в срез: обрезает пробелы вокруг
+// каждого элемента и отбрасывает пустые (в т.ч. на пустом входе — тогда
+// возвращает nil, а не срез из одной пустой строки). Общий разбор для флагов
+// -scopes/-kinds/-tags.
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}

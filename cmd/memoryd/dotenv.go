@@ -8,9 +8,32 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 )
+
+// loadDotEnvForConfig разрешает путь к .env рядом с configPath (или в текущем
+// каталоге, если configPath пуст) и подхватывает переменные окружения через
+// loadDotEnv, логируя результат через log.Printf (стандартный вывод log —
+// os.Stderr, что важно для one-shot CLI-подкоманд recall/save, задача 7.1: их
+// stdout не должен содержать ничего, кроме брифа/результата save). label —
+// префикс лог-строки ("memoryd", "memoryd recall", "memoryd save"). Общая
+// точка входа между серверным режимом (run, main.go) и recall/save (cli.go) —
+// обоим нужен DEEPSEEK_API_KEY в env до вызова newReasoner.
+func loadDotEnvForConfig(configPath, label string) {
+	dotenvDir := "."
+	if configPath != "" {
+		dotenvDir = filepath.Dir(configPath)
+	}
+	dotenvPath := filepath.Join(dotenvDir, ".env")
+	if loaded, err := loadDotEnv(dotenvPath); err != nil {
+		log.Printf("%s: загрузка %s: %v", label, dotenvPath, err)
+	} else if loaded {
+		log.Printf("%s: переменные окружения подхвачены из %s", label, dotenvPath)
+	}
+}
 
 // loadDotEnv читает файл .env построчно (`KEY=VALUE`) и устанавливает
 // переменные окружения через os.Setenv — но только те, что ещё не заданы

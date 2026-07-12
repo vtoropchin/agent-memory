@@ -3,3 +3,4 @@ graphify-out
 .env
 bin/
 .agentmemory/
+.DS_Store
