@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 
 	"github.com/oklog/ulid/v2"
 
+	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
 	"agentmemory/internal/memory/embed"
+	"agentmemory/internal/memory/reason"
+	"agentmemory/internal/memory/recall"
 	"agentmemory/internal/memory/store"
 	"agentmemory/internal/memory/write"
 )
@@ -32,11 +36,47 @@ func newTestID(t *testing.T) string {
 	return ulid.Make().String()
 }
 
-// newTestWebHandler собирает handler web-морды для теста поверх s, с
-// write.Writer на embed.NewNoop() (Forget не требует эмбеддера).
-func newTestWebHandler(s store.Store) http.Handler {
-	return newWebHandler(s, write.New(s, embed.NewNoop()))
+// testRecallWeights — веса ранжирования для тестового Recaller (произвольные,
+// но ненулевые по каждому слагаемому — как в internal/memory/recall/recall_test.go).
+func testRecallWeights() config.RecallWeights {
+	return config.RecallWeights{Relevance: 1.0, Importance: 0.5, Recency: 0.4, Access: 0.2}
 }
+
+// newTestWebHandler собирает handler web-морды для теста поверх s с
+// embed.NewNoop() (write.Writer.Forget не требует эмбеддера; Recaller с Noop
+// ведёт себя как чистый FTS5 — векторный слой выключен, Dim()==0).
+func newTestWebHandler(s store.Store) http.Handler {
+	return newTestWebHandlerWithEmbedder(s, embed.NewNoop())
+}
+
+// newTestWebHandlerWithEmbedder — то же самое, но с явно заданным Embedder
+// (задача 10.1): используется тестами семантического поиска с fakeEmbedder.
+func newTestWebHandlerWithEmbedder(s store.Store, embedder embed.Embedder) http.Handler {
+	w := write.New(s, embed.NewNoop())
+	rc := recall.New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: testRecallWeights()}, reason.NewNoop(), embedder)
+	return newWebHandler(s, w, rc, embedder)
+}
+
+// fakeEmbedder — тестовая реализация embed.Embedder (тот же паттерн, что в
+// internal/memory/recall/recall_test.go): фиксированный вектор для любого
+// текста запроса, заданная размерность.
+type fakeEmbedder struct {
+	dim int
+	vec []float32
+}
+
+func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = f.vec
+	}
+	return out, nil
+}
+
+func (f *fakeEmbedder) Model() string { return "fake" }
+func (f *fakeEmbedder) Dim() int      { return f.dim }
+
+var _ embed.Embedder = (*fakeEmbedder)(nil)
 
 // putTestMemory кладёт в s запись памяти с разумными дефолтами, переопределяя
 // только поля, важные для конкретного теста (через mutate).
@@ -539,6 +579,139 @@ func TestHandleSearch(t *testing.T) {
 	}
 	if resp3.StatusCode != http.StatusBadRequest {
 		t.Errorf("статус без q = %d, хочу 400", resp3.StatusCode)
+	}
+}
+
+// TestHandleSearch_InvalidModeBadRequest — неизвестное значение mode -> 400.
+func TestHandleSearch_InvalidModeBadRequest(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/search?q=x&mode=bogus")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("статус для mode=bogus = %d, хочу 400", resp.StatusCode)
+	}
+}
+
+// TestHandleSearch_NoopEmbedderDegradesToLexicalWithVectorFalse — задача 10.1:
+// дефолт mode=semantic с Embedder-Noop (векторный слой выключен) деградирует
+// молча до чистого FTS5 — 200, не 500, и searchResponse.Vector=false, чтобы
+// фронт показал плашку «поиск по смыслу недоступен».
+func TestHandleSearch_NoopEmbedderDegradesToLexicalWithVectorFalse(t *testing.T) {
+	s := newTestWebStore(t)
+	putTestMemory(t, s, func(m *memory.Memory) { m.Content = "уникальная фраза про жирафов" })
+
+	srv := httptest.NewServer(newTestWebHandler(s)) // embed.NewNoop() по умолчанию
+	defer srv.Close()
+
+	var got searchResponse
+	resp := getJSON(t, srv.URL+"/api/search?q=жирафов", &got) // mode не задан -> semantic
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200 (деградация, не 500)", resp.StatusCode)
+	}
+	if got.Vector {
+		t.Errorf("Vector = true, хочу false (Embedder-Noop, векторный слой выключен)")
+	}
+	if len(got.Items) != 1 || got.Items[0].Source != "lexical" {
+		t.Fatalf("Items = %+v, хочу 1 запись через lexical (фолбэк FTS5)", got.Items)
+	}
+}
+
+// TestHandleSearch_ModeDefaultMatchesExplicitSemantic — дефолт /api/search без
+// mode должен вести себя так же, как явный mode=semantic (задача 10.1).
+func TestHandleSearch_ModeDefaultMatchesExplicitSemantic(t *testing.T) {
+	s := newTestWebStore(t)
+	putTestMemory(t, s, func(m *memory.Memory) { m.Content = "уникальная фраза про жирафов" })
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var withoutMode, explicitSemantic searchResponse
+	getJSON(t, srv.URL+"/api/search?q=жирафов", &withoutMode)
+	getJSON(t, srv.URL+"/api/search?q=жирафов&mode=semantic", &explicitSemantic)
+
+	if len(withoutMode.Items) != len(explicitSemantic.Items) || withoutMode.Vector != explicitSemantic.Vector {
+		t.Errorf("mode по умолчанию должен совпадать с явным mode=semantic: %+v vs %+v", withoutMode, explicitSemantic)
+	}
+}
+
+// TestHandleSearch_ModeLexicalUnaffectedByVectorLayer — mode=lexical сохраняет
+// прежний контракт задачи 6.2: всегда чистый FTS5 через Store.SearchLexical,
+// даже когда у морды есть рабочий Embedder (fakeEmbedder) — векторный источник
+// в lexical-режиме не подключается вовсе.
+func TestHandleSearch_ModeLexicalUnaffectedByVectorLayer(t *testing.T) {
+	s := newTestWebStore(t)
+	putTestMemory(t, s, func(m *memory.Memory) { m.Content = "уникальная фраза про жирафов" })
+
+	fe := &fakeEmbedder{dim: 3, vec: []float32{1, 0, 0}}
+	srv := httptest.NewServer(newTestWebHandlerWithEmbedder(s, fe))
+	defer srv.Close()
+
+	var got searchResponse
+	resp := getJSON(t, srv.URL+"/api/search?q=жирафов&mode=lexical", &got)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200", resp.StatusCode)
+	}
+	if len(got.Items) != 1 || got.Items[0].Source != "lexical" {
+		t.Fatalf("Items = %+v, хочу 1 запись через lexical", got.Items)
+	}
+	if fe.dim <= 0 {
+		t.Fatalf("тест невалиден: fakeEmbedder должен быть включён (dim>0)")
+	}
+}
+
+// TestHandleSearch_SemanticFindsParaphraseLexicalDoesNot — центральный сценарий
+// задачи 10.1 (паттерн перенесён из recall.TestRecall_FoundOnlyByVector): запись
+// без единого общего лексического токена с запросом находится в mode=semantic
+// через векторный источник Candidates, но не находится в mode=lexical.
+func TestHandleSearch_SemanticFindsParaphraseLexicalDoesNot(t *testing.T) {
+	ctx := context.Background()
+	s := newTestWebStore(t)
+
+	if err := s.ResetVectorIndex(ctx, "fake-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	m := putTestMemory(t, s, func(m *memory.Memory) {
+		m.Content = "Сборка тесты проекта запускаются через Makefile"
+	})
+	if err := s.PutVector(ctx, m.Id, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+
+	fe := &fakeEmbedder{dim: 3, vec: []float32{1, 0, 0}}
+	srv := httptest.NewServer(newTestWebHandlerWithEmbedder(s, fe))
+	defer srv.Close()
+
+	// Перефразировка без единого общего токена с сохранённым Content.
+	q := url.QueryEscape("собирать тестировать репозиторий")
+
+	var semantic searchResponse
+	respSem := getJSON(t, srv.URL+"/api/search?mode=semantic&q="+q, &semantic)
+	if respSem.StatusCode != http.StatusOK {
+		t.Fatalf("статус (semantic) = %d, хочу 200", respSem.StatusCode)
+	}
+	if !semantic.Vector {
+		t.Errorf("Vector = false, хочу true (fakeEmbedder включён)")
+	}
+	if len(semantic.Items) != 1 || semantic.Items[0].Id != m.Id {
+		t.Fatalf("semantic.Items = %+v, хочу найти %q через вектор", semantic.Items, m.Id)
+	}
+	if semantic.Items[0].Source != "vector" {
+		t.Errorf("Source = %q, хочу vector", semantic.Items[0].Source)
+	}
+
+	var lexical searchResponse
+	respLex := getJSON(t, srv.URL+"/api/search?mode=lexical&q="+q, &lexical)
+	if respLex.StatusCode != http.StatusOK {
+		t.Fatalf("статус (lexical) = %d, хочу 200", respLex.StatusCode)
+	}
+	if len(lexical.Items) != 0 {
+		t.Errorf("lexical.Items = %+v, хочу пусто (перефразировка не должна матчиться лексически)", lexical.Items)
 	}
 }
 

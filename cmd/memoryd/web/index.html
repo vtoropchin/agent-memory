@@ -22,6 +22,16 @@
           placeholder="Поиск по памяти… (Enter или пауза в наборе)"
           class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
         >
+        <div id="search-mode-group" class="flex shrink-0 items-center gap-0.5 rounded-md border border-slate-300 p-0.5 text-sm dark:border-slate-600" role="radiogroup" aria-label="режим поиска">
+          <label class="cursor-pointer rounded px-2 py-1 has-[:checked]:bg-blue-600 has-[:checked]:text-white">
+            <input type="radio" name="search-mode" id="mode-semantic" value="semantic" class="sr-only" checked>
+            по смыслу
+          </label>
+          <label class="cursor-pointer rounded px-2 py-1 has-[:checked]:bg-blue-600 has-[:checked]:text-white">
+            <input type="radio" name="search-mode" id="mode-lexical" value="lexical" class="sr-only">
+            по словам
+          </label>
+        </div>
         <label class="flex shrink-0 items-center gap-2 text-sm">
           <input id="toggle-superseded" type="checkbox">
           показывать архивные
@@ -29,6 +39,10 @@
         <button id="reset-filters" type="button" class="shrink-0 rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700">
           сбросить фильтры
         </button>
+      </div>
+
+      <div id="search-degraded-banner" class="mt-3 hidden rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
+        Поиск по смыслу недоступен (векторный слой выключен) — показаны результаты по словам.
       </div>
 
       <div class="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">

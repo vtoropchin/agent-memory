@@ -1,12 +1,22 @@
 // Подкоманда `memoryd web` — HTTP-морда просмотра памяти (DESIGN.md §12,
-// Этап 6, задача 6.2). Открывает тот же общий файл БД, что и MCP-сервер
-// (WAL + busy_timeout безопасны для параллельных читателей), и отдаёт JSON API
-// поверх read-методов Store (List/Stats/Get/Neighbors/SearchLexical) плюс
-// статический фронтенд (сам фронтенд — задача 6.3). Чтение по-прежнему
-// доминирует; единственная write-операция — мягкое удаление записи
-// (`DELETE /api/memories/{id}`) через доменный `write.Writer.Forget` (тумстоун,
-// та же семантика, что у MCP-инструмента `memory_forget`): правок содержимого
-// и создания новых записей из браузера нет, hard DELETE не делается.
+// Этап 6, задача 6.2; семантический поиск — задача 10.1). Открывает тот же
+// общий файл БД, что и MCP-сервер (WAL + busy_timeout безопасны для
+// параллельных читателей), и отдаёт JSON API поверх read-методов Store
+// (List/Stats/Get/Neighbors/SearchLexical) плюс статический фронтенд (сам
+// фронтенд — задача 6.3/10.1). Чтение по-прежнему доминирует; единственная
+// write-операция — мягкое удаление записи (`DELETE /api/memories/{id}`) через
+// доменный `write.Writer.Forget` (тумстоун, та же семантика, что у
+// MCP-инструмента `memory_forget`): правок содержимого и создания новых
+// записей из браузера нет, hard DELETE не делается.
+//
+// `/api/search` (задача 10.1) поднимает поверх Store ещё и `recall.Recaller` с
+// реальным Embedder (та же фабрика `newEmbedder`, что у MCP-сервера/CLI) — это
+// единственное место, где морда вызывает внешний сервис (ollama/OpenAI), и
+// только для эмбеддинга ПОИСКОВОГО ЗАПРОСА, не записей: суженный инвариант
+// оффлайновости (DESIGN.md §12) — морда не пишет в БД и не эмбеддит записи,
+// эмбеддинг запроса допустим с полной деградацией до FTS5 при недоступности
+// Embedder. Reasoner мордe не нужен (нет суммаризации в JSON API) — Recaller
+// строится с reason.NewNoop().
 package main
 
 import (
@@ -30,6 +40,8 @@ import (
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
 	memembed "agentmemory/internal/memory/embed"
+	"agentmemory/internal/memory/reason"
+	"agentmemory/internal/memory/recall"
 	"agentmemory/internal/memory/store"
 	"agentmemory/internal/memory/write"
 )
@@ -84,15 +96,26 @@ func runWeb(args []string, stdout io.Writer) error {
 		}
 	}()
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// embedder — та же фабрика newEmbedder, что у MCP-сервера/CLI (main.go):
+	// "" / "noop" в конфиге, недоступная ollama/OpenAI или опечатка в модели — везде
+	// откат на Noop (Dim()==0), только неизвестный provider — ошибка старта. Recaller
+	// с Noop-эмбеддером ведёт себя как чистый FTS5 (searchVector рано выходит при
+	// Dim()<=0) — деградация семантического поиска до лексического бесшовна.
+	embedder, err := newEmbedder(ctx, cfg.Embedder)
+	if err != nil {
+		return fmt.Errorf("создание embedder: %w", err)
+	}
+
 	w := write.New(s, memembed.NewNoop())
+	rc := recall.New(s, cfg.Recall, reason.NewNoop(), embedder)
 
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: newWebHandler(s, w),
+		Handler: newWebHandler(s, w, rc, embedder),
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -121,16 +144,17 @@ func runWeb(args []string, stdout io.Writer) error {
 // newWebHandler собирает мультиплексор web-морды: JSON API под /api/ (см.
 // каждый handler) + статика (embed.FS) на /. API-роуты регистрируются до
 // файлового хендлера, чтобы /api/* не перехватывался статикой. w используется
-// только для мягкого удаления (DELETE /api/memories/{id}) — остальные роуты
-// целиком read-only поверх s.
-func newWebHandler(s store.Store, w *write.Writer) http.Handler {
+// только для мягкого удаления (DELETE /api/memories/{id}); rc/embedder — только
+// для /api/search в режиме semantic (задача 10.1) — остальные роуты целиком
+// read-only поверх s.
+func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder memembed.Embedder) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/stats", handleStats(s))
 	mux.HandleFunc("GET /api/memories", handleListMemories(s))
 	mux.HandleFunc("GET /api/memories/{id}", handleGetMemory(s))
 	mux.HandleFunc("DELETE /api/memories/{id}", handleForgetMemory(s, w))
-	mux.HandleFunc("GET /api/search", handleSearch(s))
+	mux.HandleFunc("GET /api/search", handleSearch(s, rc, embedder))
 	// Catch-all для неизвестных /api/*-путей: без него они проваливаются в
 	// файловый хендлер на "/" и отдают plain-text 404 вместо JSON-ошибки.
 	// Менее специфичен, чем method-aware паттерны выше, поэтому известные
@@ -185,8 +209,8 @@ type linkDTO struct {
 }
 
 // searchItemDTO — элемент выдачи /api/search: memoryDTO + оценка релевантности
-// и источник кандидата (сейчас всегда "lexical" — гибридный/векторный поиск
-// вне этой версии, см. handleSearch).
+// и источник кандидата ("lexical" в mode=lexical; "lexical"/"vector"/
+// "lexical+vector" в mode=semantic — задача 10.1, см. handleSearch).
 type searchItemDTO struct {
 	memoryDTO
 	Score  float64 `json:"score"`
@@ -439,17 +463,36 @@ func handleForgetMemory(s store.Store, w *write.Writer) http.HandlerFunc {
 	}
 }
 
-// searchResponse — тело ответа GET /api/search.
+// searchModeLexical/searchModeSemantic — допустимые значения query-параметра
+// mode у /api/search (задача 10.1). semantic — дефолт (гибрид: FTS5 + вектор
+// при доступном Embedder, RRF, бизнес-ранжирование, см. recall.Recaller.Candidates);
+// lexical — прежнее поведение (Store.SearchLexical напрямую), оставлено для
+// сравнения "глазами" и как явный обход векторного слоя.
+const (
+	searchModeLexical  = "lexical"
+	searchModeSemantic = "semantic"
+)
+
+// searchResponse — тело ответа GET /api/search. Vector — доступен ли векторный
+// слой у этого инстанса морды (Embedder.Dim() > 0): false в mode=semantic
+// означает, что запрос молча деградировал до чистого FTS5 (недоступна
+// ollama/OpenAI либо embedder.provider=noop в конфиге) — фронт показывает
+// плашку деградации. В mode=lexical поле тоже присутствует (честный статус
+// слоя), но не влияет на сам запрос — векторный источник в lexical не
+// используется независимо от него.
 type searchResponse struct {
-	Items []searchItemDTO `json:"items"`
+	Items  []searchItemDTO `json:"items"`
+	Vector bool            `json:"vector"`
 }
 
-// handleSearch — лексический поиск (FTS5) поверх Store.SearchLexical.
-// Гибридный/векторный поиск (RRF-слияние lexical+vector) — вне этой версии:
-// он требует Embedder (ollama), который web-морда намеренно не поднимает
-// (только читает store лексически, DESIGN.md §12). Возможное расширение
-// будущей задачи — поднимать embedder так же, как это делает run() в main.go.
-func handleSearch(s store.Store) http.HandlerFunc {
+// handleSearch — поиск по памяти в двух режимах (задача 10.1): mode=lexical —
+// прежний чистый FTS5 (Store.SearchLexical); mode=semantic (дефолт) — гибрид
+// через recall.Recaller.Candidates (тот же путь, что и MCP memory_recall, без
+// сборки Markdown-брифа). Деградация встроена в сам Candidates (DESIGN.md §15):
+// недоступный/noop Embedder — гибрид молча превращается в чистый FTS5, ошибка
+// наружу не идёт; searchResponse.Vector сообщает фронту, произошла ли эта
+// деградация, отдельно от самой выдачи.
+func handleSearch(s store.Store, rc *recall.Recaller, embedder memembed.Embedder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 
@@ -459,21 +502,43 @@ func handleSearch(s store.Store) http.HandlerFunc {
 			return
 		}
 
+		mode := q.Get("mode")
+		if mode == "" {
+			mode = searchModeSemantic
+		}
+		if mode != searchModeLexical && mode != searchModeSemantic {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("параметр mode: неизвестное значение %q (ожидается %q или %q)", mode, searchModeLexical, searchModeSemantic))
+			return
+		}
+
 		limit, err := parseLimit(q.Get("limit"), listDefaultPageSize, browseLimitCap)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
 
-		candidates, err := s.SearchLexical(r.Context(), memory.Query{
+		query := memory.Query{
 			Text:   text,
 			Scopes: nonEmpty(q["scope"]),
 			Kinds:  nonEmpty(q["kind"]),
 			Limit:  limit,
-		})
+		}
+
+		var candidates []memory.Candidate
+		if mode == searchModeLexical {
+			candidates, err = s.SearchLexical(r.Context(), query)
+		} else {
+			candidates, err = rc.Candidates(r.Context(), query)
+		}
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, fmt.Errorf("search: %w", err))
 			return
+		}
+		// Candidates сливает выдачу двух источников (лексика+вектор) до limit каждый
+		// — итог может превысить запрошенный limit; режем до него, как и в lexical
+		// mode (Store.SearchLexical уже соблюдает limit сам).
+		if len(candidates) > limit {
+			candidates = candidates[:limit]
 		}
 
 		items := make([]searchItemDTO, len(candidates))
@@ -485,7 +550,7 @@ func handleSearch(s store.Store) http.HandlerFunc {
 			}
 		}
 
-		writeJSON(w, http.StatusOK, searchResponse{Items: items})
+		writeJSON(w, http.StatusOK, searchResponse{Items: items, Vector: embedder.Dim() > 0})
 	}
 }
 

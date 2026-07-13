@@ -85,11 +85,15 @@ type Query struct {
 }
 
 // Candidate — кандидат на попадание в бриф: запись + оценка релевантности
-// от конкретного источника поиска (для последующего RRF-слияния).
+// от конкретного источника поиска (для последующего RRF-слияния). Store.SearchLexical/
+// SearchVector отдают Source ровно одного источника ("lexical" | "vector");
+// recall.Recaller.Candidates (задача 10.1) отдаёт уже слитый после RRF результат, где
+// Source может быть составным ("lexical+vector") — те же значения, что в explain
+// (задача 8.1, DESIGN.md §8).
 type Candidate struct {
 	Memory Memory
 	Score  float64
-	Source string // "lexical" | "vector"
+	Source string // "lexical" | "vector" | "lexical+vector"
 }
 
 // Brief — результат сборки recall: готовый Markdown-текст и метаданные о том,

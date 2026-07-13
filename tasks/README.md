@@ -110,7 +110,7 @@ API из 6.2.
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| 10.1 Семантический поиск в морде | [10.1-web-semantic-search.md](10.1-web-semantic-search.md) | ⬜ ожидает |
+| 10.1 Семантический поиск в морде | [10.1-web-semantic-search.md](10.1-web-semantic-search.md) | ✅ выполнена |
 | 10.2 Правка importance/tags из морды | [10.2-web-edit-metadata.md](10.2-web-edit-metadata.md) | ⬜ ожидает |
 
 ### Отклонённые идеи (чтобы не возвращаться)

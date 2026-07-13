@@ -141,15 +141,37 @@ type Explain struct {
 	Final      float64  // итог (Relevance+Importance+Recency+Access), по которому отсортирован бриф
 }
 
-// Recall выполняет read path целиком: кандидаты -> RRF-слияние -> ранжирование ->
-// сборка брифа под token_budget -> усиление доступа (Touch) для вошедших записей
-// (DESIGN.md §8).
-func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, error) {
-	budget := q.TokenBudget
-	if budget <= 0 {
-		budget = r.defaultBudget
+// Candidates выполняет гибридный поиск (FTS + вектор при доступном Embedder, RRF,
+// бизнес-ранжирование) и возвращает отранжированных кандидатов без сборки брифа
+// (задача 10.1: тот же путь, что использует Recall, нужен web-морде для семантического
+// поиска в JSON, а не в Markdown). Source кандидата — слитый ("lexical"/"vector"/
+// "lexical+vector"), та же величина, что видна в explain-трассе брифа (задача 8.1).
+// Пустой результат (нет кандидатов ни от одного источника) — nil, nil, не ошибка.
+func (r *Recaller) Candidates(ctx context.Context, q memory.Query) ([]memory.Candidate, error) {
+	scored, err := r.scoredCandidates(ctx, q)
+	if err != nil {
+		return nil, err
 	}
+	if len(scored) == 0 {
+		return nil, nil
+	}
+	out := make([]memory.Candidate, len(scored))
+	for i, c := range scored {
+		out[i] = memory.Candidate{
+			Memory: c.mem,
+			Score:  c.final,
+			Source: strings.Join(c.explain.Sources, "+"),
+		}
+	}
+	return out, nil
+}
 
+// scoredCandidates — общая точка правды гибридного поиска (DESIGN.md §8 п.1-3):
+// FTS5 + вектор (при доступном Embedder) -> RRF-слияние -> бизнес-ранжирование ->
+// сортировка по убыванию final. И Recall (сборка Markdown-брифа), и публичный
+// Candidates (задача 10.1, JSON для web-морды) строятся поверх этого метода —
+// сама логика гибридного поиска существует в коде ровно один раз.
+func (r *Recaller) scoredCandidates(ctx context.Context, q memory.Query) ([]scoredCandidate, error) {
 	candQuery := q
 	if candQuery.Limit <= 0 {
 		candQuery.Limit = defaultCandidateLimit
@@ -157,15 +179,13 @@ func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, er
 
 	lexical, err := r.store.SearchLexical(ctx, candQuery)
 	if err != nil {
-		return memory.Brief{}, fmt.Errorf("recall: лексический поиск: %w", err)
+		return nil, fmt.Errorf("recall: лексический поиск: %w", err)
 	}
 	vector := r.searchVector(ctx, q.Text, candQuery)
 
 	merged := fuseRRF(lexical, vector)
 	if len(merged) == 0 {
-		// Нечего суммировать и незачем платить за вызов Reasoner на тексте
-		// "ничего не найдено" — ранний выход до withSummary.
-		return emptyBrief(), nil
+		return nil, nil
 	}
 
 	scored := r.rank(merged)
@@ -176,6 +196,29 @@ func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, er
 		// Детерминированный тай-брейк: свежее — первым.
 		return scored[i].mem.CreatedAt > scored[j].mem.CreatedAt
 	})
+	return scored, nil
+}
+
+// Recall выполняет read path целиком: кандидаты -> RRF-слияние -> ранжирование ->
+// сборка брифа под token_budget -> усиление доступа (Touch) для вошедших записей
+// (DESIGN.md §8). Кандидаты и их ранжирование — через scoredCandidates (тот же путь,
+// что и у публичного Candidates), здесь — только специфика брифа (бюджет, Markdown,
+// Touch, суммаризация).
+func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, error) {
+	budget := q.TokenBudget
+	if budget <= 0 {
+		budget = r.defaultBudget
+	}
+
+	scored, err := r.scoredCandidates(ctx, q)
+	if err != nil {
+		return memory.Brief{}, err
+	}
+	if len(scored) == 0 {
+		// Нечего суммировать и незачем платить за вызов Reasoner на тексте
+		// "ничего не найдено" — ранний выход до withSummary.
+		return emptyBrief(), nil
+	}
 
 	included, collapsed := selectByBudget(scored, budget, q.Explain)
 

@@ -933,3 +933,105 @@ func TestRecall_ExplainTrue_ShowsSourcesAndSumMatchesFinal(t *testing.T) {
 		t.Errorf("сумма слагаемых %v (=%.3f) не сходится с final %.3f", []float64{relLex, impLex, recLex, accLex}, sum, finalLex)
 	}
 }
+
+// TestCandidates_MatchesRecallOrderAndSet — связующий тест экстракции (задача 10.1):
+// публичный Candidates должен отдавать тот же набор записей в том же порядке, что и
+// виден в брифе Recall на идентичном запросе (обе точки входа теперь строятся над
+// общим scoredCandidates, поведение Recall при этом не изменилось — см. остальные
+// тесты файла, прошедшие без правок ожиданий). Три записи одного kind (без деления на
+// секции брифа) с разными источниками — лексика, вектор, оба сразу — так порядок строк
+// в Markdown совпадает с глобальным порядком по final-score, который и проверяем.
+func TestCandidates_MatchesRecallOrderAndSet(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:candidates-extraction"
+
+	if err := s.ResetVectorIndex(ctx, "fake-model", 3); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+
+	bothID, lexOnlyID, vecOnlyID := newID(t), newID(t), newID(t)
+	putMemory(t, ctx, s, memory.Memory{
+		Id: bothID, Kind: memory.KindSemantic, Scope: scope,
+		Content: "уникальныймаркерcand общий термин поиска", Summary: strPtr("Both source item"),
+		Importance: 5, CreatedAt: 1000, UpdatedAt: 1000,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: lexOnlyID, Kind: memory.KindSemantic, Scope: scope,
+		Content: "уникальныймаркерcand общий термин поиска", Summary: strPtr("Lexical only item"),
+		Importance: 3, CreatedAt: 1000, UpdatedAt: 1000,
+	})
+	// Слова без общего корня со словами запроса (никакой стеммер не должен свести их
+	// к тому же токену) — эта запись обязана найтись только вектором, не лексикой.
+	putMemory(t, ctx, s, memory.Memory{
+		Id: vecOnlyID, Kind: memory.KindSemantic, Scope: scope,
+		Content: "жираф слон черепаха облако", Summary: strPtr("Vector only item"),
+		Importance: 3, CreatedAt: 1000, UpdatedAt: 1000,
+	})
+	// Вектор запроса и обеих "векторных" записей совпадает; lexOnlyID остаётся вне
+	// векторного индекса — найдётся только лексикой.
+	if err := s.PutVector(ctx, bothID, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector both: %v", err)
+	}
+	if err := s.PutVector(ctx, vecOnlyID, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("PutVector vecOnly: %v", err)
+	}
+
+	fe := &fakeEmbedder{dim: 3, vec: []float32{1, 0, 0}}
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), fe,
+		WithNow(func() int64 { return 1000 }))
+
+	query := memory.Query{Text: "уникальныймаркерcand общий термин поиска", Scope: scope}
+
+	brief, err := r.Recall(ctx, query)
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if brief.Count != 3 {
+		t.Fatalf("Count = %d, want 3 (бюджет достаточен для всех трёх записей): brief=%+v", brief.Count, brief)
+	}
+
+	candidates, err := r.Candidates(ctx, query)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(candidates) != 3 {
+		t.Fatalf("len(candidates) = %d, want 3", len(candidates))
+	}
+
+	// Порядок в брифе (единственная секция kind=semantic, значит порядок строк
+	// совпадает с глобальным порядком по final) должен совпадать с порядком
+	// Candidates — сам числовой порядок (both выше единственного источника, а между
+	// lexical-only/vector-only решает случайный порядок в исходных срезах SearchLexical/
+	// SearchVector до RRF) не входит в контракт этого теста, важно только совпадение
+	// Recall и Candidates между собой на одном и том же запросе.
+	var wantOrder []string
+	for _, c := range candidates {
+		switch c.Memory.Id {
+		case bothID:
+			wantOrder = append(wantOrder, "Both source item")
+		case lexOnlyID:
+			wantOrder = append(wantOrder, "Lexical only item")
+		case vecOnlyID:
+			wantOrder = append(wantOrder, "Vector only item")
+		}
+	}
+	lastIdx := -1
+	for _, marker := range wantOrder {
+		idx := strings.Index(brief.Markdown, marker)
+		if idx == -1 {
+			t.Fatalf("бриф должен содержать %q:\n%s", marker, brief.Markdown)
+		}
+		if idx <= lastIdx {
+			t.Fatalf("бриф должен перечислять записи в том же порядке, что Candidates (%v):\n%s", wantOrder, brief.Markdown)
+		}
+		lastIdx = idx
+	}
+
+	wantSources := map[string]string{bothID: "lexical+vector", lexOnlyID: "lexical", vecOnlyID: "vector"}
+	for i, c := range candidates {
+		if want := wantSources[c.Memory.Id]; c.Source != want {
+			t.Errorf("candidates[%d] (id=%s).Source = %q, want %q", i, c.Memory.Id, c.Source, want)
+		}
+	}
+}

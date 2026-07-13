@@ -17,6 +17,17 @@ const KIND_BADGE_CLASS_DEFAULT = "bg-slate-100 text-slate-800 dark:bg-slate-700 
 
 const KIND_LABEL = { semantic: "семантика", episodic: "эпизод", procedural: "процедура" };
 
+// --- бейдж источника кандидата поиска (задача 10.1): "lexical"/"vector"/
+// "lexical+vector" (Candidate.Source, см. DESIGN.md §8/§12, задача 8.1) -> короткая
+// подпись на бейдже. Литеральные классы нужны здесь для Tailwind-сканера @source. ---
+const SOURCE_LABEL = { lexical: "fts", vector: "vec", "lexical+vector": "fts+vec" };
+const SOURCE_BADGE_CLASS = {
+  lexical: "border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-400",
+  vector: "border-emerald-300 text-emerald-700 dark:border-emerald-700 dark:text-emerald-400",
+  "lexical+vector": "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400",
+};
+const SOURCE_BADGE_CLASS_DEFAULT = "border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-400";
+
 // --- стили кнопок (стандартный компонент Tailwind: solid primary danger +
 // secondary). Литеральные строки классов нужны Tailwind-сканеру @source ---
 const BTN_DANGER =
@@ -95,6 +106,10 @@ function apiDelete(path) {
 
 const state = {
   query: "",
+  // mode — режим /api/search (задача 10.1): "semantic" (дефолт, гибрид FTS5+вектор)
+  // или "lexical" (прежнее поведение, чистый FTS5). Не влияет на просмотр
+  // (/api/memories не принимает mode).
+  mode: "semantic",
   scopes: new Set(),
   kinds: new Set(),
   showSuperseded: false,
@@ -325,8 +340,20 @@ function loadList() {
   clear(document.getElementById("results-summary"));
   detachSentinel();
   if (statusEl) statusEl.textContent = "";
+  updateDegradedBanner(null);
 
   fetchPage(true);
+}
+
+// updateDegradedBanner показывает/скрывает плашку «поиск по смыслу недоступен»
+// (задача 10.1): видна только когда выбран режим "semantic" и сервер честно
+// сообщил vector:false (Embedder недоступен/выключен — гибрид молча деградировал
+// до FTS5). vectorAvailable=null используется для сброса баннера вне поиска.
+function updateDegradedBanner(vectorAvailable) {
+  const banner = document.getElementById("search-degraded-banner");
+  if (!banner) return;
+  const shouldShow = state.mode === "semantic" && vectorAvailable === false;
+  banner.classList.toggle("hidden", !shouldShow);
 }
 
 // fetchPage грузит ОДНУ страницу. isReset=true — первая страница (заменяет
@@ -354,11 +381,13 @@ async function fetchPage(isReset) {
     if (isSearch) {
       const p = buildListQuery();
       p.set("q", q);
+      p.set("mode", state.mode);
       p.delete("offset");
       const data = await api("/api/search?" + p.toString(), { signal: controller.signal });
       if (state.controller !== controller) return; // вытеснено новой загрузкой
       clear(listBox);
       renderSearchResults(data.items || [], summaryBox, listBox);
+      updateDegradedBanner(data.vector);
       state.exhausted = true;
     } else {
       const p = buildListQuery();
@@ -488,11 +517,15 @@ function renderCard(item, isSearch) {
     );
   }
   if (isSearch) {
+    const sourceBadge = el("span", {
+      class: "rounded-full border px-1.5 py-0.5 text-xs font-medium " + (SOURCE_BADGE_CLASS[item.source] || SOURCE_BADGE_CLASS_DEFAULT),
+      text: SOURCE_LABEL[item.source] || item.source,
+    });
     topRow.appendChild(
-      el("span", {
-        class: "ml-auto text-xs text-slate-500 dark:text-slate-400",
-        text: "score: " + item.score.toFixed(3) + " (" + item.source + ")",
-      })
+      el("span", { class: "ml-auto flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400" }, [
+        el("span", { text: "score " + item.score.toFixed(3) }),
+        sourceBadge,
+      ])
     );
   }
 
@@ -776,6 +809,14 @@ function setupFilterControls() {
     }
   });
 
+  document.querySelectorAll('input[name="search-mode"]').forEach(function (radio) {
+    radio.addEventListener("change", function () {
+      if (!radio.checked) return;
+      state.mode = radio.value;
+      loadList();
+    });
+  });
+
   const supersededToggle = document.getElementById("toggle-superseded");
   supersededToggle.addEventListener("change", function () {
     state.showSuperseded = supersededToggle.checked;
@@ -784,10 +825,12 @@ function setupFilterControls() {
 
   document.getElementById("reset-filters").addEventListener("click", function () {
     state.query = "";
+    state.mode = "semantic";
     state.scopes.clear();
     state.kinds.clear();
     state.showSuperseded = false;
     searchInput.value = "";
+    document.getElementById("mode-semantic").checked = true;
     supersededToggle.checked = false;
     renderFilterCheckboxes(statsCache);
     loadList();
