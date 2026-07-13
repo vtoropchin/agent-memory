@@ -260,11 +260,11 @@ func TestDoInit_DefaultProjectNameFromDir(t *testing.T) {
 	}
 }
 
-// TestDoInit_OverwritesConfigFiles проверяет, что agentmemory.toml и
-// .mcp.json ВСЕГДА перезаписываются целиком при повторном `memo init` —
-// независимо от Force (единственный источник истины для них — параметры
-// текущего прогона, см. overwriteFile в init.go; ручные правки этих двух
-// файлов сознательно не переживают повторный init).
+// TestDoInit_OverwritesConfigFiles проверяет, что agentmemory.toml ВСЕГДА
+// перезаписывается целиком при повторном `memo init`, независимо от Force
+// (единственный источник истины для него — параметры текущего прогона, см.
+// overwriteFile в init.go), а .mcp.json обновляет запись сервера memo на
+// месте (mergeMCPConfig) — тоже независимо от Force.
 func TestDoInit_OverwritesConfigFiles(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "agentmemory.toml")
@@ -299,14 +299,163 @@ func TestDoInit_OverwritesConfigFiles(t *testing.T) {
 		t.Fatalf("чтение .mcp.json: %v", err)
 	}
 	if string(mcpGot) == mcpSentinel {
-		t.Errorf(".mcp.json не перезаписан без Force: %s", mcpGot)
+		t.Errorf(".mcp.json не обновлён без Force: %s", mcpGot)
 	}
 	var mcpCfg mcpConfigFile
 	if err := json.Unmarshal(mcpGot, &mcpCfg); err != nil {
-		t.Fatalf("перезаписанный .mcp.json невалиден: %v\n%s", err, mcpGot)
+		t.Fatalf("обновлённый .mcp.json невалиден: %v\n%s", err, mcpGot)
 	}
 	if _, ok := mcpCfg.MCPServers["memo"]; !ok {
-		t.Errorf("перезаписанный .mcp.json не содержит сервер memo: %s", mcpGot)
+		t.Errorf("обновлённый .mcp.json не содержит сервер memo: %s", mcpGot)
+	}
+}
+
+// TestDoInit_MCPConfigMergePreservesForeignServerAndTopLevelKey проверяет
+// ключевое свойство мержа .mcp.json (архитектурное ревью после d9e612e:
+// полная перезапись затирала чужие MCP-серверы, добавленные разработчиком
+// вручную): существующий .mcp.json с чужим сервером под другим именем и с
+// кастомным top-level ключом сохраняет и то, и другое после doInit, а запись
+// memo при этом (пере)генерируется из параметров текущего прогона.
+func TestDoInit_MCPConfigMergePreservesForeignServerAndTopLevelKey(t *testing.T) {
+	dir := t.TempDir()
+	mcpPath := filepath.Join(dir, ".mcp.json")
+	const existing = `{
+  "mcpServers": {
+    "other": {"command": "foo", "args": ["bar"], "env": {"X": "1"}},
+    "memo": {"command": "stale-memo-path", "args": [], "env": {}}
+  },
+  "customTopLevel": "keep-me"
+}`
+	if err := os.WriteFile(mcpPath, []byte(existing), 0o644); err != nil {
+		t.Fatalf("запись стартового .mcp.json: %v", err)
+	}
+
+	var out strings.Builder
+	if err := doInit(initConfig{Project: "myproj", Dir: dir}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	raw, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("чтение .mcp.json: %v", err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf(".mcp.json невалиден: %v\n%s", err, raw)
+	}
+	if top["customTopLevel"] != "keep-me" {
+		t.Errorf("кастомный top-level ключ потерян: %v", top["customTopLevel"])
+	}
+
+	servers, ok := top["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers отсутствует или не объект: %s", raw)
+	}
+	other, ok := servers["other"].(map[string]any)
+	if !ok {
+		t.Fatalf("чужой сервер other потерян: %v", servers)
+	}
+	if other["command"] != "foo" {
+		t.Errorf("чужой сервер other повреждён: %v", other)
+	}
+
+	var mcpCfg mcpConfigFile
+	if err := json.Unmarshal(raw, &mcpCfg); err != nil {
+		t.Fatalf("разбор .mcp.json: %v", err)
+	}
+	memo, ok := mcpCfg.MCPServers["memo"]
+	if !ok {
+		t.Fatalf("сервер memo отсутствует после мержа: %s", raw)
+	}
+	if memo.Command == "stale-memo-path" {
+		t.Errorf("запись memo не перегенерирована из параметров текущего прогона: %v", memo)
+	}
+}
+
+// TestDoInit_OpencodeMCPConfigMergePreservesForeignServer — то же свойство,
+// что и TestDoInit_MCPConfigMergePreservesForeignServerAndTopLevelKey, но для
+// opencode.json (секция "mcp", а не "mcpServers"), и дополнительно проверяет,
+// что уже присутствующий "$schema" не перетирается ensureOpencodeSchema
+// (тот выставляет значение по умолчанию, только если ключа ещё нет).
+func TestDoInit_OpencodeMCPConfigMergePreservesForeignServer(t *testing.T) {
+	dir := t.TempDir()
+	ocPath := filepath.Join(dir, "opencode.json")
+	const existing = `{
+  "$schema": "https://custom.example/opencode-schema.json",
+  "mcp": {
+    "other": {"type": "local", "command": ["foo"], "enabled": true, "environment": {}}
+  },
+  "customTopLevel": "keep-me"
+}`
+	if err := os.WriteFile(ocPath, []byte(existing), 0o644); err != nil {
+		t.Fatalf("запись стартового opencode.json: %v", err)
+	}
+
+	var out strings.Builder
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode"}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	raw, err := os.ReadFile(ocPath)
+	if err != nil {
+		t.Fatalf("чтение opencode.json: %v", err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("opencode.json невалиден: %v\n%s", err, raw)
+	}
+	if top["customTopLevel"] != "keep-me" {
+		t.Errorf("кастомный top-level ключ потерян: %v", top["customTopLevel"])
+	}
+	if top["$schema"] != "https://custom.example/opencode-schema.json" {
+		t.Errorf("существующий $schema перетёрт: %v", top["$schema"])
+	}
+
+	mcp, ok := top["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcp отсутствует или не объект: %s", raw)
+	}
+	other, ok := mcp["other"].(map[string]any)
+	if !ok {
+		t.Fatalf("чужой сервер other потерян: %v", mcp)
+	}
+	if other["type"] != "local" {
+		t.Errorf("чужой сервер other повреждён: %v", other)
+	}
+
+	memo, ok := mcp["memo"].(map[string]any)
+	if !ok {
+		t.Fatalf("сервер memo отсутствует после мержа: %s", raw)
+	}
+	if memo["type"] != "local" {
+		t.Errorf("mcp.memo.type = %v, хочу local", memo["type"])
+	}
+}
+
+// TestDoInit_MCPConfigMalformedExistingErrorsWithoutWrite проверяет, что
+// битый JSON в существующем .mcp.json — ошибка doInit, а не перезапись/потеря
+// файла (по образцу TestDoInit_HooksMalformedExistingSettingsErrorsWithoutWrite
+// для settings.json).
+func TestDoInit_MCPConfigMalformedExistingErrorsWithoutWrite(t *testing.T) {
+	dir := t.TempDir()
+	mcpPath := filepath.Join(dir, ".mcp.json")
+	const broken = "{ не валидный json"
+	if err := os.WriteFile(mcpPath, []byte(broken), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var out strings.Builder
+	err := doInit(initConfig{Project: "myproj", Dir: dir}, &out)
+	if err == nil {
+		t.Fatalf("doInit = nil error, хочу ошибку разбора .mcp.json")
+	}
+
+	raw, readErr := os.ReadFile(mcpPath)
+	if readErr != nil {
+		t.Fatalf("чтение: %v", readErr)
+	}
+	if string(raw) != broken {
+		t.Errorf(".mcp.json изменён после ошибки: %q", raw)
 	}
 }
 

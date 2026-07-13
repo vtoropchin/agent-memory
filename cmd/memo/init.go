@@ -7,12 +7,16 @@
 // трогает загрузку конфига (internal/config) и серверный путь.
 //
 // Повторный `memo init` в уже инициализированном проекте ведёт себя по-разному
-// в зависимости от файла: MCP-конфиг и agentmemory.toml всегда перезаписываются
-// целиком (overwriteFile) — они полностью выводятся из параметров текущего
-// прогона, и -force на них не влияет; .env мержится (mergeEnvFile) — ключи
-// выбранных провайдеров дописываются/обновляются, остальные строки сохраняются,
-// тоже независимо от -force; скиллы SKILL.md — единственные, кто уважает
-// -force в исходном смысле "пропустить существующий файл" (writeScaffoldFile).
+// в зависимости от файла: agentmemory.toml всегда перезаписывается целиком
+// (overwriteFile) — он полностью выводится из параметров текущего прогона, и
+// -force на него не влияет; MCP-конфиг (.mcp.json/opencode.json) мержится
+// (mergeMCPConfig) — запись сервера memo (пере)генерируется из параметров
+// текущего прогона, но чужие серверы и прочие top-level ключи файла
+// сохраняются, тоже независимо от -force; .env мержится (mergeEnvFile) —
+// ключи выбранных провайдеров дописываются/обновляются, остальные строки
+// сохраняются, тоже независимо от -force; скиллы SKILL.md — единственные,
+// кто уважает -force в исходном смысле "пропустить существующий файл"
+// (writeScaffoldFile).
 package main
 
 import (
@@ -75,7 +79,7 @@ const (
 // — пусто, если провайдеру ключ не нужен, напр. ollama/noop). Единый источник
 // метаданных провайдера — по образцу agentRegistry: из embedderProviders/
 // reasonerProviders деривятся список опций help/select, валидация флага и
-// выбор env-ключа в renderMCPJSON/renderOpencodeJSON/doInit (задача 11.1,
+// выбор env-ключа в buildMCPServerEntry/buildOpencodeServerEntry/doInit (задача 11.1,
 // цикл исправлений — раньше эти четыре вещи были рассинхронизируемыми копиями
 // в разных функциях).
 type providerSpec struct {
@@ -140,8 +144,8 @@ func (p providerSpec) keyField(cfg *initConfig) *string {
 
 // selectedProviders возвращает записи реестров, соответствующие выбранным в
 // cfg провайдерам эмбеддинга и reasoner (в этом порядке) — общий источник для
-// renderMCPJSON/renderOpencodeJSON (какие env-плейсхолдеры класть в .mcp.json/
-// opencode.json) и doInit (какие ключи класть в .env). cfg должен быть уже
+// buildMCPServerEntry/buildOpencodeServerEntry (какие env-плейсхолдеры класть
+// в .mcp.json/opencode.json) и doInit (какие ключи класть в .env). cfg должен быть уже
 // пропущен через applyInitDefaults (Provider непуст) — при пустом/неизвестном
 // значении запись просто не находится и пропускается.
 func selectedProviders(cfg initConfig) []providerSpec {
@@ -287,6 +291,8 @@ model    = "%s"
 var mcpServerArgs = []string{"-config", "${CLAUDE_PROJECT_DIR:-.}/agentmemory.toml"}
 
 // mcpConfigFile / mcpServerSpec — форма .mcp.json (см. корневой .mcp.json).
+// mcpServerSpec также используется buildMCPServerEntry для сборки записи
+// сервера memo, мержимой в существующий файл (mergeMCPConfig).
 type mcpConfigFile struct {
 	MCPServers map[string]mcpServerSpec `json:"mcpServers"`
 }
@@ -324,8 +330,8 @@ var memorySkills = []skillSpec{
 type agentTarget struct {
 	label string // человекочитаемое имя для промптов/вывода
 
-	mcpConfigPath   func(dir string) string
-	renderMCPConfig func(command string, cfg initConfig) (string, error)
+	mcpConfigPath func(dir string) string
+	mcpMerge      mcpConfigMerge // как мержить запись сервера memo в MCP-конфиг (mergeMCPConfig)
 
 	skillsDir func(dir string) string // корень каталога скиллов агента
 	skills    []skillSpec
@@ -335,18 +341,25 @@ type agentTarget struct {
 // флага -agent.
 var agentRegistry = map[string]agentTarget{
 	"claude": {
-		label:           "Claude Code",
-		mcpConfigPath:   func(dir string) string { return filepath.Join(dir, ".mcp.json") },
-		renderMCPConfig: renderMCPJSON,
+		label:         "Claude Code",
+		mcpConfigPath: func(dir string) string { return filepath.Join(dir, ".mcp.json") },
+		mcpMerge: mcpConfigMerge{
+			sectionKey: "mcpServers",
+			buildEntry: buildMCPServerEntry,
+		},
 		skillsDir: func(dir string) string {
 			return filepath.Join(dir, ".claude", "skills")
 		},
 		skills: memorySkills,
 	},
 	"opencode": {
-		label:           "opencode",
-		mcpConfigPath:   func(dir string) string { return filepath.Join(dir, "opencode.json") },
-		renderMCPConfig: renderOpencodeJSON,
+		label:         "opencode",
+		mcpConfigPath: func(dir string) string { return filepath.Join(dir, "opencode.json") },
+		mcpMerge: mcpConfigMerge{
+			sectionKey:     "mcp",
+			buildEntry:     buildOpencodeServerEntry,
+			ensureTopLevel: ensureOpencodeSchema,
+		},
 		skillsDir: func(dir string) string {
 			return filepath.Join(dir, ".opencode", "skills")
 		},
@@ -396,7 +409,7 @@ func runInit(args []string, out io.Writer) error {
 	}
 	project := fs.String("project", "", "имя проекта (дефолт — базовое имя каталога -dir)")
 	dir := fs.String("dir", ".", "каталог, в который скаффолдить артефакты")
-	force := fs.Bool("force", false, "перезаписывать существующие файлы")
+	force := fs.Bool("force", false, "перезаписывать существующие файлы скиллов SKILL.md (agentmemory.toml/mcp-конфиг всегда синхронизируются, .env всегда мержится — -force на них не влияет)")
 	agent := fs.String("agent", "", fmt.Sprintf("агентское приложение (%s); дефолт %s", strings.Join(agentKeys(), ", "), defaultAgentKey))
 	embedderProvider := fs.String("embedder-provider", "", fmt.Sprintf("провайдер эмбеддинга (%s); дефолт %s", strings.Join(embedderProviderOptions, ", "), defaultEmbedderProvider))
 	embedderURL := fs.String("embedder-url", "", "base URL эмбеддера (дефолт зависит от провайдера)")
@@ -578,18 +591,15 @@ func doInit(cfg initConfig, out io.Writer) error {
 		fmt.Fprintf(out, "не удалось определить путь к memo (%v) — в MCP-конфиг записана команда \"memo\", проверь, что она доступна в PATH\n", err)
 	}
 
-	mcpContent, err := target.renderMCPConfig(command, cfg)
-	if err != nil {
-		return err
-	}
 	tomlContent := fmt.Sprintf(configTomlTemplate,
 		escapeTOMLString(project), escapeTOMLString(cfg.StorePath), renderEmbedderTomlBlock(cfg), renderReasonerTomlBlock(cfg))
 
-	// .mcp.json/opencode.json — всегда перезаписывается целиком (overwriteFile,
-	// а не writeScaffoldFile): единственный источник истины для него — параметры
-	// текущего прогона init, -force тут ни при чём (осознанный tradeoff: ручные
-	// правки этого файла не переживают повторный `memo init`).
-	if err := overwriteFile(target.mcpConfigPath(cfg.Dir), mcpContent, out); err != nil {
+	// .mcp.json/opencode.json — запись сервера memo мержится в существующий
+	// файл (mergeMCPConfig), а не перезаписывает его целиком: единственный
+	// источник истины для записи memo — параметры текущего прогона init
+	// (-force тут ни при чём, как и раньше), но чужие серверы, добавленные в
+	// файл вручную, и прочие top-level ключи сохраняются.
+	if err := mergeMCPConfig(target.mcpConfigPath(cfg.Dir), command, cfg, target.mcpMerge, out); err != nil {
 		return err
 	}
 
@@ -603,8 +613,9 @@ func doInit(cfg initConfig, out io.Writer) error {
 		}
 	}
 
-	// agentmemory.toml — та же логика "всегда перезаписывается", что и у
-	// mcp-конфига выше (см. комментарий overwriteFile).
+	// agentmemory.toml — единственный артефакт, который всё ещё перезаписывается
+	// целиком (overwriteFile): весь его источник истины — параметры текущего
+	// прогона init, -force на него не влияет.
 	if err := overwriteFile(filepath.Join(cfg.Dir, "agentmemory.toml"), tomlContent, out); err != nil {
 		return err
 	}
@@ -612,10 +623,10 @@ func doInit(cfg initConfig, out io.Writer) error {
 	// .env — только ключи выбранных провайдеров (DESIGN.md §13, задача 11.1):
 	// applyInitDefaults уже обнулил ключи невыбранных провайдеров выше, здесь
 	// достаточно проверить, что оставшееся непусто. selectedProviders — тот же
-	// реестр, из которого renderMCPJSON/renderOpencodeJSON берут env-плейсхолдеры.
-	// mergeEnvFile дописывает/обновляет только эти ключи в существующем .env, не
-	// трогая остальные строки — независимо от cfg.Force (в отличие от
-	// agentmemory.toml/mcp-конфига выше, .env никогда не перезаписывается
+	// реестр, из которого buildMCPServerEntry/buildOpencodeServerEntry берут
+	// env-плейсхолдеры. mergeEnvFile дописывает/обновляет только эти ключи в
+	// существующем .env, не трогая остальные строки — независимо от cfg.Force
+	// (в отличие от agentmemory.toml выше, .env никогда не перезаписывается
 	// целиком: секреты, введённые в прошлых прогонах init, не должны теряться).
 	envVars := map[string]string{}
 	for _, p := range selectedProviders(cfg) {
@@ -698,38 +709,31 @@ func buildProviderEnv(cfg initConfig, placeholder func(envKey string) string) ma
 	return env
 }
 
-// renderMCPJSON собирает .mcp.json (сервер memo, stdio) через
-// encoding/json — гарантированно валидный JSON с отступом 2 пробела. env
-// содержит ТОЛЬКО плейсхолдеры выбранных провайдеров (shell-синтаксис "${VAR:-}").
-func renderMCPJSON(command string, cfg initConfig) (string, error) {
+// buildMCPServerEntry собирает JSON-запись сервера memo для .mcp.json (форма
+// mcpServerSpec, stdio) — вставляется mergeMCPConfig в существующий или новый
+// файл под ключом "memo" секции mcpServers. env содержит ТОЛЬКО плейсхолдеры
+// выбранных провайдеров (shell-синтаксис "${VAR:-}").
+func buildMCPServerEntry(command string, cfg initConfig) (json.RawMessage, error) {
 	env := buildProviderEnv(cfg, func(envKey string) string { return "${" + envKey + ":-}" })
-	mcpCfg := mcpConfigFile{
-		MCPServers: map[string]mcpServerSpec{
-			"memo": {
-				Command: command,
-				Args:    mcpServerArgs,
-				Env:     env,
-			},
-		},
+	spec := mcpServerSpec{
+		Command: command,
+		Args:    mcpServerArgs,
+		Env:     env,
 	}
-	b, err := json.MarshalIndent(mcpCfg, "", "  ")
+	b, err := json.Marshal(spec)
 	if err != nil {
-		return "", fmt.Errorf("сборка .mcp.json: %w", err)
+		return nil, fmt.Errorf("сборка записи сервера memo для .mcp.json: %w", err)
 	}
-	return string(b) + "\n", nil
+	return b, nil
 }
 
-// opencodeConfigFile / opencodeServerSpec — форма opencode.json для local MCP-
-// сервера (opencode-документация). В отличие от .mcp.json у Claude Code:
+// opencodeServerSpec — форма записи сервера в секции "mcp" opencode.json для
+// local MCP-сервера (opencode-документация). В отличие от mcpServerSpec у
+// Claude Code:
 //   - command — единый массив [команда, аргументы...], а не раздельные
 //     command+args;
 //   - интерполяция env — синтаксис "{env:VAR}", а не shell-style "${VAR:-}";
 //   - поле окружения называется environment, а не env.
-type opencodeConfigFile struct {
-	Schema string                        `json:"$schema"`
-	MCP    map[string]opencodeServerSpec `json:"mcp"`
-}
-
 type opencodeServerSpec struct {
 	Type        string            `json:"type"`
 	Command     []string          `json:"command"`
@@ -737,41 +741,128 @@ type opencodeServerSpec struct {
 	Environment map[string]string `json:"environment"`
 }
 
-// renderOpencodeJSON собирает opencode.json (local MCP-сервер memo)
-// через encoding/json — гарантированно валидный JSON с отступом 2 пробела.
-// environment — те же правила выбора ключей, что у renderMCPJSON. Путь к
-// agentmemory.toml — относительный: opencode запускает local MCP-процесс с
-// рабочим каталогом = корень workspace (в его исходниках cwd незаданного
-// mcp.cwd резолвится в baseDir — корень инстанса), откуда и подхватывается
-// "agentmemory.toml". Абсолютный указатель уровня ${CLAUDE_PROJECT_DIR} у
-// opencode не нужен — своего аналога он не задаёт.
-func renderOpencodeJSON(command string, cfg initConfig) (string, error) {
+// buildOpencodeServerEntry собирает JSON-запись сервера memo для opencode.json
+// (local MCP-сервер) — вставляется mergeMCPConfig под ключом "memo" секции
+// mcp. environment — те же правила выбора ключей, что у buildMCPServerEntry.
+// Путь к agentmemory.toml — относительный: opencode запускает local
+// MCP-процесс с рабочим каталогом = корень workspace (в его исходниках cwd
+// незаданного mcp.cwd резолвится в baseDir — корень инстанса), откуда и
+// подхватывается "agentmemory.toml". Абсолютный указатель уровня
+// ${CLAUDE_PROJECT_DIR} у opencode не нужен — своего аналога он не задаёт.
+func buildOpencodeServerEntry(command string, cfg initConfig) (json.RawMessage, error) {
 	env := buildProviderEnv(cfg, func(envKey string) string { return "{env:" + envKey + "}" })
-	ocCfg := opencodeConfigFile{
-		Schema: "https://opencode.ai/config.json",
-		MCP: map[string]opencodeServerSpec{
-			"memo": {
-				Type:        "local",
-				Command:     []string{command, "-config", "agentmemory.toml"},
-				Enabled:     true,
-				Environment: env,
-			},
-		},
+	spec := opencodeServerSpec{
+		Type:        "local",
+		Command:     []string{command, "-config", "agentmemory.toml"},
+		Enabled:     true,
+		Environment: env,
 	}
-	b, err := json.MarshalIndent(ocCfg, "", "  ")
+	b, err := json.Marshal(spec)
 	if err != nil {
-		return "", fmt.Errorf("сборка opencode.json: %w", err)
+		return nil, fmt.Errorf("сборка записи сервера memo для opencode.json: %w", err)
 	}
-	return string(b) + "\n", nil
+	return b, nil
+}
+
+// ensureOpencodeSchema — mcpConfigMerge.ensureTopLevel для opencode.json:
+// проставляет top-level "$schema", если в файле его ещё нет (новый файл, либо
+// существующий, где его почему-то не было) — не трогает уже присутствующее
+// значение, даже если оно отличается от дефолтного.
+func ensureOpencodeSchema(raw map[string]json.RawMessage) error {
+	if _, ok := raw["$schema"]; ok {
+		return nil
+	}
+	b, err := json.Marshal("https://opencode.ai/config.json")
+	if err != nil {
+		return fmt.Errorf("сборка $schema для opencode.json: %w", err)
+	}
+	raw["$schema"] = b
+	return nil
+}
+
+// mcpConfigMerge параметризует mergeMCPConfig под конкретный agentTarget:
+// sectionKey — ключ верхнего уровня, под которым лежат записи серверов
+// ("mcpServers" у .mcp.json, "mcp" у opencode.json), buildEntry — сборка
+// JSON-записи сервера memo под параметры текущего прогона init,
+// ensureTopLevel — точечная правка прочих top-level ключей (nil, если таких
+// нет, как у .mcp.json; у opencode.json — проставляет "$schema").
+type mcpConfigMerge struct {
+	sectionKey     string
+	buildEntry     func(command string, cfg initConfig) (json.RawMessage, error)
+	ensureTopLevel func(raw map[string]json.RawMessage) error
+}
+
+// mergeMCPConfig мержит запись сервера "memo" в MCP-конфиг по path
+// (.mcp.json/opencode.json), не теряя ни другие серверы в секции
+// m.sectionKey, ни прочие top-level ключи файла — по образцу mergeClaudeHooks:
+// существующий файл парсится в map[string]json.RawMessage, точечно
+// правится только своя секция и (если задано) m.ensureTopLevel, остальное
+// проходит байт-в-байт. Запись "memo" внутри секции безусловно
+// (пере)генерируется из command/cfg — независимо от того, что там было
+// раньше и от -force (та же семантика, что была у полной перезаписи файла).
+// Файл отсутствует/пуст — эквивалентно мержу в пустой объект, т.е. создаётся
+// с нуля. Битый существующий JSON — ошибка, файл не создаётся и не
+// перезаписывается.
+func mergeMCPConfig(path, command string, cfg initConfig, m mcpConfigMerge, out io.Writer) error {
+	raw := map[string]json.RawMessage{}
+	existing, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(existing, &raw); err != nil {
+			return fmt.Errorf("разбор %q: %w", path, err)
+		}
+	case os.IsNotExist(err):
+		// файла нет — начинаем с пустого объекта верхнего уровня
+	default:
+		return fmt.Errorf("чтение %q: %w", path, err)
+	}
+
+	section := map[string]json.RawMessage{}
+	if rawSection, ok := raw[m.sectionKey]; ok {
+		if err := json.Unmarshal(rawSection, &section); err != nil {
+			return fmt.Errorf("разбор секции %q в %q: %w", m.sectionKey, path, err)
+		}
+	}
+
+	entry, err := m.buildEntry(command, cfg)
+	if err != nil {
+		return err
+	}
+	section["memo"] = entry
+
+	sectionRaw, err := json.Marshal(section)
+	if err != nil {
+		return fmt.Errorf("сборка секции %q: %w", m.sectionKey, err)
+	}
+	raw[m.sectionKey] = sectionRaw
+
+	if m.ensureTopLevel != nil {
+		if err := m.ensureTopLevel(raw); err != nil {
+			return err
+		}
+	}
+
+	b, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("сборка %q: %w", path, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("создание каталога %q: %w", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
+		return fmt.Errorf("запись %q: %w", path, err)
+	}
+	fmt.Fprintf(out, "записано: %s\n", path)
+	return nil
 }
 
 // writeScaffoldFile пишет content в path с правами 0o644. Если файл уже
 // существует и force не задан — пропускает его с предупреждением в out (не
 // ошибка): повторный `memo init` идемпотентен и безопасен. Используется для
 // артефактов, где потеря ручных правок при повторном init нежелательна
-// (скиллы SKILL.md) — в отличие от agentmemory.toml/mcp-конфига
-// (см. overwriteFile) и .env (см. mergeEnvFile), которые сознательно ведут
-// себя иначе.
+// (скиллы SKILL.md) — в отличие от agentmemory.toml (см. overwriteFile),
+// mcp-конфига (см. mergeMCPConfig) и .env (см. mergeEnvFile), которые
+// сознательно ведут себя иначе.
 func writeScaffoldFile(path, content string, force bool, out io.Writer) error {
 	if !force {
 		if _, err := os.Stat(path); err == nil {
@@ -789,12 +880,13 @@ func writeScaffoldFile(path, content string, force bool, out io.Writer) error {
 }
 
 // overwriteFile пишет content в path с правами 0o644, безусловно перезаписывая
-// существующий файл. Используется для agentmemory.toml и MCP-конфига
-// (.mcp.json/opencode.json): их единственный источник истины — параметры
-// текущего прогона `memo init`, поэтому -force на них не влияет и повторный
-// init всегда синхронизирует их с введёнными параметрами — осознанный
-// tradeoff (ручные правки этих двух файлов не переживают повторный init), в
-// отличие от writeScaffoldFile (скиллы) и mergeEnvFile (.env).
+// существующий файл. Используется для agentmemory.toml: его единственный
+// источник истины — параметры текущего прогона `memo init`, поэтому -force на
+// него не влияет и повторный init всегда синхронизирует его с введёнными
+// параметрами — осознанный tradeoff (ручные правки этого файла не переживают
+// повторный init), в отличие от writeScaffoldFile (скиллы), mergeEnvFile
+// (.env) и mergeMCPConfig (.mcp.json/opencode.json) — те мержат, а не
+// перезаписывают целиком.
 func overwriteFile(path, content string, out io.Writer) error {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("запись %q: %w", path, err)
