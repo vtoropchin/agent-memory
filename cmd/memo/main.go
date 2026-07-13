@@ -34,16 +34,9 @@ const deepseekAPIKeyEnv = "DEEPSEEK_API_KEY"
 // читается из конфиг-файла и не логируется.
 const openaiAPIKeyEnv = "OPENAI_API_KEY"
 
-// openaiDefaultBaseURL — базовый URL, подставляемый, когда embedder.base_url пуст
-// при provider="openai" (DESIGN.md §9: openai — это не только api.openai.com, но
-// любой /v1/embeddings-совместимый сервер; дефолт — сам OpenAI).
-const openaiDefaultBaseURL = "https://api.openai.com"
-
-// ollamaDefaultBaseURL — базовый URL, подставляемый, когда embedder.base_url пуст
-// при provider="ollama". Дефолт провайдер-специфичен, поэтому не хранится в
-// config.Default() (там EmbedderConfig.BaseURL всегда "") — иначе он остался бы
-// значением по умолчанию и при provider="openai" без явного base_url в TOML.
-const ollamaDefaultBaseURL = "http://localhost:11434"
+// Дефолтные base URL эмбеддера (defaultOllamaBaseURL/defaultOpenAIBaseURL) —
+// единый источник истины в init.go: там же, где их пишет `memo init`, чтобы
+// init-дефолт и рантайм-дефолт newEmbedder не разъехались.
 
 // routeDecision — куда идут args верхнего уровня ДО того, как они попадают в
 // cobra (см. decideRoute). Отдельный enum, а не просто bool "сервер/подкоманда",
@@ -252,13 +245,14 @@ func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 // отключают векторный слой — recall работает на чистом FTS5. "ollama" создаёт
 // клиент к серверу ollama; конструктор делает пробный эмбеддинг, заодно проверяя
 // доступность сервера и модели; пустой base_url в конфиге замещается на
-// ollamaDefaultBaseURL. "openai" — то же самое поверх любого
+// defaultOllamaBaseURL. "openai" — то же самое поверх любого
 // /v1/embeddings-совместимого сервера (OpenAI, OpenRouter, LM Studio, vLLM —
 // DESIGN.md §9); ключ читается только из env OPENAI_API_KEY (симметрично
 // DEEPSEEK_API_KEY, никогда не из TOML), пустой base_url в конфиге замещается на
-// openaiDefaultBaseURL (api.openai.com). Оба дефолта провайдер-специфичны и живут
-// здесь, а не в config.Default() — иначе один из них (обязательно ollama-специфичный
-// localhost:11434) утёк бы во второй провайдер при пустом base_url в TOML. Ошибка
+// defaultOpenAIBaseURL (api.openai.com). Оба дефолта провайдер-специфичны и живут
+// в init.go (единый источник истины с `memo init`), а не в config.Default() —
+// иначе один из них (обязательно ollama-специфичный localhost:11434) утёк бы во
+// второй провайдер при пустом base_url в TOML. Ошибка
 // на этапе создания клиента — не про конфигурацию, а про внешний сервис: сервер
 // обязан стартовать в любом случае (DESIGN.md §15), поэтому ошибка здесь —
 // предупреждение в stderr и откат на Noop, а не отказ в старте. Неизвестный
@@ -270,7 +264,7 @@ func newEmbedder(ctx context.Context, cfg config.EmbedderConfig) (embed.Embedder
 	case "ollama":
 		baseURL := cfg.BaseURL
 		if baseURL == "" {
-			baseURL = ollamaDefaultBaseURL
+			baseURL = defaultOllamaBaseURL
 		}
 		e, err := embed.NewOllama(ctx, baseURL, cfg.Model)
 		if err != nil {
@@ -286,7 +280,7 @@ func newEmbedder(ctx context.Context, cfg config.EmbedderConfig) (embed.Embedder
 		}
 		baseURL := cfg.BaseURL
 		if baseURL == "" {
-			baseURL = openaiDefaultBaseURL
+			baseURL = defaultOpenAIBaseURL
 		}
 		e, err := embed.NewOpenAI(ctx, baseURL, cfg.Model, key)
 		if err != nil {

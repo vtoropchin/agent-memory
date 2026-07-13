@@ -395,8 +395,9 @@ func vectorLayerSection(ctx context.Context, st store.Store, cfg config.Embedder
 // сбоя (недоступный сервер vs пустой ключ) и по контракту никогда не
 // возвращает ошибку конструктора наружу — сливать эти две разные вещи в один
 // хелпер усложнило бы обе стороны сильнее, чем экономит небольшое повторение
-// (defaulting base_url на провайдер-специфичный дефолт, ollamaDefaultBaseURL/
-// openaiDefaultBaseURL — те же константы main.go). Таймаут пробы — 5s
+// (defaulting base_url на провайдер-специфичный дефолт, defaultOllamaBaseURL/
+// defaultOpenAIBaseURL — те же константы init.go, единый источник истины с
+// newEmbedder и `memo init`). Таймаут пробы — 5s
 // (probeTimeout), отдельный дочерний context от ctx команды.
 func embedderLivenessSection(ctx context.Context, cfg config.EmbedderConfig) section {
 	const name = "Embedder (живость)"
@@ -406,7 +407,7 @@ func embedderLivenessSection(ctx context.Context, cfg config.EmbedderConfig) sec
 	case "ollama":
 		baseURL := cfg.BaseURL
 		if baseURL == "" {
-			baseURL = ollamaDefaultBaseURL
+			baseURL = defaultOllamaBaseURL
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		defer cancel()
@@ -422,7 +423,7 @@ func embedderLivenessSection(ctx context.Context, cfg config.EmbedderConfig) sec
 		}
 		baseURL := cfg.BaseURL
 		if baseURL == "" {
-			baseURL = openaiDefaultBaseURL
+			baseURL = defaultOpenAIBaseURL
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 		defer cancel()

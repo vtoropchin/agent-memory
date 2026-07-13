@@ -27,6 +27,17 @@ import (
 )
 
 // Дефолты полей initConfig, не заданных ни флагом, ни интерактивным вводом.
+//
+// defaultOllamaBaseURL/defaultOpenAIBaseURL — единый источник истины для
+// провайдер-специфичного дефолтного base URL эмбеддера во всём пакете cmd/memo:
+// их пишет `memo init` в agentmemory.toml (applyInitDefaults/wizard) И на них же
+// падает рантайм-фабрика newEmbedder и проба `memo doctor`, когда embedder.base_url
+// в конфиге пуст (main.go, doctor.go). Дефолт провайдер-специфичен и намеренно НЕ
+// живёт в config.Default() (там EmbedderConfig.BaseURL всегда "") — иначе
+// ollama-специфичный localhost:11434 утёк бы во второй провайдер при пустом
+// base_url в TOML. Держать одну пару констант обязательно: разъезд init- и
+// рантайм-дефолтов дал бы молчаливую FTS5-деградацию (init записал один адрес,
+// проба ходит на другой).
 const (
 	defaultAgentKey         = "claude"
 	defaultEmbedderProvider = "ollama"
