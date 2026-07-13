@@ -237,11 +237,45 @@ MVP: только SQLite+FTS5, без вектора и без LLM).
 
 ## Как это устроено
 
-<p align="center">
-  <img src="docs/architecture.svg" alt="Архитектура AgentMemory: три поверхности доступа к одному бинарю memoryd — MCP over stdio для агентов (save/recall/update/forget), CLI и хуки харнесса для терминала (recall/save/hook/doctor/export/import) и web-морда для человека (поиск, PATCH метаданных); все три вызывают общую доменную логику internal/memory — Writer (запись), Recall (поиск) и Maint (фоновые джобы); она работает поверх Store — единого файла SQLite; Embedder (ollama или openai) и Reasoner (DeepSeek) подключены пунктиром как опциональные слои, деградирующие вместо падения" width="900">
-</p>
+```text
+           AgentMemory · memoryd — один бинарь, три поверхности доступа
 
-<p align="center"><sub>Исходник для правок — <a href="docs/architecture.drawio">docs/architecture.drawio</a> (открывается в <a href="https://app.diagrams.net">draw.io</a>)</sub></p>
+┌───────────────────────┐   ┌───────────────────────┐   ┌───────────────────────┐
+│ MCP · internal/mcp    │   │ CLI · memoryd         │   │ Web · memoryd web     │
+│ stdio → агенты        │   │ терминал · хуки       │   │ браузер · человек     │
+│                       │   │                       │   │                       │
+│ save · recall         │   │ recall · save         │   │ поиск: лексика+смысл  │
+│ update · forget       │   │ hook (ambient)        │   │ PATCH метаданных      │
+│ links · ttl           │   │ doctor · export       │   │ forget                │
+│ explain · фильтры     │   │ import                │   │                       │
+└───────────────────────┘   └───────────────────────┘   └───────────────────────┘
+            │                           │                           │
+            └───────────────────────────┼───────────────────────────┘
+                                        │   вызовы → общая доменная логика
+            ┌───────────────────────────┼───────────────────────────┐
+            ▼                           ▼                           ▼
+┌───────────────────────┐   ┌───────────────────────┐   ┌───────────────────────┐
+│ Writer · write        │   │ Recall · recall       │   │ Maint · maint         │
+│ (запись)              │   │ (поиск)               │   │ (фоновые джобы)       │
+│                       │   │                       │   │                       │
+│ дедуп по scope        │   │ FTS5 + вектор → RRF   │   │ expire (TTL)          │
+│ supersede (мягко)     │   │ ранжирование          │   │ decay · dedup         │
+│ links (rel) · ttl     │   │ фильтры · explain     │   │ consolidation         │
+│ FTS5 (+ вектор)       │   │ бриф под бюджет       │   │ reindex               │
+└───────────────────────┘   └───────────────────────┘   └───────────────────────┘
+            │                           │                           │
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ Store · SQLite (WAL) — единый файл, всё за интерфейсом Store                  │
+│ memories · tags · links · memories_fts · memories_vec · embed_meta            │
+│ expires_at · миграции (user_version) · superseded_by вместо DELETE            │
+└───────────────────────────────────────────────────────────────────────────────┘
+
+┌───────────────────────────────────────────────────────────────────────────────┐
+│ Embedder (опц.): ollama·bge-m3  или  openai·/v1/embeddings                    │
+│ Reasoner (опц.): DeepSeek chat  (суммаризация выдачи · консолидация)          │
+│ оба деградируют, а не падают: без них — recall на FTS5, без сводок            │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
 
 - **Три поверхности доступа** — один бинарь `memoryd`, одна доменная логика: MCP over
   stdio для агентов (`memory_save`/`recall`/`update`/`forget`), CLI и ambient-хуки
