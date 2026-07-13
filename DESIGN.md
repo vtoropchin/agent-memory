@@ -290,6 +290,11 @@ _Свёрнуто ещё 12 менее релевантных записей. У
 > chat-модели. Вектор берём только у провайдера с embeddings endpoint (локальный ollama —
 > дефолт; OpenAI `text-embedding-3-small` — опция на будущее за тем же интерфейсом).
 
+> ℹ️ `provider = "openai"` — это не только сам OpenAI: `/v1/embeddings` де-факто стандарт,
+> поэтому одна реализация (`internal/memory/embed.OpenAI`, `base_url` конфигурируем)
+> покрывает любой совместимый сервер — OpenRouter, LM Studio, vLLM и т.п. Ключ читается
+> только из env `OPENAI_API_KEY` (то же правило, что для `DEEPSEEK_API_KEY`, §13).
+
 ---
 
 ## 10. Reasoner — DeepSeek

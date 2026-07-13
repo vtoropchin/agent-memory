@@ -124,6 +124,7 @@ func TestNewEmbedder(t *testing.T) {
 	tests := []struct {
 		name    string
 		cfg     config.EmbedderConfig
+		apiKey  string
 		wantT   string
 		wantErr bool
 	}{
@@ -144,13 +145,26 @@ func TestNewEmbedder(t *testing.T) {
 		},
 		{
 			name:    "неизвестный provider — ошибка",
-			cfg:     config.EmbedderConfig{Provider: "openai", Model: "bge-m3"},
+			cfg:     config.EmbedderConfig{Provider: "bogus", Model: "bge-m3"},
 			wantErr: true,
+		},
+		{
+			name:   "openai без ключа деградирует до noop",
+			cfg:    config.EmbedderConfig{Provider: "openai", Model: "text-embedding-3-small"},
+			apiKey: "",
+			wantT:  "*embed.Noop",
+		},
+		{
+			name:   "openai недоступен деградирует до noop",
+			cfg:    config.EmbedderConfig{Provider: "openai", BaseURL: closedSrv.URL, Model: "text-embedding-3-small"},
+			apiKey: "sk-test",
+			wantT:  "*embed.Noop",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(openaiAPIKeyEnv, tt.apiKey)
 			got, err := newEmbedder(context.Background(), tt.cfg)
 			if tt.wantErr {
 				if err == nil {
@@ -182,6 +196,30 @@ func TestNewEmbedder_OllamaAvailable(t *testing.T) {
 	}
 	if gotT := fmt.Sprintf("%T", got); gotT != "*embed.Ollama" {
 		t.Fatalf("newEmbedder вернул тип %s, хочу *embed.Ollama", gotT)
+	}
+	if got.Dim() != 3 {
+		t.Errorf("Dim() = %d, хочу 3", got.Dim())
+	}
+}
+
+func TestNewEmbedder_OpenAIAvailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Errorf("Authorization = %q, хочу %q", got, "Bearer sk-test")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3],"index":0}]}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv(openaiAPIKeyEnv, "sk-test")
+
+	got, err := newEmbedder(context.Background(), config.EmbedderConfig{Provider: "openai", BaseURL: srv.URL, Model: "text-embedding-3-small"})
+	if err != nil {
+		t.Fatalf("newEmbedder: %v", err)
+	}
+	if gotT := fmt.Sprintf("%T", got); gotT != "*embed.OpenAI" {
+		t.Fatalf("newEmbedder вернул тип %s, хочу *embed.OpenAI", gotT)
 	}
 	if got.Dim() != 3 {
 		t.Errorf("Dim() = %d, хочу 3", got.Dim())

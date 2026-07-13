@@ -52,6 +52,17 @@ func TestDefaultScope(t *testing.T) {
 	}
 }
 
+// TestDefaultEmbedderBaseURLEmpty фиксирует регрессию: BaseURL по умолчанию должен
+// быть пуст, а не хардкодить ollama-специфичный адрес — иначе при provider="openai"
+// без явного base_url в TOML запрос ушёл бы на ollama-эндпоинт вместо
+// провайдер-специфичного дефолта (тот выбирается в cmd/memoryd.newEmbedder, не здесь).
+func TestDefaultEmbedderBaseURLEmpty(t *testing.T) {
+	cfg := Default()
+	if cfg.Embedder.BaseURL != "" {
+		t.Errorf("Default().Embedder.BaseURL = %q, want пусто (дефолт провайдер-специфичен, живёт в cmd/memoryd)", cfg.Embedder.BaseURL)
+	}
+}
+
 func TestLoadScopeFromTOML(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

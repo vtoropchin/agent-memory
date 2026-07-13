@@ -28,6 +28,22 @@ import (
 // никогда не читается из конфиг-файла и не логируется.
 const deepseekAPIKeyEnv = "DEEPSEEK_API_KEY"
 
+// openaiAPIKeyEnv — переменная окружения с ключом OpenAI-совместимого эмбеддера
+// (DESIGN.md §13, то же правило, что для DEEPSEEK_API_KEY). Ключ никогда не
+// читается из конфиг-файла и не логируется.
+const openaiAPIKeyEnv = "OPENAI_API_KEY"
+
+// openaiDefaultBaseURL — базовый URL, подставляемый, когда embedder.base_url пуст
+// при provider="openai" (DESIGN.md §9: openai — это не только api.openai.com, но
+// любой /v1/embeddings-совместимый сервер; дефолт — сам OpenAI).
+const openaiDefaultBaseURL = "https://api.openai.com"
+
+// ollamaDefaultBaseURL — базовый URL, подставляемый, когда embedder.base_url пуст
+// при provider="ollama". Дефолт провайдер-специфичен, поэтому не хранится в
+// config.Default() (там EmbedderConfig.BaseURL всегда "") — иначе он остался бы
+// значением по умолчанию и при provider="openai" без явного base_url в TOML.
+const ollamaDefaultBaseURL = "http://localhost:11434"
+
 func main() {
 	// Справка верхнего уровня — перехватывается до диспетчеризации init/web и
 	// до log.SetOutput(os.Stderr): сервер ещё не стартовал, поэтому печать в
@@ -203,18 +219,46 @@ func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 // newEmbedder создаёт Embedder по конфигу (симметрично newReasoner). "" и "noop"
 // отключают векторный слой — recall работает на чистом FTS5. "ollama" создаёт
 // клиент к серверу ollama; конструктор делает пробный эмбеддинг, заодно проверяя
-// доступность сервера и модели. Эта проверка — не про конфигурацию, а про внешний
-// сервис: сервер обязан стартовать в любом случае (DESIGN.md §15), поэтому ошибка
-// здесь — предупреждение в stderr и откат на Noop, а не отказ в старте. Неизвестный
+// доступность сервера и модели; пустой base_url в конфиге замещается на
+// ollamaDefaultBaseURL. "openai" — то же самое поверх любого
+// /v1/embeddings-совместимого сервера (OpenAI, OpenRouter, LM Studio, vLLM —
+// DESIGN.md §9); ключ читается только из env OPENAI_API_KEY (симметрично
+// DEEPSEEK_API_KEY, никогда не из TOML), пустой base_url в конфиге замещается на
+// openaiDefaultBaseURL (api.openai.com). Оба дефолта провайдер-специфичны и живут
+// здесь, а не в config.Default() — иначе один из них (обязательно ollama-специфичный
+// localhost:11434) утёк бы во второй провайдер при пустом base_url в TOML. Ошибка
+// на этапе создания клиента — не про конфигурацию, а про внешний сервис: сервер
+// обязан стартовать в любом случае (DESIGN.md §15), поэтому ошибка здесь —
+// предупреждение в stderr и откат на Noop, а не отказ в старте. Неизвестный
 // provider — ошибка при старте, это опечатка в конфиге, а не runtime-деградация.
 func newEmbedder(ctx context.Context, cfg config.EmbedderConfig) (embed.Embedder, error) {
 	switch cfg.Provider {
 	case "", "noop":
 		return embed.NewNoop(), nil
 	case "ollama":
-		e, err := embed.NewOllama(ctx, cfg.BaseURL, cfg.Model)
+		baseURL := cfg.BaseURL
+		if baseURL == "" {
+			baseURL = ollamaDefaultBaseURL
+		}
+		e, err := embed.NewOllama(ctx, baseURL, cfg.Model)
 		if err != nil {
 			log.Printf("memoryd: embedder.provider=ollama, но ollama недоступна или модель не загружена (%v) — векторный поиск отключён, recall на полнотекстовом", err)
+			return embed.NewNoop(), nil
+		}
+		return e, nil
+	case "openai":
+		key := os.Getenv(openaiAPIKeyEnv)
+		if key == "" {
+			log.Printf("memoryd: embedder.provider=openai, но %s пуст — векторный поиск отключён, recall на полнотекстовом", openaiAPIKeyEnv)
+			return embed.NewNoop(), nil
+		}
+		baseURL := cfg.BaseURL
+		if baseURL == "" {
+			baseURL = openaiDefaultBaseURL
+		}
+		e, err := embed.NewOpenAI(ctx, baseURL, cfg.Model, key)
+		if err != nil {
+			log.Printf("memoryd: embedder.provider=openai, но сервер недоступен или ключ/модель невалидны (%v) — векторный поиск отключён, recall на полнотекстовом", err)
 			return embed.NewNoop(), nil
 		}
 		return e, nil
