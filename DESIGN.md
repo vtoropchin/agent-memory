@@ -395,26 +395,38 @@ DeepSeek chat (OpenAI-совместимый) в роли текстового �
 
 Транспорт: MCP over stdio (`/cmd/memoryd`).
 
-**Web-морда (read + мягкое удаление).** `memoryd web` (Этап 6, `cmd/memoryd`) поднимает отдельный
-HTTP-режим того же бинаря поверх того же файла БД: JSON API (`/api/stats`, `/api/memories`,
-`/api/memories/{id}`, `/api/search`) на read-методах Store (`List`/`Stats`/`Get`/`Neighbors`/
-`SearchLexical`, а также `VectorStatus`/`SemanticNeighbors` для карточки записи) — правок
-содержимого и создания новых записей из браузера нет. Единственная write-операция —
-`DELETE /api/memories/{id}`: мягкое удаление через доменный `write.Writer.Forget` (та же
-семантика, что у MCP-инструмента `memory_forget` — тумстоун `Store.Supersede(id, id)`); hard
-DELETE не делается, история и связи сохраняются. Слушает по умолчанию только `127.0.0.1:7070`
-(localhost, наружу не выставляется). Поиск (`/api/search?q=...&mode=lexical|semantic`, задача
-10.1) — `mode=semantic` (дефолт) гоняет тот же гибридный путь, что и MCP `memory_recall`
-(`recall.Recaller.Candidates` — FTS5 + вектор при доступном Embedder, RRF, бизнес-ранжирование,
-без сборки Markdown-брифа); `mode=lexical` — прежний чистый `Store.SearchLexical`, для сравнения
-глазами. Ответ несёт `source` кандидата (`"lexical"`/`"vector"`/`"lexical+vector"`, та же
-величина, что в explain-трассе брифа, задача 8.1) и флаг `vector` — доступен ли векторный слой
-у этого инстанса; при недоступном/noop Embedder гибрид молча деградирует до FTS5 (HTTP 200,
-`vector:false`), фронт показывает плашку деградации, а не 500. Карточка записи
-(`/api/memories/{id}`, задача 6.4) отдельно показывает статус вектора и KNN-соседей по
-cosine — read-only чтение уже сохранённых векторов из БД, без вызовов Embedder/ollama.
-Статический фронтенд отдаётся из `embed.FS` (`cmd/memoryd/web/`), сам интерфейс — задачи
-6.3/6.4/10.1.
+**Web-морда (read + курирование метаданных).** `memoryd web` (Этап 6, `cmd/memoryd`) поднимает
+отдельный HTTP-режим того же бинаря поверх того же файла БД: JSON API (`/api/stats`,
+`/api/memories`, `/api/memories/{id}`, `/api/search`) на read-методах Store (`List`/`Stats`/`Get`/
+`Neighbors`/`SearchLexical`, а также `VectorStatus`/`SemanticNeighbors` для карточки записи) —
+правок содержимого и создания новых записей из браузера нет. Write-операций две, обе тонкие
+обёртки над доменным `write.Writer` (та же семантика, что у одноимённых MCP-инструментов):
+`DELETE /api/memories/{id}` — мягкое удаление через `Writer.Forget` (тумстоун
+`Store.Supersede(id, id)`, та же семантика, что у `memory_forget`; hard DELETE не делается,
+история и связи сохраняются) и `PATCH /api/memories/{id}` (задача 10.2) — правка importance/tags
+живой записи через `Writer.Update` (`UpdateInput{Importance, Tags}`): тело `{"importance":5,
+"tags":["a","b"]}`, оба поля опциональны (отсутствующее — не трогать, частичный PATCH), `tags:[]`
+— валидное «снять все теги» (заменяющая семантика Tags, не аддитивная); importance вне 1..5 не
+отклоняется 400, а клампится — симметрично поведению MCP `memory_update` (единый источник
+нормализации `write.ClampImportance` для обоих вызывающих). Content/kind/scope/links в PATCH не
+принимаются — присутствие лишнего поля в теле → 400 с перечнем допустимых полей: это жёсткая
+граница, а не временное ограничение MVP — **содержание фактов из браузера не редактируется
+никогда**, его меняет только агент через MCP (`memory_update`/`memory_save` + supersede); морда
+правит исключительно сигналы ранжирования (importance) и группировки (tags). Тумстоун
+(`SupersededBy != nil`) — 409, правка архивной записи недоступна. Обе write-операции — не bulk,
+только одна запись за запрос. Слушает по умолчанию только `127.0.0.1:7070` (localhost, наружу не
+выставляется). Поиск (`/api/search?q=...&mode=lexical|semantic`, задача 10.1) — `mode=semantic`
+(дефолт) гоняет тот же гибридный путь, что и MCP `memory_recall` (`recall.Recaller.Candidates` —
+FTS5 + вектор при доступном Embedder, RRF, бизнес-ранжирование, без сборки Markdown-брифа);
+`mode=lexical` — прежний чистый `Store.SearchLexical`, для сравнения глазами. Ответ несёт `source`
+кандидата (`"lexical"`/`"vector"`/`"lexical+vector"`, та же величина, что в explain-трассе брифа,
+задача 8.1) и флаг `vector` — доступен ли векторный слой у этого инстанса; при недоступном/noop
+Embedder гибрид молча деградирует до FTS5 (HTTP 200, `vector:false`), фронт показывает плашку
+деградации, а не 500. Карточка записи (`/api/memories/{id}`, задача 6.4) отдельно показывает
+статус вектора и KNN-соседей по cosine — read-only чтение уже сохранённых векторов из БД, без
+вызовов Embedder/ollama; там же (задача 10.2) — интерактивные звёзды importance и редактируемые
+чипы tags поверх PATCH. Статический фронтенд отдаётся из `embed.FS` (`cmd/memoryd/web/`), сам
+интерфейс — задачи 6.3/6.4/10.1/10.2.
 
 **Суженный инвариант оффлайновости (задача 10.1).** До этой задачи морда была строгим
 read-only-читателем: ни одного вызова Embedder/Reasoner. `/api/search?mode=semantic` вводит

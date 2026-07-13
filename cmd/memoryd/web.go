@@ -1,13 +1,18 @@
 // Подкоманда `memoryd web` — HTTP-морда просмотра памяти (DESIGN.md §12,
-// Этап 6, задача 6.2; семантический поиск — задача 10.1). Открывает тот же
-// общий файл БД, что и MCP-сервер (WAL + busy_timeout безопасны для
-// параллельных читателей), и отдаёт JSON API поверх read-методов Store
-// (List/Stats/Get/Neighbors/SearchLexical) плюс статический фронтенд (сам
-// фронтенд — задача 6.3/10.1). Чтение по-прежнему доминирует; единственная
-// write-операция — мягкое удаление записи (`DELETE /api/memories/{id}`) через
-// доменный `write.Writer.Forget` (тумстоун, та же семантика, что у
-// MCP-инструмента `memory_forget`): правок содержимого и создания новых
-// записей из браузера нет, hard DELETE не делается.
+// Этап 6, задача 6.2; семантический поиск — задача 10.1; правка метаданных —
+// задача 10.2). Открывает тот же общий файл БД, что и MCP-сервер (WAL +
+// busy_timeout безопасны для параллельных читателей), и отдаёт JSON API
+// поверх read-методов Store (List/Stats/Get/Neighbors/SearchLexical) плюс
+// статический фронтенд (сам фронтенд — задача 6.3/10.1/10.2). Чтение
+// по-прежнему доминирует; write-операций две, обе тонкие обёртки над
+// доменным `write.Writer` (та же семантика, что у одноимённых MCP-
+// инструментов): мягкое удаление (`DELETE /api/memories/{id}` → `Writer.Forget`,
+// тумстоун) и правка сигналов ранжирования/группировки (`PATCH
+// /api/memories/{id}` → `Writer.Update` с `UpdateInput{Importance,Tags}`,
+// задача 10.2). Content/kind/scope/links из браузера НЕ редактируются —
+// содержание фактов меняет только агент через MCP (`memory_update`/
+// `memory_save` с supersede); морда правит исключительно importance и tags.
+// Создания новых записей из браузера нет, hard DELETE не делается.
 //
 // `/api/search` (задача 10.1) поднимает поверх Store ещё и `recall.Recaller` с
 // реальным Embedder (та же фабрика `newEmbedder`, что у MCP-сервера/CLI) — это
@@ -144,15 +149,16 @@ func runWeb(args []string, stdout io.Writer) error {
 // newWebHandler собирает мультиплексор web-морды: JSON API под /api/ (см.
 // каждый handler) + статика (embed.FS) на /. API-роуты регистрируются до
 // файлового хендлера, чтобы /api/* не перехватывался статикой. w используется
-// только для мягкого удаления (DELETE /api/memories/{id}); rc/embedder — только
-// для /api/search в режиме semantic (задача 10.1) — остальные роуты целиком
-// read-only поверх s.
+// для обеих write-операций (DELETE — мягкое удаление, PATCH — правка
+// importance/tags, задача 10.2); rc/embedder — только для /api/search в
+// режиме semantic (задача 10.1) — остальные роуты целиком read-only поверх s.
 func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder memembed.Embedder) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/stats", handleStats(s))
 	mux.HandleFunc("GET /api/memories", handleListMemories(s))
 	mux.HandleFunc("GET /api/memories/{id}", handleGetMemory(s))
+	mux.HandleFunc("PATCH /api/memories/{id}", handlePatchMemory(s, w))
 	mux.HandleFunc("DELETE /api/memories/{id}", handleForgetMemory(s, w))
 	mux.HandleFunc("GET /api/search", handleSearch(s, rc, embedder))
 	// Catch-all для неизвестных /api/*-путей: без него они проваливаются в
@@ -196,7 +202,7 @@ type memoryDTO struct {
 	Source       *string `json:"source"`
 	// ExpiresAt — явный срок жизни записи (unix ts, задача 9.4): 0 = вечная,
 	// без срока (Memory.ExpiresAt). Read-only показ в карточке — правка TTL из
-	// web-морды вне этой версии (см. DESIGN.md §12: read + мягкое удаление).
+	// web-морды вне этой версии (см. DESIGN.md §12: read + курирование метаданных).
 	ExpiresAt int64     `json:"expiresAt"`
 	Tags      []string  `json:"tags"`
 	Links     []linkDTO `json:"links"`
@@ -407,6 +413,105 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 			},
 			SemanticNeighbors: semanticNeighbors,
 		})
+	}
+}
+
+// patchMemoryRequest — тело PATCH /api/memories/{id} (задача 10.2). Указатели
+// различают «поле не передано» (nil, не трогаем) от «поле передано» — та же
+// техника, что у write.UpdateInput, которое это тело и заполняет один в один.
+// Tags — указатель НА СЛАЙС: nil ⇒ теги не трогать, не-nil (в т.ч. пустой []) ⇒
+// заменить набор целиком (tags:[] снимает все — заменяющая, не аддитивная
+// семантика, как и у write.UpdateInput.Tags). JSON-литерал null для любого
+// поля стандартным поведением encoding/json обнуляет указатель — "importance:
+// null"/"tags: null" неотличимы от отсутствия поля, что здесь и требуется
+// (частичный PATCH не должен трогать поле, которое явно обнулили до null).
+// Content/kind/scope/links сюда не входят: DisallowUnknownFields (см.
+// handlePatchMemory) превращает присутствие лишнего поля в 400 — защита
+// контракта от тихого расширения (правку контента морда не делает никогда).
+type patchMemoryRequest struct {
+	Importance *int      `json:"importance"`
+	Tags       *[]string `json:"tags"`
+}
+
+// patchMemoryAllowedFields — перечень допустимых полей тела PATCH
+// /api/memories/{id} для текста ошибки 400 на лишнее поле.
+const patchMemoryAllowedFields = "importance, tags"
+
+// handlePatchMemory — правка importance/tags живой записи (задача 10.2) через
+// доменный write.Writer.Update (write.UpdateInput{Importance, Tags}): кламп
+// importance в 1..5, updated_at, синхронизация FTS5 (триггеры tags_ai/tags_ad
+// на таблице tags, см. sqlite.go) — вся эта логика уже в домене, здесь только
+// разбор входа и HTTP-ответ, ничего не дублируется. accessed_at/access_count
+// НЕ меняются (Update не вызывает Store.Touch) — правка метаданных не
+// сбрасывает decay-часы записи (DESIGN.md §4: accessed_at — сигнал именно
+// ОБРАЩЕНИЯ к факту при recall, а не редактирования).
+//
+// Importance вне 1..5 не отклоняется отдельной проверкой на границе: то же
+// ClampImportance внутри Writer.Update зажимает его в диапазон молча —
+// решение (кламп, а не 400) выбрано специально СИММЕТРИЧНО поведению
+// MCP-инструмента memory_update, который через тот же Writer.Update не падает
+// на out-of-range importance, а нормализует его; два входа в один и тот же
+// домен не должны расходиться в трактовке границы.
+//
+// Тумстоун (m.SupersededBy != nil) — 409: архивную запись курировать нечего,
+// правка метаданных недоступна. Writer.Update сам такую проверку не делает
+// (это решение уровня web-морды, как и в handleForgetMemory) — граница нужна
+// явно здесь, а не в домене, т.к. MCP memory_update умышленно НЕ блокируется
+// на superseded-записи (агент может, например, поправить теги архивной
+// записи без явного анти-паттерна) — 409 специфичен для UX морды.
+func handlePatchMemory(s store.Store, w *write.Writer) http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if strings.TrimSpace(id) == "" {
+			writeErr(rw, http.StatusBadRequest, fmt.Errorf("параметр id обязателен"))
+			return
+		}
+
+		var body patchMemoryRequest
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			if strings.Contains(err.Error(), "unknown field") {
+				writeErr(rw, http.StatusBadRequest, fmt.Errorf("недопустимое поле в теле запроса: %w (допустимые поля: %s)", err, patchMemoryAllowedFields))
+				return
+			}
+			writeErr(rw, http.StatusBadRequest, fmt.Errorf("разбор тела запроса: %w", err))
+			return
+		}
+
+		m, err := s.Get(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeErr(rw, http.StatusNotFound, fmt.Errorf("запись %q не найдена", id))
+				return
+			}
+			writeErr(rw, http.StatusInternalServerError, fmt.Errorf("get %q: %w", id, err))
+			return
+		}
+		if m.SupersededBy != nil {
+			writeErr(rw, http.StatusConflict, fmt.Errorf("запись %q архивирована, правка недоступна", id))
+			return
+		}
+
+		in := write.UpdateInput{Id: id, Importance: body.Importance}
+		if body.Tags != nil {
+			in.Tags = *body.Tags
+		}
+		if err := w.Update(r.Context(), in); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeErr(rw, http.StatusNotFound, fmt.Errorf("запись %q не найдена", id))
+				return
+			}
+			writeErr(rw, http.StatusInternalServerError, fmt.Errorf("update %q: %w", id, err))
+			return
+		}
+
+		updated, err := s.Get(r.Context(), id)
+		if err != nil {
+			writeErr(rw, http.StatusInternalServerError, fmt.Errorf("get %q после update: %w", id, err))
+			return
+		}
+		writeJSON(rw, http.StatusOK, toDTO(updated))
 	}
 }
 

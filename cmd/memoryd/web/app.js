@@ -102,6 +102,18 @@ function apiDelete(path) {
   return api(path, { method: "DELETE" });
 }
 
+// apiPatch — правка метаданных записи (PATCH /api/memories/{id}, задача 10.2):
+// только importance/tags — сигналы ранжирования и группировки. content/kind/
+// scope/links эта функция никогда не отправляет — их морда не редактирует,
+// содержание фактов меняет только агент через MCP.
+function apiPatch(path, body) {
+  return api(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 // --- глобальное состояние фильтров/пагинации ---
 
 const state = {
@@ -669,10 +681,192 @@ function renderDeleteControl(id) {
   return box;
 }
 
+// renderImportanceControl — пять звёзд-кнопок (задача 10.2): текущее значение
+// подсвечено (заполненные звёзды), клик по звезде N сразу шлёт PATCH
+// {importance:N} (одно значение за раз, без отдельной кнопки «сохранить» —
+// в отличие от тегов ниже, здесь нечего копить). Пока запрос в полёте, звёзды
+// блокируются (нет двойной отправки); ошибка — плашка под звёздами, а
+// отображённое значение откатывается к последнему серверному (prev).
+// onUpdated получает свежий memoryDTO из ответа сервера.
+function renderImportanceControl(id, importance, onUpdated) {
+  const box = el("div", { class: "flex items-center gap-2" });
+  const starsRow = el("div", { class: "flex items-center gap-0.5" });
+  const errorBox = el("div", {});
+  let current = importance;
+  let busy = false;
+
+  function render() {
+    clear(starsRow);
+    for (let i = 1; i <= 5; i++) {
+      const filled = i <= current;
+      const n = i; // фиксируем значение для замыкания onClick
+      starsRow.appendChild(
+        el(
+          "button",
+          {
+            class:
+              "text-lg leading-none " +
+              (filled ? "text-amber-500" : "text-slate-300 dark:text-slate-600") +
+              (busy ? " opacity-50" : " hover:text-amber-400"),
+            attrs: busy
+              ? { type: "button", disabled: "disabled", title: "важность " + n }
+              : { type: "button", title: "важность " + n, "aria-label": "важность " + n },
+            onClick: busy ? null : function () { submit(n); },
+            text: filled ? "★" : "☆",
+          },
+          []
+        )
+      );
+    }
+  }
+
+  async function submit(next) {
+    if (busy || next === current) return;
+    const prev = current;
+    busy = true;
+    current = next;
+    clear(errorBox);
+    render();
+    try {
+      const updated = await apiPatch("/api/memories/" + encodeURIComponent(id), { importance: next });
+      busy = false;
+      current = updated.importance;
+      render();
+      onUpdated(updated);
+    } catch (err) {
+      busy = false;
+      current = prev; // откат к серверному значению
+      render();
+      showError(errorBox, err);
+    }
+  }
+
+  render();
+  box.appendChild(starsRow);
+  box.appendChild(errorBox);
+  return box;
+}
+
+// renderTagsControl — редактирование тегов (задача 10.2): чипы с крестиком
+// удаления, поле ввода (Enter добавляет чип локально, без запроса), кнопка
+// «Сохранить теги» шлёт ОДИН PATCH с итоговым списком целиком (не запрос на
+// каждый чип — см. критерий задачи). Ошибка — плашка, черновик (draft)
+// откатывается к последним серверным тегам.
+function renderTagsControl(id, tags, onUpdated) {
+  const box = el("div", { class: "mt-1" });
+  const chipsRow = el("div", { class: "flex flex-wrap gap-1" });
+  const errorBox = el("div", { class: "mt-1" });
+  const input = el("input", {
+    class:
+      "rounded border border-slate-300 px-2 py-1 text-xs focus:border-blue-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100",
+    attrs: { type: "text", placeholder: "новый тег + Enter" },
+  });
+  let serverTags = tags.slice();
+  let draft = tags.slice();
+  let busy = false;
+
+  function isDirty() {
+    if (draft.length !== serverTags.length) return true;
+    for (let i = 0; i < draft.length; i++) {
+      if (draft[i] !== serverTags[i]) return true;
+    }
+    return false;
+  }
+
+  function renderChips() {
+    clear(chipsRow);
+    draft.forEach(function (tag, idx) {
+      chipsRow.appendChild(
+        el(
+          "span",
+          {
+            class:
+              "inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-300",
+          },
+          [
+            el("span", { text: "#" + tag }),
+            el("button", {
+              class: "text-slate-400 hover:text-red-600 dark:hover:text-red-400",
+              attrs: { type: "button", title: "убрать тег", "aria-label": "убрать тег " + tag },
+              text: "×",
+              onClick: busy
+                ? null
+                : function () {
+                    draft.splice(idx, 1);
+                    renderAll();
+                  },
+            }),
+          ]
+        )
+      );
+    });
+  }
+
+  function addTag() {
+    const v = input.value.trim();
+    input.value = "";
+    if (v === "" || draft.indexOf(v) !== -1) return;
+    draft.push(v);
+    renderAll();
+  }
+
+  const saveBtn = el("button", {
+    class: BTN_SECONDARY,
+    attrs: { type: "button" },
+    text: "Сохранить теги",
+    onClick: async function () {
+      busy = true;
+      renderAll();
+      clear(errorBox);
+      try {
+        const updated = await apiPatch("/api/memories/" + encodeURIComponent(id), { tags: draft });
+        busy = false;
+        serverTags = (updated.tags || []).slice();
+        draft = serverTags.slice();
+        renderAll();
+        onUpdated(updated);
+      } catch (err) {
+        busy = false;
+        draft = serverTags.slice(); // откат к последним серверным тегам
+        renderAll();
+        showError(errorBox, err);
+      }
+    },
+  });
+
+  function renderAll() {
+    renderChips();
+    saveBtn.disabled = busy || !isDirty();
+  }
+
+  input.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      addTag();
+    }
+  });
+
+  box.appendChild(chipsRow);
+  box.appendChild(el("div", { class: "mt-1 flex items-center gap-2" }, [input, saveBtn]));
+  box.appendChild(errorBox);
+  renderAll();
+  return box;
+}
+
 function renderCardModal(card) {
   const content = document.getElementById("modal-content");
   clear(content);
   const m = card.memory;
+  const isLive = !m.supersededBy;
+
+  // handleMetadataUpdated — общий колбэк для звёзд/тегов (задача 10.2): PATCH
+  // возвращает обновлённый memoryDTO, сливаем его в card.memory и перерисовываем
+  // карточку целиком — простая и надёжная синхронизация, не нужно вручную
+  // разводить, какие DOM-узлы затронуты правкой importance/tags/updatedAt.
+  function handleMetadataUpdated(updated) {
+    Object.assign(card.memory, updated);
+    renderCardModal(card);
+  }
 
   const kindBadge = el("span", {
     class: "rounded-full px-2 py-0.5 text-xs font-medium " + (KIND_BADGE_CLASS[m.kind] || KIND_BADGE_CLASS_DEFAULT),
@@ -682,9 +876,13 @@ function renderCardModal(card) {
     class: "rounded-full border border-slate-300 px-2 py-0.5 text-xs text-slate-600 dark:border-slate-600 dark:text-slate-400",
     text: m.scope,
   });
-  const stars = el("span", { class: "text-amber-500 text-sm", text: fmtStars(m.importance) });
+  // Живая запись — интерактивные звёзды (клик = PATCH importance, задача 10.2);
+  // архивную (тумстоун) курировать нечего — только текст (сервер вернёт 409).
+  const importanceEl = isLive
+    ? renderImportanceControl(m.id, m.importance, handleMetadataUpdated)
+    : el("span", { class: "text-amber-500 text-sm", text: fmtStars(m.importance) });
 
-  content.appendChild(el("div", { class: "flex flex-wrap items-center gap-2" }, [kindBadge, scopeBadge, stars, vectorStatusBadge(card.embedding)]));
+  content.appendChild(el("div", { class: "flex flex-wrap items-center gap-2" }, [kindBadge, scopeBadge, importanceEl, vectorStatusBadge(card.embedding)]));
 
   if (m.supersededBy) {
     content.appendChild(
@@ -703,12 +901,19 @@ function renderCardModal(card) {
     content.appendChild(el("p", { class: "mt-1 text-sm text-slate-800 dark:text-slate-200", text: m.summary }));
   }
 
-  if (m.tags && m.tags.length > 0) {
-    const tagsRow = el("div", { class: "mt-3 flex flex-wrap gap-1" });
+  content.appendChild(el("h3", { class: "mt-3 text-sm font-semibold text-slate-500 dark:text-slate-400", text: "Теги" }));
+  if (isLive) {
+    // Живая запись — редактируемые чипы (добавить/убрать, «Сохранить теги» =
+    // один PATCH с итоговым списком, задача 10.2).
+    content.appendChild(renderTagsControl(m.id, m.tags || [], handleMetadataUpdated));
+  } else if (m.tags && m.tags.length > 0) {
+    const tagsRow = el("div", { class: "mt-1 flex flex-wrap gap-1" });
     m.tags.forEach(function (tag) {
       tagsRow.appendChild(el("span", { class: "rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600 dark:bg-slate-700 dark:text-slate-300", text: "#" + tag }));
     });
     content.appendChild(tagsRow);
+  } else {
+    content.appendChild(el("p", { class: "mt-1 text-sm text-slate-500 dark:text-slate-400", text: "нет тегов" }));
   }
 
   const metaList = el("dl", { class: "mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600 dark:text-slate-400" }, [

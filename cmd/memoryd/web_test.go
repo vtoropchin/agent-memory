@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/oklog/ulid/v2"
@@ -327,6 +328,206 @@ func TestHandleGetMemory(t *testing.T) {
 func deleteJSON(t *testing.T, url string, out any) *http.Response {
 	t.Helper()
 	return doJSON(t, http.MethodDelete, url, out)
+}
+
+// patchJSON шлёт PATCH с телом bodyJSON (сырая строка — так тест может
+// послать как валидный, так и намеренно битый JSON) и декодирует ответ в out
+// (если не nil).
+func patchJSON(t *testing.T, url, bodyJSON string, out any) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPatch, url, strings.NewReader(bodyJSON))
+	if err != nil {
+		t.Fatalf("NewRequest PATCH %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH %s: %v", url, err)
+	}
+	if out != nil {
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			t.Fatalf("decode JSON от %s: %v", url, err)
+		}
+	}
+	return resp
+}
+
+// TestHandlePatchMemory_Importance — PATCH importance меняет значение в БД,
+// сдвигает updated_at, но НЕ трогает accessed_at (decay-часы не сбрасываются
+// правкой метаданных — тот же инвариант, что и в DESIGN.md §4.1: accessed_at
+// сигнализирует ОБРАЩЕНИЕ к факту при recall, а не редактирование).
+func TestHandlePatchMemory_Importance(t *testing.T) {
+	s := newTestWebStore(t)
+	accessedAt := int64(500)
+	m := putTestMemory(t, s, func(m *memory.Memory) {
+		m.Importance = 2
+		m.AccessedAt = &accessedAt
+		m.UpdatedAt = 1000
+	})
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var got memoryDTO
+	resp := patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"importance":5}`, &got)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200", resp.StatusCode)
+	}
+	if got.Importance != 5 {
+		t.Errorf("Importance в ответе = %d, хочу 5", got.Importance)
+	}
+
+	after, err := s.Get(context.Background(), m.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.Importance != 5 {
+		t.Errorf("Importance в БД = %d, хочу 5", after.Importance)
+	}
+	if after.UpdatedAt <= 1000 {
+		t.Errorf("UpdatedAt = %d, хочу сдвиг вперёд от 1000", after.UpdatedAt)
+	}
+	if after.AccessedAt == nil || *after.AccessedAt != accessedAt {
+		t.Errorf("AccessedAt = %v, хочу неизменный %d (PATCH не должен сбрасывать decay-часы)", after.AccessedAt, accessedAt)
+	}
+}
+
+// TestHandlePatchMemory_TagsReplaceAndFTS — PATCH tags заменяет набор целиком
+// (не аддитивно), новый тег находится через FTS5 (тумблер триггеров
+// tags_ai/tags_ad, см. sqlite.go), а tags:[] снимает все теги.
+func TestHandlePatchMemory_TagsReplaceAndFTS(t *testing.T) {
+	s := newTestWebStore(t)
+	m := putTestMemory(t, s, func(m *memory.Memory) { m.Tags = []string{"old1", "old2"} })
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var got memoryDTO
+	resp := patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"tags":["new1","new2"]}`, &got)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200", resp.StatusCode)
+	}
+	if len(got.Tags) != 2 || got.Tags[0] != "new1" || got.Tags[1] != "new2" {
+		t.Errorf("Tags = %v, хочу [new1 new2] (полная замена, старые теги сняты)", got.Tags)
+	}
+
+	var found searchResponse
+	respSearch := getJSON(t, srv.URL+"/api/search?mode=lexical&q=new1", &found)
+	if respSearch.StatusCode != http.StatusOK {
+		t.Fatalf("статус поиска = %d, хочу 200", respSearch.StatusCode)
+	}
+	if len(found.Items) != 1 || found.Items[0].Id != m.Id {
+		t.Fatalf("поиск по новому тегу = %+v, хочу найти %q (FTS синхронизирован)", found.Items, m.Id)
+	}
+
+	var got2 memoryDTO
+	patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"tags":[]}`, &got2)
+	if len(got2.Tags) != 0 {
+		t.Errorf("Tags после tags:[] = %v, хочу пусто (снять все теги)", got2.Tags)
+	}
+}
+
+// TestHandlePatchMemory_PartialDoesNotTouchOtherField — частичный PATCH
+// (только importance или только tags) не трогает второе поле.
+func TestHandlePatchMemory_PartialDoesNotTouchOtherField(t *testing.T) {
+	s := newTestWebStore(t)
+	m := putTestMemory(t, s, func(m *memory.Memory) { m.Importance = 4; m.Tags = []string{"keep"} })
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var got memoryDTO
+	patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"importance":1}`, &got)
+	if len(got.Tags) != 1 || got.Tags[0] != "keep" {
+		t.Errorf("Tags после PATCH только importance = %v, хочу [keep] нетронутым", got.Tags)
+	}
+
+	var got2 memoryDTO
+	patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"tags":["only"]}`, &got2)
+	if got2.Importance != 1 {
+		t.Errorf("Importance после PATCH только tags = %d, хочу 1 нетронутым", got2.Importance)
+	}
+}
+
+// TestHandlePatchMemory_ImportanceClamped — importance вне 1..5 не отклоняется
+// 400, а зажимается (симметрично MCP memory_update, см. годок ClampImportance).
+func TestHandlePatchMemory_ImportanceClamped(t *testing.T) {
+	s := newTestWebStore(t)
+	m := putTestMemory(t, s, func(m *memory.Memory) { m.Importance = 3 })
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var got memoryDTO
+	resp := patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"importance":99}`, &got)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200 (кламп, не 400)", resp.StatusCode)
+	}
+	if got.Importance != 5 {
+		t.Errorf("Importance = %d, хочу 5 (зажато сверху)", got.Importance)
+	}
+}
+
+// TestHandlePatchMemory_UnknownFieldBadRequest — присутствие поля сверх
+// importance/tags (content и т.п.) -> 400: защита контракта от тихого
+// расширения (content/kind/scope/links морда не редактирует никогда).
+func TestHandlePatchMemory_UnknownFieldBadRequest(t *testing.T) {
+	s := newTestWebStore(t)
+	m := putTestMemory(t, s, func(m *memory.Memory) {})
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	resp := patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"content":"новое содержание"}`, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("статус = %d, хочу 400 (content не допускается в PATCH)", resp.StatusCode)
+	}
+}
+
+// TestHandlePatchMemory_NotFound — PATCH несуществующего id -> 404.
+func TestHandlePatchMemory_NotFound(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	resp := patchJSON(t, srv.URL+"/api/memories/01ARZ3NDEKTSV4RRFFQ69G5FAV", `{"importance":4}`, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("статус = %d, хочу 404", resp.StatusCode)
+	}
+}
+
+// TestHandlePatchMemory_SupersededConflict — PATCH архивной (superseded)
+// записи -> 409: правка метаданных тумстоуна недоступна.
+func TestHandlePatchMemory_SupersededConflict(t *testing.T) {
+	s := newTestWebStore(t)
+	x := putTestMemory(t, s, func(m *memory.Memory) {})
+	y := putTestMemory(t, s, func(m *memory.Memory) {})
+	if err := s.Supersede(context.Background(), x.Id, y.Id); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	resp := patchJSON(t, srv.URL+"/api/memories/"+x.Id, `{"importance":4}`, nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("статус = %d, хочу 409 (архивная запись)", resp.StatusCode)
+	}
+}
+
+// TestHandlePatchMemory_MalformedJSONBadRequest — битый JSON в теле -> 400.
+func TestHandlePatchMemory_MalformedJSONBadRequest(t *testing.T) {
+	s := newTestWebStore(t)
+	m := putTestMemory(t, s, func(m *memory.Memory) {})
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	resp := patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"importance":`, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("статус = %d, хочу 400 (битый JSON)", resp.StatusCode)
+	}
 }
 
 // TestHandleForgetMemory — DELETE /api/memories/{id} мягко удаляет живую
