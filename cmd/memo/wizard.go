@@ -104,15 +104,20 @@ func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConf
 		cfg.ReasonerProvider = provider
 	}
 
-	if cfg.ReasonerProvider == "deepseek" && cfg.DeepseekKey == "" {
-		key := ""
-		if err := huh.NewInput().
-			Title("DeepSeek API key (Enter — пропустить, указать позже в .env)").
-			Password(true).
-			Value(&key).Run(); err != nil {
+	if cfg.ReasonerProvider == "deepseek" {
+		if cfg.DeepseekKey == "" {
+			key := ""
+			if err := huh.NewInput().
+				Title("DeepSeek API key (Enter — пропустить, указать позже в .env)").
+				Password(true).
+				Value(&key).Run(); err != nil {
+				return cfg, err
+			}
+			cfg.DeepseekKey = key
+		}
+		if err := promptDeepSeekReasoner(ctx, out, &cfg); err != nil {
 			return cfg, err
 		}
-		cfg.DeepseekKey = key
 	}
 
 	if cfg.StorePath == "" {
@@ -275,7 +280,7 @@ func promptOpenAIEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) e
 	}
 	if cfg.OpenAIKey == "" {
 		fmt.Fprintln(out, "ключ не введён — список моделей запросить нечем, введи имя модели вручную")
-		return promptModelManual(&cfg.EmbedderModel, "")
+		return promptModelManual(&cfg.EmbedderModel, "", "модель эмбеддингов OpenAI")
 	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, fetchModelsTimeout)
@@ -283,11 +288,11 @@ func promptOpenAIEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) e
 	cancel()
 	if err != nil {
 		fmt.Fprintf(out, "не удалось получить список моделей OpenAI (%v) — введи имя модели вручную\n", err)
-		return promptModelManual(&cfg.EmbedderModel, "")
+		return promptModelManual(&cfg.EmbedderModel, "", "модель эмбеддингов OpenAI")
 	}
 	if len(models) == 0 {
 		fmt.Fprintln(out, "OpenAI не вернул ни одной модели — введи имя модели вручную")
-		return promptModelManual(&cfg.EmbedderModel, "")
+		return promptModelManual(&cfg.EmbedderModel, "", "модель эмбеддингов OpenAI")
 	}
 
 	model := models[0]
@@ -301,12 +306,55 @@ func promptOpenAIEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) e
 	return nil
 }
 
-// promptModelManual — ручной ввод имени модели в *dst с дефолтом def. Пустой
-// def (нет естественного дефолта, напр. OpenAI без списка) требует
-// непустого ввода — иначе agentmemory.toml получил бы модель "".
-func promptModelManual(dst *string, def string) error {
+// promptDeepSeekReasoner спрашивает модель reasoner DeepSeek — по образцу
+// promptOpenAIEmbedder, но отвечает ТОЛЬКО за выбор модели: ключ (и, в отличие
+// от OpenAI-эмбеддера, base URL) запрашивать не нужно — ключ уже взят в
+// promptInitTUI, а base URL у reasoner не настраивается (см. defaultDeepSeekBaseURL
+// в init.go). Логика выбора: если модель уже задана (флагом) — не переспрашивает;
+// если ключ не введён (пропущен) — сеть не дёргаем, сразу ручной ввод с
+// дефолтом defaultDeepSeekModel; иначе запрашивает список через
+// fetchDeepSeekModels (таймаут fetchModelsTimeout) — ошибка запроса или
+// пустой список тоже откатываются на ручной ввод с тем же дефолтом, успех —
+// select из полученных моделей (первая преселекчена).
+func promptDeepSeekReasoner(ctx context.Context, out io.Writer, cfg *initConfig) error {
+	if cfg.ReasonerModel != "" {
+		return nil
+	}
+	if cfg.DeepseekKey == "" {
+		fmt.Fprintln(out, "ключ не введён — список моделей запросить нечем, введи имя модели вручную")
+		return promptModelManual(&cfg.ReasonerModel, defaultDeepSeekModel, "модель reasoner (DeepSeek)")
+	}
+
+	fetchCtx, cancel := context.WithTimeout(ctx, fetchModelsTimeout)
+	models, err := fetchDeepSeekModels(fetchCtx, defaultDeepSeekBaseURL, cfg.DeepseekKey)
+	cancel()
+	if err != nil {
+		fmt.Fprintf(out, "не удалось получить список моделей DeepSeek (%v) — введи имя модели вручную\n", err)
+		return promptModelManual(&cfg.ReasonerModel, defaultDeepSeekModel, "модель reasoner (DeepSeek)")
+	}
+	if len(models) == 0 {
+		fmt.Fprintln(out, "DeepSeek не вернул ни одной модели — введи имя модели вручную")
+		return promptModelManual(&cfg.ReasonerModel, defaultDeepSeekModel, "модель reasoner (DeepSeek)")
+	}
+
+	model := models[0]
+	if err := huh.NewSelect[string]().
+		Title("модель reasoner DeepSeek").
+		Options(toModelOptions(models)...).
+		Value(&model).Run(); err != nil {
+		return err
+	}
+	cfg.ReasonerModel = model
+	return nil
+}
+
+// promptModelManual — ручной ввод имени модели в *dst с дефолтом def и
+// заголовком title промпта. Пустой def (нет естественного дефолта, напр.
+// OpenAI без списка) требует непустого ввода — иначе agentmemory.toml
+// получил бы модель "".
+func promptModelManual(dst *string, def, title string) error {
 	val := def
-	input := huh.NewInput().Title("модель эмбеддингов")
+	input := huh.NewInput().Title(title)
 	if def == "" {
 		input = input.Validate(func(s string) error {
 			if strings.TrimSpace(s) == "" {

@@ -623,6 +623,70 @@ func TestRunInit_OllamaURLModelAliases(t *testing.T) {
 	}
 }
 
+// TestApplyInitDefaults_ReasonerModel проверяет, что applyInitDefaults
+// проставляет defaultDeepSeekModel для reasoner-provider=deepseek без явной
+// модели, и обнуляет ReasonerModel для reasoner-provider=noop (модель ему не
+// нужна) — симметрично дефолтам EmbedderModel.
+func TestApplyInitDefaults_ReasonerModel(t *testing.T) {
+	cfg := applyInitDefaults(initConfig{ReasonerProvider: "deepseek"})
+	if cfg.ReasonerModel != defaultDeepSeekModel {
+		t.Errorf("ReasonerModel = %q, хочу defaultDeepSeekModel = %q", cfg.ReasonerModel, defaultDeepSeekModel)
+	}
+
+	cfg = applyInitDefaults(initConfig{ReasonerProvider: "deepseek", ReasonerModel: "deepseek-reasoner"})
+	if cfg.ReasonerModel != "deepseek-reasoner" {
+		t.Errorf("ReasonerModel = %q, хочу сохранённое явное значение deepseek-reasoner", cfg.ReasonerModel)
+	}
+
+	cfg = applyInitDefaults(initConfig{ReasonerProvider: "noop", ReasonerModel: "deepseek-chat"})
+	if cfg.ReasonerModel != "" {
+		t.Errorf("ReasonerModel = %q, хочу обнулён (reasoner=noop)", cfg.ReasonerModel)
+	}
+}
+
+// TestRunInit_ReasonerModelFlag проверяет, что флаг -reasoner-model доходит
+// до agentmemory.toml (симметрично TestRunInit_OllamaURLModelAliases для
+// эмбеддера).
+func TestRunInit_ReasonerModelFlag(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := runInit([]string{
+		"-no-input",
+		"-project", "myproj",
+		"-dir", dir,
+		"-reasoner-provider", "deepseek",
+		"-reasoner-model", "deepseek-reasoner",
+	}, &out)
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Reasoner.Provider != "deepseek" {
+		t.Errorf("Reasoner.Provider = %q, хочу deepseek", cfg.Reasoner.Provider)
+	}
+	if cfg.Reasoner.Model != "deepseek-reasoner" {
+		t.Errorf("Reasoner.Model = %q, хочу deepseek-reasoner (из -reasoner-model)", cfg.Reasoner.Model)
+	}
+}
+
+// TestRenderReasonerTomlBlock_UsesConfiguredModel проверяет, что
+// renderReasonerTomlBlock пишет cfg.ReasonerModel в TOML, а не хардкоженное
+// имя модели (регрессия задачи: раньше model была захардкожена как
+// "deepseek-chat" независимо от cfg).
+func TestRenderReasonerTomlBlock_UsesConfiguredModel(t *testing.T) {
+	block := renderReasonerTomlBlock(initConfig{ReasonerProvider: "deepseek", ReasonerModel: "deepseek-reasoner"})
+	if !strings.Contains(block, `model    = "deepseek-reasoner"`) {
+		t.Errorf("renderReasonerTomlBlock не содержит настроенную модель deepseek-reasoner:\n%s", block)
+	}
+	if strings.Contains(block, `"deepseek-chat"`) {
+		t.Errorf("renderReasonerTomlBlock содержит хардкод deepseek-chat вместо cfg.ReasonerModel:\n%s", block)
+	}
+}
+
 // TestApplyInitDefaults_ClearsUnselectedProviderKeys проверяет защитную
 // нормализацию: ключ провайдера, не выбранного пользователем (рассинхрон
 // флагов), обнуляется — .env не должен получить лишний ключ.

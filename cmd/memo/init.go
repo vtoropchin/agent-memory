@@ -46,7 +46,14 @@ const (
 	defaultOpenAIBaseURL    = "https://api.openai.com"
 	defaultOpenAIModel      = "text-embedding-3-small"
 	defaultReasonerProvider = "deepseek"
-	defaultStorePath        = "~/.agentmemory/memory.db"
+	// defaultDeepSeekBaseURL используется ТОЛЬКО для интерактивного запроса
+	// списка моделей reasoner (wizard.go/providers.go) — рантайм-клиент
+	// reason.DeepSeek base URL из конфига не читает, он хардкодит свой
+	// дефолт внутри пакета reason; секция [reasoner] в TOML полем base_url
+	// намеренно не расширяется (renderReasonerTomlBlock).
+	defaultDeepSeekBaseURL = "https://api.deepseek.com"
+	defaultDeepSeekModel   = "deepseek-chat"
+	defaultStorePath       = "~/.agentmemory/memory.db"
 
 	// fetchModelsTimeout — таймаут запроса списка моделей у ollama/OpenAI в
 	// интерактивном промпте: недоступный/зависший сервер не должен вешать
@@ -256,14 +263,14 @@ func renderReasonerTomlBlock(cfg initConfig) string {
 	case "noop":
 		return "# Без LLM-суммаризации/консолидации (DESIGN.md §15).\nprovider = \"noop\"\n"
 	default: // "deepseek"
-		return `# DeepSeek chat: ключ берётся из env DEEPSEEK_API_KEY. Если в shell-env его нет,
+		return fmt.Sprintf(`# DeepSeek chat: ключ берётся из env DEEPSEEK_API_KEY. Если в shell-env его нет,
 # memo сам подхватывает его из .env рядом с этим конфигом при старте (см.
 # loadDotEnv в main.go) — .env раскладывается этим же "memo init". Пустой
 # ключ — деградация до noop (§15): recall без суммаризации, консолидация
 # недоступна, но память работает.
 provider = "deepseek"
-model    = "deepseek-chat"
-`
+model    = "%s"
+`, escapeTOMLString(cfg.ReasonerModel))
 	}
 }
 
@@ -361,6 +368,7 @@ type initConfig struct {
 	EmbedderBaseURL  string // ollama/openai: base URL; noop — не используется
 	EmbedderModel    string // ollama/openai: модель эмбеддинга; noop — не используется
 	ReasonerProvider string // deepseek | noop
+	ReasonerModel    string // deepseek: модель reasoner; noop — не используется
 	StorePath        string
 	OpenAIKey        string // только если EmbedderProvider == "openai"
 	DeepseekKey      string // только если ReasonerProvider == "deepseek"
@@ -388,6 +396,7 @@ func runInit(args []string, out io.Writer) error {
 	ollamaURL := fs.String("ollama-url", "", "алиас -embedder-url (для embedder-provider=ollama, дефолт "+defaultOllamaBaseURL+")")
 	ollamaModel := fs.String("ollama-model", "", "алиас -embedder-model (для embedder-provider=ollama, дефолт "+defaultOllamaModel+")")
 	reasonerProvider := fs.String("reasoner-provider", "", fmt.Sprintf("провайдер reasoner (%s); дефолт %s", strings.Join(reasonerProviderOptions, ", "), defaultReasonerProvider))
+	reasonerModel := fs.String("reasoner-model", "", "модель reasoner (для reasoner-provider=deepseek, дефолт "+defaultDeepSeekModel+")")
 	store := fs.String("store", "", "путь к файлу SQLite (дефолт "+defaultStorePath+")")
 	deepseekKey := fs.String("deepseek-key", "", "ключ DeepSeek API — пишется в <dir>/.env, только если reasoner-provider=deepseek (осторожно: попадёт в историю shell)")
 	openaiKey := fs.String("openai-key", "", "ключ OpenAI API (или env OPENAI_API_KEY) — пишется в <dir>/.env, только если embedder-provider=openai")
@@ -409,6 +418,7 @@ func runInit(args []string, out io.Writer) error {
 		EmbedderBaseURL:  cmp.Or(*embedderURL, *ollamaURL),
 		EmbedderModel:    cmp.Or(*embedderModel, *ollamaModel),
 		ReasonerProvider: *reasonerProvider,
+		ReasonerModel:    *reasonerModel,
 		StorePath:        *store,
 		DeepseekKey:      *deepseekKey,
 		OpenAIKey:        openaiKeyVal,
@@ -482,6 +492,14 @@ func applyInitDefaults(cfg initConfig) initConfig {
 	}
 	if cfg.ReasonerProvider == "" {
 		cfg.ReasonerProvider = defaultReasonerProvider
+	}
+	switch cfg.ReasonerProvider {
+	case "deepseek":
+		if cfg.ReasonerModel == "" {
+			cfg.ReasonerModel = defaultDeepSeekModel
+		}
+	default: // "noop" — model reasoner'у не нужен
+		cfg.ReasonerModel = ""
 	}
 	clearUnselectedProviderKeys(&cfg, embedderProviders, cfg.EmbedderProvider)
 	clearUnselectedProviderKeys(&cfg, reasonerProviders, cfg.ReasonerProvider)

@@ -65,7 +65,32 @@ func fetchOllamaModels(ctx context.Context, baseURL string) ([]string, error) {
 // пустом фильтре можно показать все .data[].id"). Неверный ключ/недоступный
 // сервер — non-2xx статус, возвращается как ошибка.
 func fetchOpenAIEmbeddingModels(ctx context.Context, baseURL, key string) ([]string, error) {
-	url := strings.TrimRight(baseURL, "/") + "/v1/models"
+	all, err := fetchModelIDs(ctx, strings.TrimRight(baseURL, "/")+"/v1/models", key)
+	if err != nil {
+		return nil, err
+	}
+	var embeddingOnly []string
+	for _, id := range all {
+		if strings.Contains(id, "embedding") {
+			embeddingOnly = append(embeddingOnly, id)
+		}
+	}
+	if len(embeddingOnly) > 0 {
+		return embeddingOnly, nil
+	}
+	return all, nil
+}
+
+// fetchModelIDs запрашивает у OpenAI-совместимого сервера список моделей
+// (`GET <url>`, `Authorization: Bearer <key>`) и возвращает все непустые
+// `.data[].id` в порядке ответа. Общий транспорт OpenAI- и DeepSeek-вариантов
+// (fetchOpenAIEmbeddingModels/fetchDeepSeekModels) — они различаются только
+// путём эндпоинта и пост-фильтром, а не HTTP-обвязкой/разбором. Неверный ключ/
+// недоступный сервер — non-2xx статус, возвращается как ошибка; пустой список
+// без ошибки — валидный результат (вызывающий сам решает, что показать). Ollama
+// сюда не складывается: другой эндпоинт (/api/tags), без auth и с формой
+// .models[].name — см. отдельную fetchOllamaModels.
+func fetchModelIDs(ctx context.Context, url, key string) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("сборка запроса %s: %w", url, err)
@@ -92,19 +117,22 @@ func fetchOpenAIEmbeddingModels(ctx context.Context, baseURL, key string) ([]str
 		return nil, fmt.Errorf("разбор ответа %s: %w", url, err)
 	}
 
-	all := make([]string, 0, len(parsed.Data))
-	var embeddingOnly []string
+	ids := make([]string, 0, len(parsed.Data))
 	for _, d := range parsed.Data {
-		if d.ID == "" {
-			continue
-		}
-		all = append(all, d.ID)
-		if strings.Contains(d.ID, "embedding") {
-			embeddingOnly = append(embeddingOnly, d.ID)
+		if d.ID != "" {
+			ids = append(ids, d.ID)
 		}
 	}
-	if len(embeddingOnly) > 0 {
-		return embeddingOnly, nil
-	}
-	return all, nil
+	return ids, nil
+}
+
+// fetchDeepSeekModels запрашивает у DeepSeek API (`GET {baseURL}/models`) список
+// доступных моделей через fetchModelIDs и возвращает их без фильтрации (в отличие
+// от fetchOpenAIEmbeddingModels: у DeepSeek это chat/reasoner-модели, а не
+// эмбеддинги, фильтровать по имени нечего). Путь намеренно "/models", а не
+// "/v1/models" — DeepSeek API не использует префикс /v1 (см. официальную
+// документацию: base_url = https://api.deepseek.com, эндпоинты /chat/completions
+// и /models).
+func fetchDeepSeekModels(ctx context.Context, baseURL, key string) ([]string, error) {
+	return fetchModelIDs(ctx, strings.TrimRight(baseURL, "/")+"/models", key)
 }

@@ -168,3 +168,84 @@ func TestFetchOpenAIEmbeddingModels(t *testing.T) {
 		}
 	})
 }
+
+func TestFetchDeepSeekModels(t *testing.T) {
+	t.Run("успех", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/models" {
+				t.Errorf("путь = %q, хочу /models", r.URL.Path)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+				t.Errorf("Authorization = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[
+				{"id":"deepseek-chat","object":"model","owned_by":"deepseek"},
+				{"id":"deepseek-reasoner","object":"model","owned_by":"deepseek"}
+			]}`))
+		}))
+		defer srv.Close()
+
+		got, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-test")
+		if err != nil {
+			t.Fatalf("fetchDeepSeekModels: %v", err)
+		}
+		want := []string{"deepseek-chat", "deepseek-reasoner"}
+		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Errorf("fetchDeepSeekModels = %v, хочу %v", got, want)
+		}
+	})
+
+	t.Run("пустой data — пустой список без ошибки", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+		}))
+		defer srv.Close()
+
+		got, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-test")
+		if err != nil {
+			t.Fatalf("fetchDeepSeekModels: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("fetchDeepSeekModels(пустой data) = %v, хочу пустой слайс", got)
+		}
+	})
+
+	t.Run("неверный ключ — ошибка", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid api key"}`))
+		}))
+		defer srv.Close()
+
+		_, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-bogus")
+		if err == nil {
+			t.Fatalf("fetchDeepSeekModels(неверный ключ) = nil error, хочу ошибку")
+		}
+		if !strings.Contains(err.Error(), "401") {
+			t.Errorf("ошибка не содержит статус-код 401: %v", err)
+		}
+	})
+
+	t.Run("сервер недоступен — ошибка", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		srv.Close()
+
+		if _, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-test"); err == nil {
+			t.Fatalf("fetchDeepSeekModels(недоступный сервер) = nil error, хочу ошибку")
+		}
+	})
+
+	t.Run("битый JSON — ошибка", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{not json`))
+		}))
+		defer srv.Close()
+
+		if _, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-test"); err == nil {
+			t.Fatalf("fetchDeepSeekModels(битый JSON) = nil error, хочу ошибку")
+		}
+	})
+}
