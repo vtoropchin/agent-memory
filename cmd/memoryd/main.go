@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 
@@ -44,118 +45,114 @@ const openaiDefaultBaseURL = "https://api.openai.com"
 // значением по умолчанию и при provider="openai" без явного base_url в TOML.
 const ollamaDefaultBaseURL = "http://localhost:11434"
 
+// routeDecision — куда идут args верхнего уровня ДО того, как они попадают в
+// cobra (см. decideRoute). Отдельный enum, а не просто bool "сервер/подкоманда",
+// потому что help — третий путь, обрабатываемый напрямую (writeUsage), минуя
+// и сервер, и cobra.
+type routeDecision int
+
+const (
+	routeCobra  routeDecision = iota // подкоманда по имени (или неизвестное имя -> root -> сервер, как раньше)
+	routeServer                      // первый арг похож на флаг сервера -> run(args) напрямую, cobra не участвует
+	routeHelp                        // -h/-help/--help/help первым аргументом -> writeUsage
+)
+
+// decideRoute решает маршрут ПЕРВЫМ аргументом args, байт-в-байт повторяя
+// правило старого диспетчера (до миграции на cobra в задаче 11.1): в
+// подкоманду роутит только точное совпадение имени, поэтому "-db recall" или
+// "-config web" уходили в сервер, а не в подкоманду recall/web. Цикл
+// исправлений после 11.1: миграция на cobra сломала это байт-в-байт
+// поведение — cobra.Command.Find (используемый внутри root.Execute) сам
+// решает, что считать подкомандой, через свою эвристику stripFlags, которая
+// при "-db recall" отбрасывает САМ токен "-db" (посчитав, что это флаг с
+// значением) и трактует следующий токен "recall" как имя подкоманды — в
+// результате `memoryd -db recall` уходил в подкоманду recall, чей отдельный
+// flag.ExitOnError-FlagSet видел "-db" без значения и завершал процесс.
+// decideRoute вызывается ДО того, как args вообще попадают в cobra — поэтому
+// для аргументов, похожих на флаг (routeServer), Find/stripFlags уже не
+// участвуют вовсе, и разойтись с историческим поведением нечем.
+//
+// Порядок проверок: help-токен первым аргументом -> routeHelp; иначе первый
+// арг начинается с "-" (это флаг сервера, не имя подкоманды) -> routeServer;
+// иначе -> routeCobra (там уже cobra резолвит по точному имени; неизвестное
+// имя, как и раньше, падает на root -> серверный путь).
+func decideRoute(args []string) routeDecision {
+	if len(args) >= 1 && isHelpArg(args[0]) {
+		return routeHelp
+	}
+	if len(args) >= 1 && strings.HasPrefix(args[0], "-") {
+		return routeServer
+	}
+	return routeCobra
+}
+
+// runMain — тестируемое тело main(): принимает stdin/stdout/stderr и args
+// параметрами (вместо os.Stdin/os.Stdout/os.Args) и возвращает код выхода
+// вместо os.Exit — тот же приём, что уже применялся для дерева cobra
+// (cobra.go), теперь распространённый и на guard верхнего уровня decideRoute,
+// чтобы БАГ 2 (маршрутизация `-db recall`/`-config web`) был покрыт тестом без
+// реального завершения процесса.
+func runMain(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
+	switch decideRoute(args) {
+	case routeHelp:
+		writeUsage(stdout)
+		return 0
+	case routeServer:
+		if err := run(args); err != nil {
+			fmt.Fprintf(stderr, "memoryd: %v\n", err)
+			return 1
+		}
+		return 0
+	default: // routeCobra
+		// Дерево подкоманд (задача 11.1) построено на cobra (newRootCmd,
+		// cobra.go): каждая подкоманда — тонкая обёртка над уже существующими
+		// runInit/runWeb/runRecall/runSave/runHook/runDoctor/runExport/
+		// runImport и серверным run(), сама бизнес-логика этой миграцией не
+		// затронута. exitCode передаётся как указатель, а не через возврат
+		// ошибки Execute(), потому что у подкоманд разные контракты выхода
+		// (hook — всегда 0, doctor — код из отчёта, остальные — 0/1) и это
+		// нельзя выразить одним правилом "ошибка -> ненулевой код", которое
+		// применяет cobra по умолчанию.
+		exitCode := 0
+		root := newRootCmd(stdin, stdout, stderr, &exitCode)
+		root.SetArgs(args)
+		root.SetOut(stdout)
+		root.SetErr(stderr)
+		if err := root.Execute(); err != nil {
+			// Не должно случаться: на каждой команде DisableFlagParsing=true и
+			// RunE сама обрабатывает свои ошибки (см. cobra.go) — но не
+			// проглатываем непредвиденную ошибку cobra, если она всё же возникла.
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return exitCode
+	}
+}
+
+// main — точка входа memoryd. Вся логика — в runMain, main() лишь подключает
+// реальные os.Std*/os.Args и транслирует код выхода в os.Exit (без этого
+// runMain нельзя было бы тестировать без завершения процесса теста).
 func main() {
-	// Справка верхнего уровня — перехватывается до диспетчеризации init/web и
-	// до log.SetOutput(os.Stderr): сервер ещё не стартовал, поэтому печать в
-	// stdout здесь безопасна и не портит протокол MCP.
-	if len(os.Args) >= 2 && isHelpArg(os.Args[1]) {
-		writeUsage(os.Stdout)
-		return
-	}
+	os.Exit(runMain(os.Stdin, os.Stdout, os.Stderr, os.Args[1:]))
+}
 
-	// `memoryd init` — скаффолдинг .mcp.json + agentmemory.toml (задача 5.3),
-	// диспетчеризуется до разбора серверных флагов и работы с конфигом/store,
-	// поэтому `memoryd`, `memoryd -config ...`, `memoryd -db ...` не затронуты.
-	if len(os.Args) >= 2 && os.Args[1] == "init" {
-		if err := runInit(os.Args[2:], os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "memoryd init: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	// `memoryd web` — read-only HTTP-морда просмотра памяти (задача 6.2),
-	// диспетчеризуется симметрично `init`, до разбора серверных флагов и
-	// работы с reasoner/embedder: морда только читает store лексически.
-	if len(os.Args) >= 2 && os.Args[1] == "web" {
-		if err := runWeb(os.Args[2:], os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "memoryd web: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	// `memoryd recall` / `memoryd save` — one-shot CLI поверх read/write path
-	// (задача 7.1), диспетчеризуются симметрично init/web, до разбора серверных
-	// флагов. В отличие от web, им нужны reasoner/embedder (newReasoner/newEmbedder
-	// из этого файла) — как и серверному режиму, деградация обоих до Noop уходит
-	// предупреждением в stderr (log.Printf пишет в os.Stderr по умолчанию, здесь
-	// это ещё не переопределялось), а не в stdout, куда пишется только результат.
-	if len(os.Args) >= 2 && os.Args[1] == "recall" {
-		if err := runRecall(os.Args[2:], os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "memoryd recall: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if len(os.Args) >= 2 && os.Args[1] == "save" {
-		if err := runSave(os.Args[2:], os.Stdin, os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "memoryd save: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	// `memoryd doctor` — read-only диагностика режима работы памяти (задача
-	// 9.1), диспетчеризуется симметрично recall/save, до разбора серверных
-	// флагов. Код выхода задаётся самим отчётом (0 здоров/деградирован, 1
-	// сломан), а не универсальным os.Exit(1) остальных подкоманд — поэтому
-	// runDoctor возвращает exitCode отдельно от err (err — только ошибки,
-	// из-за которых отчёт вообще нельзя построить: битые флаги/конфиг).
-	if len(os.Args) >= 2 && os.Args[1] == "doctor" {
-		code, err := runDoctor(os.Args[2:], os.Stdout)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "memoryd doctor: %v\n", err)
-			os.Exit(1)
-		}
-		os.Exit(code)
-	}
-
-	// `memoryd export` / `memoryd import` — полный/частичный бэкап памяти в
-	// переносимый JSONL и восстановление обратно с сохранением id/таймстампов
-	// (задача 9.2), диспетчеризуются симметрично recall/save/doctor, до
-	// разбора серверных флагов.
-	if len(os.Args) >= 2 && os.Args[1] == "export" {
-		if err := runExport(os.Args[2:], os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "memoryd export: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if len(os.Args) >= 2 && os.Args[1] == "import" {
-		if err := runImport(os.Args[2:], os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "memoryd import: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	// `memoryd hook` — обёртка над recall-путём для хуков Claude Code
-	// (SessionStart/UserPromptSubmit, задача 7.2). В отличие от recall/save,
-	// ошибка НЕ приводит к os.Exit(1) — только к логу в stderr: хук обязан
-	// завершаться нулевым кодом при любой ошибке (нет конфига/БД, битый
-	// stdin), иначе он мог бы сломать старт или ход сессии агента.
-	if len(os.Args) >= 2 && os.Args[1] == "hook" {
-		if err := runHook(os.Args[2:], os.Stdin, os.Stdout); err != nil {
-			log.Printf("memoryd hook: %v", err)
-		}
-		return
-	}
-
+// run — серверный режим (MCP поверх stdio), вызывается корневой командой без
+// подкоманды (в т.ч. `memoryd -config <path>`, как зовёт уже установленный
+// .mcp.json — обратная совместимость, задача 11.1). args — то, что осталось
+// после имени команды (пусто для голого `memoryd`); разбираются собственным
+// FlagSet, а не глобальным flag.CommandLine — тот же приём, что у остальных
+// подкоманд (cli.go и др.), нужен, чтобы cobra могла передавать args явно, не
+// трогая os.Args.
+func run(args []string) error {
 	// Транспорт MCP использует stdout для протокола — всё логирование только в
 	// stderr, иначе лог-строки повредят JSON-RPC поток.
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags)
 
-	if err := run(); err != nil {
-		log.Fatalf("memoryd: %v", err)
-	}
-}
-
-func run() error {
-	configPath := flag.String("config", "", "путь к TOML-конфигу (опционально)")
-	dbPath := flag.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
-	flag.Parse()
+	fs := flag.NewFlagSet("memoryd", flag.ExitOnError)
+	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
+	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
+	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
 
 	// .env рядом с конфигом (или в текущем каталоге, если -config не задан) —
 	// раскладывается `memoryd init` (задача 5.4). Загрузить ДО newReasoner,

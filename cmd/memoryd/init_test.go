@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -16,10 +14,10 @@ import (
 // пишет все артефакты: .mcp.json — валидный JSON с сервером agentmemory,
 // SKILL.md — скил под claude, agentmemory.toml — конфиг, из которого
 // config.Load восстанавливает нужный scope.project и провайдеров (round-trip
-// сгенерированного конфига).
+// сгенерированного конфига). Дефолт без явных провайдеров — ollama/deepseek.
 func TestDoInit_WritesAllFiles(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 
 	if err := doInit(initConfig{Project: "myproj", Dir: dir}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
@@ -47,6 +45,9 @@ func TestDoInit_WritesAllFiles(t *testing.T) {
 	}
 	if srv.Env["DEEPSEEK_API_KEY"] != "${DEEPSEEK_API_KEY:-}" {
 		t.Errorf("mcpServers.agentmemory.env.DEEPSEEK_API_KEY = %q", srv.Env["DEEPSEEK_API_KEY"])
+	}
+	if _, ok := srv.Env["OPENAI_API_KEY"]; ok {
+		t.Errorf("mcpServers.agentmemory.env содержит OPENAI_API_KEY при embedder=ollama: %v", srv.Env)
 	}
 
 	tomlPath := filepath.Join(dir, "agentmemory.toml")
@@ -99,9 +100,106 @@ func TestDoInit_WritesAllFiles(t *testing.T) {
 		t.Errorf("вывод не упоминает имя проекта: %s", out.String())
 	}
 
-	// Без -deepseek-key .env и .gitignore не создаются.
+	// Без ключей .env и .gitignore не создаются.
 	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
-		t.Errorf(".env создан без ключа DeepSeek: err=%v", err)
+		t.Errorf(".env создан без ключей: err=%v", err)
+	}
+}
+
+// TestDoInit_ProviderCombinations прогоняет все комбинации embedder ×
+// reasoner (ollama/openai/noop × deepseek/noop, задача 11.1) и проверяет, что
+// agentmemory.toml содержит нужные блоки, .env — только выбранные ключи,
+// .mcp.json — только выбранные плейсхолдеры env.
+func TestDoInit_ProviderCombinations(t *testing.T) {
+	tests := []struct {
+		name             string
+		embedderProvider string
+		reasonerProvider string
+		openaiKey        string
+		deepseekKey      string
+		wantEnvKeys      []string
+	}{
+		{name: "ollama+deepseek с ключом", embedderProvider: "ollama", reasonerProvider: "deepseek", deepseekKey: "sk-ds", wantEnvKeys: []string{"DEEPSEEK_API_KEY"}},
+		{name: "ollama+noop", embedderProvider: "ollama", reasonerProvider: "noop"},
+		{name: "openai+deepseek с обоими ключами", embedderProvider: "openai", reasonerProvider: "deepseek", openaiKey: "sk-oa", deepseekKey: "sk-ds", wantEnvKeys: []string{"DEEPSEEK_API_KEY", "OPENAI_API_KEY"}},
+		{name: "openai+noop с ключом openai", embedderProvider: "openai", reasonerProvider: "noop", openaiKey: "sk-oa", wantEnvKeys: []string{"OPENAI_API_KEY"}},
+		{name: "noop+deepseek", embedderProvider: "noop", reasonerProvider: "deepseek", deepseekKey: "sk-ds", wantEnvKeys: []string{"DEEPSEEK_API_KEY"}},
+		{name: "noop+noop без ключей", embedderProvider: "noop", reasonerProvider: "noop"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var out strings.Builder
+			cfg := initConfig{
+				Project:          "myproj",
+				Dir:              dir,
+				EmbedderProvider: tt.embedderProvider,
+				ReasonerProvider: tt.reasonerProvider,
+				OpenAIKey:        tt.openaiKey,
+				DeepseekKey:      tt.deepseekKey,
+			}
+			if tt.embedderProvider == "openai" {
+				cfg.EmbedderModel = "text-embedding-3-small"
+			}
+			if err := doInit(cfg, &out); err != nil {
+				t.Fatalf("doInit: %v", err)
+			}
+
+			loaded, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
+			if err != nil {
+				t.Fatalf("config.Load: %v", err)
+			}
+			if loaded.Embedder.Provider != tt.embedderProvider {
+				t.Errorf("Embedder.Provider = %q, хочу %q", loaded.Embedder.Provider, tt.embedderProvider)
+			}
+			if loaded.Reasoner.Provider != tt.reasonerProvider {
+				t.Errorf("Reasoner.Provider = %q, хочу %q", loaded.Reasoner.Provider, tt.reasonerProvider)
+			}
+
+			envPath := filepath.Join(dir, ".env")
+			envRaw, err := os.ReadFile(envPath)
+			if len(tt.wantEnvKeys) == 0 {
+				if err == nil {
+					t.Errorf(".env создан без выбранных ключей: %s", envRaw)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("чтение .env: %v", err)
+				}
+				envContent := string(envRaw)
+				for _, k := range tt.wantEnvKeys {
+					if !strings.Contains(envContent, k+"=") {
+						t.Errorf(".env не содержит %s: %s", k, envContent)
+					}
+				}
+				wantLines := len(tt.wantEnvKeys)
+				gotLines := len(strings.Fields(strings.TrimSpace(envContent)))
+				if gotLines != wantLines {
+					t.Errorf(".env содержит %d строк(и), хочу %d: %q", gotLines, wantLines, envContent)
+				}
+			}
+
+			mcpRaw, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
+			if err != nil {
+				t.Fatalf("чтение .mcp.json: %v", err)
+			}
+			var mcpCfg mcpConfigFile
+			if err := json.Unmarshal(mcpRaw, &mcpCfg); err != nil {
+				t.Fatalf(".mcp.json невалиден: %v", err)
+			}
+			env := mcpCfg.MCPServers["agentmemory"].Env
+			_, hasDeepseek := env["DEEPSEEK_API_KEY"]
+			_, hasOpenAI := env["OPENAI_API_KEY"]
+			wantDeepseek := tt.reasonerProvider == "deepseek"
+			wantOpenAI := tt.embedderProvider == "openai"
+			if hasDeepseek != wantDeepseek {
+				t.Errorf(".mcp.json env DEEPSEEK_API_KEY присутствие = %v, хочу %v (reasoner=%s)", hasDeepseek, wantDeepseek, tt.reasonerProvider)
+			}
+			if hasOpenAI != wantOpenAI {
+				t.Errorf(".mcp.json env OPENAI_API_KEY присутствие = %v, хочу %v (embedder=%s)", hasOpenAI, wantOpenAI, tt.embedderProvider)
+			}
+		})
 	}
 }
 
@@ -114,7 +212,7 @@ func TestDoInit_DefaultProjectNameFromDir(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	var out bytes.Buffer
+	var out strings.Builder
 	if err := doInit(initConfig{Dir: dir}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
@@ -126,7 +224,7 @@ func TestDoInit_DefaultProjectNameFromDir(t *testing.T) {
 		t.Errorf("Scope.Project = %q, хочу %q (из имени каталога)", cfg.Scope.Project, "cool-app")
 	}
 
-	var out2 bytes.Buffer
+	var out2 strings.Builder
 	if err := doInit(initConfig{Project: "explicit-name", Dir: dir, Force: true}, &out2); err != nil {
 		t.Fatalf("doInit c Force: %v", err)
 	}
@@ -150,7 +248,7 @@ func TestDoInit_ExistingFileSkippedWithoutForce(t *testing.T) {
 		t.Fatalf("запись стартового файла: %v", err)
 	}
 
-	var out bytes.Buffer
+	var out strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
@@ -165,7 +263,7 @@ func TestDoInit_ExistingFileSkippedWithoutForce(t *testing.T) {
 		t.Errorf("вывод не сообщает о пропуске: %s", out.String())
 	}
 
-	var out2 bytes.Buffer
+	var out2 strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Force: true}, &out2); err != nil {
 		t.Fatalf("doInit с Force: %v", err)
 	}
@@ -185,7 +283,7 @@ func TestDoInit_ExistingFileSkippedWithoutForce(t *testing.T) {
 // даёт внятную ошибку со списком поддерживаемых.
 func TestDoInit_UnknownAgent(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 	err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "bogus"}, &out)
 	if err == nil {
 		t.Fatalf("doInit с неизвестным Agent = nil error, хочу ошибку")
@@ -201,7 +299,7 @@ func TestDoInit_UnknownAgent(t *testing.T) {
 // SKILL.md по opencode-specific пути .opencode/skills/memoryd/SKILL.md.
 func TestDoInit_OpencodeTarget(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode"}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
@@ -276,9 +374,9 @@ func TestDoInit_OpencodeTarget(t *testing.T) {
 // дополнение .gitignore строкой .env без дублей при повторном запуске.
 func TestDoInit_WritesEnvAndGitignore(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, DeepseekKey: "sk-test-123"}, &out); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, ReasonerProvider: "deepseek", DeepseekKey: "sk-test-123"}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
 
@@ -308,8 +406,8 @@ func TestDoInit_WritesEnvAndGitignore(t *testing.T) {
 	}
 
 	// Повторный запуск с Force не дублирует строку .env в .gitignore.
-	var out2 bytes.Buffer
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, DeepseekKey: "sk-test-456", Force: true}, &out2); err != nil {
+	var out2 strings.Builder
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, ReasonerProvider: "deepseek", DeepseekKey: "sk-test-456", Force: true}, &out2); err != nil {
 		t.Fatalf("doInit повторно: %v", err)
 	}
 	gitignoreContent2, err := os.ReadFile(gitignorePath)
@@ -331,7 +429,7 @@ func TestEnsureGitignoreEntry_AppendsToExisting(t *testing.T) {
 		t.Fatalf("запись стартового .gitignore: %v", err)
 	}
 
-	var out bytes.Buffer
+	var out strings.Builder
 	if err := ensureGitignoreEntry(path, ".env", &out); err != nil {
 		t.Fatalf("ensureGitignoreEntry: %v", err)
 	}
@@ -358,85 +456,47 @@ func TestEnsureGitignoreEntry_AppendsToExisting(t *testing.T) {
 	}
 }
 
-// TestPromptInit_FlagsSkipPrompts проверяет, что уже заполненные (флагом)
-// поля initConfig не переспрашиваются: promptInit не должен читать за них из
-// stdin. Пустой Reader (0 байт) означает немедленный EOF при первом Scan —
-// если promptInit попытается спросить про что-то незаполненное, вернётся его
-// дефолт, а не зависание.
-func TestPromptInit_FlagsSkipPrompts(t *testing.T) {
-	in := strings.NewReader("") // сразу EOF на любой Scan
-	var out bytes.Buffer
+// TestWriteEnvFile_MultipleKeys проверяет, что writeEnvFile пишет несколько
+// ключей отсортированно и с правами 0600 (задача 11.1: обобщение на набор
+// ключей выбранных провайдеров).
+func TestWriteEnvFile_MultipleKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	var out strings.Builder
 
-	cfg := initConfig{
-		Agent:         "claude",
-		Project:       "preset-project",
-		OllamaBaseURL: "http://preset:1234",
-		OllamaModel:   "preset-model",
-		StorePath:     "/preset/path.db",
-		DeepseekKey:   "preset-key",
-		Hooks:         "none",
-	}
-	got := promptInit(in, &out, cfg)
-	if got != cfg {
-		t.Errorf("promptInit изменил уже заполненные поля: %+v, хочу %+v", got, cfg)
-	}
-	if out.Len() != 0 {
-		t.Errorf("promptInit печатал промпты для уже заполненных полей: %s", out.String())
-	}
-}
-
-// TestPromptInit_EmptyInputUsesDefaults проверяет, что пустые строки ввода
-// (одни Enter) дают дефолтные значения для незаполненных полей.
-func TestPromptInit_EmptyInputUsesDefaults(t *testing.T) {
-	// agent, project, ollama-url, ollama-model, store, deepseek-key — 6 полей,
-	// 6 пустых строк ввода (Enter без значения на каждый вопрос).
-	in := strings.NewReader("\n\n\n\n\n\n")
-	var out bytes.Buffer
-
-	cfg := promptInit(in, &out, initConfig{Dir: "."})
-	if cfg.Agent != defaultAgentKey {
-		t.Errorf("Agent = %q, хочу %q", cfg.Agent, defaultAgentKey)
-	}
-	if cfg.OllamaBaseURL != defaultOllamaBaseURL {
-		t.Errorf("OllamaBaseURL = %q, хочу %q", cfg.OllamaBaseURL, defaultOllamaBaseURL)
-	}
-	if cfg.OllamaModel != defaultOllamaModel {
-		t.Errorf("OllamaModel = %q, хочу %q", cfg.OllamaModel, defaultOllamaModel)
-	}
-	if cfg.StorePath != defaultStorePath {
-		t.Errorf("StorePath = %q, хочу %q", cfg.StorePath, defaultStorePath)
-	}
-	if cfg.DeepseekKey != "" {
-		t.Errorf("DeepseekKey = %q, хочу пусто (Enter пропускает)", cfg.DeepseekKey)
-	}
-}
-
-// TestPromptChoice проверяет выбор опции по номеру и дефолт при пустом вводе.
-func TestPromptChoice(t *testing.T) {
-	options := []string{"claude", "opencode"}
-
-	var out bytes.Buffer
-	sc := bufio.NewScanner(strings.NewReader("2\n"))
-	got := promptChoice(sc, &out, "агентское приложение", options, "claude")
-	if got != "opencode" {
-		t.Errorf("promptChoice(%q) = %q, хочу opencode", "2", got)
+	err := writeEnvFile(path, map[string]string{
+		"OPENAI_API_KEY":   "sk-oa",
+		"DEEPSEEK_API_KEY": "sk-ds",
+	}, false, &out)
+	if err != nil {
+		t.Fatalf("writeEnvFile: %v", err)
 	}
 
-	var out2 bytes.Buffer
-	sc2 := bufio.NewScanner(strings.NewReader("\n"))
-	got2 := promptChoice(sc2, &out2, "агентское приложение", options, "claude")
-	if got2 != "claude" {
-		t.Errorf("promptChoice(пустой ввод) = %q, хочу дефолт claude", got2)
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf(".env права = %o, хочу 0600", perm)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("чтение: %v", err)
+	}
+	want := "DEEPSEEK_API_KEY=sk-ds\nOPENAI_API_KEY=sk-oa\n"
+	if string(content) != want {
+		t.Errorf(".env содержимое = %q, хочу %q (отсортировано по ключу)", content, want)
 	}
 }
 
 // TestRunInit_NonInteractive_DoesNotBlock проверяет, что runInit не
 // блокируется на чтении stdin в тестовом окружении (go test не подключает
 // stdin к терминалу — isInteractiveStdin() должен вернуть false), беря
-// значения из флагов/дефолтов.
+// значения из флагов/дефолтов, и без сетевых запросов.
 func TestRunInit_NonInteractive_DoesNotBlock(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 	err := runInit([]string{"-project", "myproj", "-dir", dir}, &out)
 	if err != nil {
 		t.Fatalf("runInit: %v", err)
@@ -446,13 +506,109 @@ func TestRunInit_NonInteractive_DoesNotBlock(t *testing.T) {
 	}
 }
 
+// TestRunInit_NoInputFlag_ProviderFlags проверяет, что -no-input вместе с
+// новыми флагами провайдеров (-embedder-provider/-embedder-model/-embedder-url/
+// -reasoner-provider/-openai-key) даёт детерминированный результат без сети.
+func TestRunInit_NoInputFlag_ProviderFlags(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := runInit([]string{
+		"-no-input",
+		"-project", "myproj",
+		"-dir", dir,
+		"-embedder-provider", "openai",
+		"-embedder-model", "text-embedding-3-small",
+		"-embedder-url", "https://openrouter.ai/api",
+		"-reasoner-provider", "noop",
+		"-openai-key", "sk-oa",
+	}, &out)
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Embedder.Provider != "openai" {
+		t.Errorf("Embedder.Provider = %q, хочу openai", cfg.Embedder.Provider)
+	}
+	if cfg.Embedder.BaseURL != "https://openrouter.ai/api" {
+		t.Errorf("Embedder.BaseURL = %q", cfg.Embedder.BaseURL)
+	}
+	if cfg.Embedder.Model != "text-embedding-3-small" {
+		t.Errorf("Embedder.Model = %q", cfg.Embedder.Model)
+	}
+	if cfg.Reasoner.Provider != "noop" {
+		t.Errorf("Reasoner.Provider = %q, хочу noop", cfg.Reasoner.Provider)
+	}
+
+	envRaw, err := os.ReadFile(filepath.Join(dir, ".env"))
+	if err != nil {
+		t.Fatalf("чтение .env: %v", err)
+	}
+	if strings.TrimSpace(string(envRaw)) != "OPENAI_API_KEY=sk-oa" {
+		t.Errorf(".env = %q, хочу только OPENAI_API_KEY (reasoner=noop не пишет DEEPSEEK_API_KEY)", envRaw)
+	}
+}
+
+// TestRunInit_OllamaURLModelAliases проверяет, что -ollama-url/-ollama-model
+// работают как алиасы -embedder-url/-embedder-model (обратная совместимость
+// с флагами до задачи 11.1).
+func TestRunInit_OllamaURLModelAliases(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := runInit([]string{
+		"-no-input",
+		"-project", "myproj",
+		"-dir", dir,
+		"-ollama-url", "http://custom-ollama:11434",
+		"-ollama-model", "custom-model",
+	}, &out)
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Embedder.Provider != "ollama" {
+		t.Errorf("Embedder.Provider = %q, хочу ollama (дефолт)", cfg.Embedder.Provider)
+	}
+	if cfg.Embedder.BaseURL != "http://custom-ollama:11434" {
+		t.Errorf("Embedder.BaseURL = %q, хочу алиас из -ollama-url", cfg.Embedder.BaseURL)
+	}
+	if cfg.Embedder.Model != "custom-model" {
+		t.Errorf("Embedder.Model = %q, хочу алиас из -ollama-model", cfg.Embedder.Model)
+	}
+}
+
+// TestApplyInitDefaults_ClearsUnselectedProviderKeys проверяет защитную
+// нормализацию: ключ провайдера, не выбранного пользователем (рассинхрон
+// флагов), обнуляется — .env не должен получить лишний ключ.
+func TestApplyInitDefaults_ClearsUnselectedProviderKeys(t *testing.T) {
+	cfg := applyInitDefaults(initConfig{
+		EmbedderProvider: "noop",
+		ReasonerProvider: "noop",
+		OpenAIKey:        "sk-oa", // embedder=noop — ключ не нужен
+		DeepseekKey:      "sk-ds", // reasoner=noop — ключ не нужен
+	})
+	if cfg.OpenAIKey != "" {
+		t.Errorf("OpenAIKey = %q, хочу обнулён (embedder=noop)", cfg.OpenAIKey)
+	}
+	if cfg.DeepseekKey != "" {
+		t.Errorf("DeepseekKey = %q, хочу обнулён (reasoner=noop)", cfg.DeepseekKey)
+	}
+}
+
 // TestDoInit_HooksSessionStartWritesSettingsJSON проверяет, что при
 // Hooks="session-start" doInit пишет секцию hooks в .claude/settings.json с
 // командой memoryd hook -event session-start (задача 7.2), и что повторный
 // init не дублирует запись (идемпотентность).
 func TestDoInit_HooksSessionStartWritesSettingsJSON(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksSessionStart}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
@@ -498,7 +654,7 @@ func TestDoInit_HooksSessionStartWritesSettingsJSON(t *testing.T) {
 	}
 
 	// Повторный init (идемпотентность) не должен задублировать запись.
-	var out2 bytes.Buffer
+	var out2 strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksSessionStart, Force: true}, &out2); err != nil {
 		t.Fatalf("doInit повторно: %v", err)
 	}
@@ -521,7 +677,7 @@ func TestDoInit_HooksSessionStartWritesSettingsJSON(t *testing.T) {
 // Hooks="session-start+prompt-submit" пишет обе секции события.
 func TestDoInit_HooksBothWritesBothEvents(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksBoth}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
@@ -548,7 +704,7 @@ func TestDoInit_HooksBothWritesBothEvents(t *testing.T) {
 // пустое значение по умолчанию) не создают .claude/settings.json вовсе.
 func TestDoInit_HooksNoneDoesNotTouchSettingsJSON(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksNone}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
@@ -583,7 +739,7 @@ func TestDoInit_HooksMergePreservesExistingSettings(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	var out bytes.Buffer
+	var out strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksSessionStart}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
@@ -658,7 +814,7 @@ func TestDoInit_HooksMalformedExistingSettingsErrorsWithoutWrite(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	var out bytes.Buffer
+	var out strings.Builder
 	err := doInit(initConfig{Project: "myproj", Dir: dir, Hooks: hooksSessionStart}, &out)
 	if err == nil {
 		t.Fatalf("doInit = nil error, хочу ошибку разбора settings.json")
@@ -678,7 +834,7 @@ func TestDoInit_HooksMalformedExistingSettingsErrorsWithoutWrite(t *testing.T) {
 // этом в выводе (задача 7.2).
 func TestDoInit_HooksOpencodeNotesUnsupported(t *testing.T) {
 	dir := t.TempDir()
-	var out bytes.Buffer
+	var out strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode", Hooks: hooksSessionStart}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
@@ -708,5 +864,151 @@ func TestResolveProjectName_InvalidName(t *testing.T) {
 	// попал бы в basic-строку сгенерированного agentmemory.toml и сломал его.
 	if _, err := resolveProjectName("a\nb", "."); err == nil {
 		t.Errorf("resolveProjectName(%q) = nil error, хочу ошибку на управляющий символ", "a\nb")
+	}
+}
+
+// TestDoInit_UnknownProviderIsError — регрессия БАГ 1 цикла исправлений:
+// опечатка в -embedder-provider/-reasoner-provider раньше молча уходила в
+// default-ветку switch renderEmbedderTomlBlock/renderReasonerTomlBlock (напр.
+// "ollama"/"deepseek"), которая расходилась с default-веткой
+// applyInitDefaults — TOML заявлял провайдера, для которого фактически не
+// было ни base_url/model, ни .env-ключа. Теперь неизвестное значение — ошибка
+// doInit (exit 1 у runInit/runMain), а не тихий битый конфиг.
+func TestDoInit_UnknownProviderIsError(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := doInit(initConfig{Project: "myproj", Dir: dir, EmbedderProvider: "olama"}, &out)
+	if err == nil {
+		t.Fatalf("doInit с опечаткой в embedder-provider = nil error, хочу ошибку")
+	}
+	if !strings.Contains(err.Error(), "olama") {
+		t.Errorf("ошибка не упоминает переданное значение: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "agentmemory.toml")); !os.IsNotExist(statErr) {
+		t.Errorf("agentmemory.toml создан несмотря на ошибку валидации: err=%v", statErr)
+	}
+
+	dir2 := t.TempDir()
+	var out2 strings.Builder
+	err2 := doInit(initConfig{Project: "myproj", Dir: dir2, ReasonerProvider: "deepsek"}, &out2)
+	if err2 == nil {
+		t.Fatalf("doInit с опечаткой в reasoner-provider = nil error, хочу ошибку")
+	}
+	if !strings.Contains(err2.Error(), "deepsek") {
+		t.Errorf("ошибка не упоминает переданное значение: %v", err2)
+	}
+}
+
+// TestRunInit_UnknownProviderFlag_ExitsWithError проверяет тот же случай
+// через полный флаговый путь runInit (-no-input), как реально вызывает
+// пользователь: опечатка в -embedder-provider/-reasoner-provider — ошибка, а
+// не тихий дефолт.
+func TestRunInit_UnknownProviderFlag_ExitsWithError(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := runInit([]string{"-no-input", "-project", "myproj", "-dir", dir, "-embedder-provider", "bogus"}, &out)
+	if err == nil {
+		t.Fatalf("runInit с -embedder-provider bogus = nil error, хочу ошибку")
+	}
+
+	dir2 := t.TempDir()
+	var out2 strings.Builder
+	err2 := runInit([]string{"-no-input", "-project", "myproj", "-dir", dir2, "-reasoner-provider", "bogus"}, &out2)
+	if err2 == nil {
+		t.Fatalf("runInit с -reasoner-provider bogus = nil error, хочу ошибку")
+	}
+}
+
+// TestRunInit_OpenAIWithoutModel_DefaultsToNonEmptyModel — регрессия БАГ 1
+// цикла исправлений: без -embedder-model в -no-input applyInitDefaults
+// дефолтил только base_url для embedder-provider=openai, model оставался ""
+// -> agentmemory.toml с неюзабельной пустой model. Теперь дефолт —
+// defaultOpenAIModel (text-embedding-3-small, как в config.example.toml).
+func TestRunInit_OpenAIWithoutModel_DefaultsToNonEmptyModel(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := runInit([]string{
+		"-no-input",
+		"-project", "myproj",
+		"-dir", dir,
+		"-embedder-provider", "openai",
+		"-openai-key", "sk-x",
+	}, &out)
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Embedder.Model == "" {
+		t.Errorf("Embedder.Model пуст — хочу непустой дефолт (defaultOpenAIModel)")
+	}
+	if cfg.Embedder.Model != defaultOpenAIModel {
+		t.Errorf("Embedder.Model = %q, хочу defaultOpenAIModel = %q", cfg.Embedder.Model, defaultOpenAIModel)
+	}
+}
+
+// TestProviderRegistries_OptionsAndEnvKeysMatchExpected — тест реестра
+// провайдеров (консолидация БАГ 1): список опций (в порядке select-промпта,
+// первый — дефолт) и env-ключи деривируются из embedderProviders/
+// reasonerProviders единообразно — регрессия на случай, если кто-то добавит
+// провайдера в один реестр и забудет про другой потребляющий его код.
+func TestProviderRegistries_OptionsAndEnvKeysMatchExpected(t *testing.T) {
+	wantEmbedderOptions := []string{"ollama", "openai", "noop"}
+	if strings.Join(embedderProviderOptions, ",") != strings.Join(wantEmbedderOptions, ",") {
+		t.Errorf("embedderProviderOptions = %v, хочу %v", embedderProviderOptions, wantEmbedderOptions)
+	}
+	wantReasonerOptions := []string{"deepseek", "noop"}
+	if strings.Join(reasonerProviderOptions, ",") != strings.Join(wantReasonerOptions, ",") {
+		t.Errorf("reasonerProviderOptions = %v, хочу %v", reasonerProviderOptions, wantReasonerOptions)
+	}
+
+	wantEnvKeys := map[string]string{ // provider key -> env var (пусто, если ключ не нужен)
+		"ollama": "",
+		"openai": openaiAPIKeyEnv,
+		"noop":   "",
+	}
+	for key, wantEnv := range wantEnvKeys {
+		p, ok := providerByKey(embedderProviders, key)
+		if !ok {
+			t.Fatalf("embedderProviders не содержит %q", key)
+		}
+		if p.envKey != wantEnv {
+			t.Errorf("embedderProviders[%q].envKey = %q, хочу %q", key, p.envKey, wantEnv)
+		}
+	}
+
+	wantReasonerEnvKeys := map[string]string{
+		"deepseek": deepseekAPIKeyEnv,
+		"noop":     "",
+	}
+	for key, wantEnv := range wantReasonerEnvKeys {
+		p, ok := providerByKey(reasonerProviders, key)
+		if !ok {
+			t.Fatalf("reasonerProviders не содержит %q", key)
+		}
+		if p.envKey != wantEnv {
+			t.Errorf("reasonerProviders[%q].envKey = %q, хочу %q", key, p.envKey, wantEnv)
+		}
+	}
+
+	// selectedProviders — общий источник для .env/.mcp.json/opencode.json:
+	// проверяем, что для типичной комбинации возвращает обе выбранные записи в
+	// порядке embedder, reasoner.
+	sel := selectedProviders(initConfig{EmbedderProvider: "openai", ReasonerProvider: "deepseek"})
+	if len(sel) != 2 || sel[0].key != "openai" || sel[1].key != "deepseek" {
+		t.Errorf("selectedProviders(openai, deepseek) = %+v, хочу [openai, deepseek] в этом порядке", sel)
+	}
+	if sel[0].envKey != openaiAPIKeyEnv || sel[1].envKey != deepseekAPIKeyEnv {
+		t.Errorf("selectedProviders(openai, deepseek) envKey = [%q, %q], хочу [%q, %q]", sel[0].envKey, sel[1].envKey, openaiAPIKeyEnv, deepseekAPIKeyEnv)
+	}
+
+	// noop-провайдеры не требуют ключа вовсе — selectedProviders их всё равно
+	// находит (для полноты), но envKey у обоих пуст.
+	selNoop := selectedProviders(initConfig{EmbedderProvider: "noop", ReasonerProvider: "noop"})
+	if len(selNoop) != 2 || selNoop[0].envKey != "" || selNoop[1].envKey != "" {
+		t.Errorf("selectedProviders(noop, noop) = %+v, хочу обе записи с пустым envKey", selNoop)
 	}
 }
