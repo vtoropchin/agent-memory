@@ -578,6 +578,34 @@ Decay, dedup-sweep, планировщик джобов.
 мягкое удаление записи (`DELETE /api/memories/{id}`, тумстоун через доменный `Writer.Forget`,
 та же семантика, что у `memory_forget`).
 
+**Этап 7 — Ambient memory (хуки харнесса).**
+One-shot CLI-подкоманды `memoryd recall`/`memoryd save` (поверх store+recall/write, без
+демона) — фундамент для хуков. `memoryd hook -event session-start|prompt-submit` — тонкая
+обёртка над recall-путём с железным инвариантом «любая ошибка → пустой stdout, exit 0»
+(хук не ломает сессию); `memoryd init` генерирует секцию `hooks` в `.claude/settings.json`
+(merge, идемпотентно). Recall становится ambient — харнесс сам подмешивает бриф в контекст.
+
+**Этап 8 — Качество recall.**
+Explain-трасса ранжирования (`Query.Explain` → источники + разложение скора под записью
+брифа, аддитивно). Фильтры recall по тегам (OR) и датам через общий `metaFilters` (оба
+источника). Русская морфология в FTS5 (стемминг-колонка `content_stemmed`, snowball; введён
+механизм миграций `PRAGMA user_version`). OpenAI-совместимый Embedder (`/v1/embeddings`,
+любой совместимый сервер) за тем же интерфейсом.
+
+**Этап 9 — Ops и модель данных.**
+`memoryd doctor` — read-only диагностика реального режима памяти (7 секций, exit-код по
+здоровью). `memoryd export`/`import` — бэкап/перенос в переносимый JSONL с сохранением
+идентичности (round-trip байт-в-байт; векторы досчитает reindex). Типизированные связи в
+MCP (`rel` в `links`, back-compat строка|объект) + `links` в `memory_update`. TTL
+(`expires_at`): фильтр протухших в recall + джоб `ExpireSweep` (детерминированное забывание
+по сроку, дополняет decay).
+
+**Этап 10 — Web v2.**
+Гибридный (семантический) поиск в морде (`/api/search?mode=semantic`, экстракция
+`Recaller.Candidates`; эмбеддинг поискового запроса допустим — суженный оффлайн-инвариант,
+деградация до FTS). Курирование метаданных из карточки (`PATCH /api/memories/{id}` —
+importance/tags через доменный `Writer.Update`; content правит только агент через MCP).
+
 ---
 
 ## 15. Принципы
