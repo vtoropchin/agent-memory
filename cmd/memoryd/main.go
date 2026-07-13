@@ -96,6 +96,21 @@ func main() {
 		return
 	}
 
+	// `memoryd doctor` — read-only диагностика режима работы памяти (задача
+	// 9.1), диспетчеризуется симметрично recall/save, до разбора серверных
+	// флагов. Код выхода задаётся самим отчётом (0 здоров/деградирован, 1
+	// сломан), а не универсальным os.Exit(1) остальных подкоманд — поэтому
+	// runDoctor возвращает exitCode отдельно от err (err — только ошибки,
+	// из-за которых отчёт вообще нельзя построить: битые флаги/конфиг).
+	if len(os.Args) >= 2 && os.Args[1] == "doctor" {
+		code, err := runDoctor(os.Args[2:], os.Stdout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "memoryd doctor: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(code)
+	}
+
 	// `memoryd hook` — обёртка над recall-путём для хуков Claude Code
 	// (SessionStart/UserPromptSubmit, задача 7.2). В отличие от recall/save,
 	// ошибка НЕ приводит к os.Exit(1) — только к логу в stderr: хук обязан
@@ -293,6 +308,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  memoryd recall [флаги] \"<запрос>\"\tразовый поиск по памяти (Markdown-бриф в stdout)")
 	fmt.Fprintln(tw, "  memoryd save [флаги]\tразовое сохранение факта в память")
 	fmt.Fprintln(tw, "  memoryd hook -event <name> [флаги]\tхук Claude Code (session-start|prompt-submit), JSON события на stdin")
+	fmt.Fprintln(tw, "  memoryd doctor [флаги]\tread-only диагностика: в каком режиме реально работает память")
 	tw.Flush()
 	fmt.Fprintln(w)
 
@@ -313,6 +329,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  recall\tодноразовый recall из shell/скрипта/хука агента (флаг -quiet — для хуков)")
 	fmt.Fprintln(tw, "  save\tодноразовый save из shell/скрипта; -content - читает факт из stdin")
 	fmt.Fprintln(tw, "  hook\tхук-режим для .claude/settings.json (см. `memoryd init`): любая ошибка → пустой stdout, exit 0")
+	fmt.Fprintln(tw, "  doctor\tдиагностика: конфиг/БД/записи/вектор/embedder/reasoner одной командой, ничего не пишет")
 	tw.Flush()
-	fmt.Fprintln(w, "  memoryd init -h, memoryd web -h, memoryd recall -h, memoryd save -h, memoryd hook -h — подробности по флагам каждой.")
+	fmt.Fprintln(w, "  memoryd init -h, memoryd web -h, memoryd recall -h, memoryd save -h, memoryd hook -h, memoryd doctor -h — подробности по флагам каждой.")
 }

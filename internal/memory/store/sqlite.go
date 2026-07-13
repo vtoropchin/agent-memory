@@ -1206,6 +1206,25 @@ func (s *sqliteStore) Stats(ctx context.Context) (Stats, error) {
 	return stats, nil
 }
 
+// Health возвращает быстрый read-only снимок целостности БД (DESIGN.md §15,
+// задача 9.1 `memoryd doctor`): `PRAGMA quick_check` (быстрая проверка — в
+// отличие от `PRAGMA integrity_check`, не сканирует индексы полностью, не
+// заявлена дорогой операцией на больших БД) и текущий `PRAGMA journal_mode`.
+// Обе PRAGMA — чтение, ничего не пишут в файл БД.
+func (s *sqliteStore) Health(ctx context.Context) (HealthInfo, error) {
+	var quickCheck string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&quickCheck); err != nil {
+		return HealthInfo{}, fmt.Errorf("quick_check: %w", err)
+	}
+
+	var journalMode string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		return HealthInfo{}, fmt.Errorf("journal_mode: %w", err)
+	}
+
+	return HealthInfo{QuickCheck: quickCheck, JournalMode: journalMode}, nil
+}
+
 // EmbedMeta возвращает модель и размерность вектора, зафиксированные последним
 // reindex. Если reindex ещё не запускался, возвращает ("", 0, nil).
 func (s *sqliteStore) EmbedMeta(ctx context.Context) (string, int, error) {

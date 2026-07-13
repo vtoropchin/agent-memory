@@ -38,6 +38,16 @@ type VectorStatus struct {
 	Dim      int    // из embed_meta (0, если не создавался)
 }
 
+// HealthInfo — быстрый read-only снимок здоровья файла БД для `memoryd doctor`
+// (DESIGN.md §15, задача 9.1). QuickCheck — результат `PRAGMA quick_check`
+// (быстрая проверка целостности; "ok" означает отсутствие проблем, любая другая
+// строка — первая найденная проблема). JournalMode — текущий режим журнала
+// (`PRAGMA journal_mode`, ожидается "wal" — Open всегда запрашивает WAL через DSN).
+type HealthInfo struct {
+	QuickCheck  string
+	JournalMode string
+}
+
 // Store — единая точка доступа к хранилищу памяти: метаданные, лексический и
 // (в будущем) векторный индексы, граф связей.
 type Store interface {
@@ -96,4 +106,9 @@ type Store interface {
 	// у записи нет вектора, либо векторный индекс ещё не создавался — пустой
 	// список без ошибки (деградация, DESIGN.md §15).
 	SemanticNeighbors(ctx context.Context, id string, k int) ([]memory.Candidate, error)
+	// Health возвращает быстрый read-only снимок целостности файла БД
+	// (DESIGN.md §15, задача 9.1 `memoryd doctor`): quick_check и текущий
+	// journal_mode. Не изменяет данные, не выполняет полный integrity_check
+	// (дорогой на больших БД) — только быструю проверку.
+	Health(ctx context.Context) (HealthInfo, error)
 }

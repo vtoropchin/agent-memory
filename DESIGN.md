@@ -194,6 +194,13 @@ type Store interface {
     ResetVectorIndex(ctx context.Context, model string, dim int) error
     AllForReindex(ctx context.Context) ([]Memory, error)
     PutVector(ctx context.Context, id string, vec []float32) error
+    ListMissingVectors(ctx context.Context, limit int) ([]Memory, error) // очередь досчёта вектора
+    // read/ops-выборки (web-морда §6.x, doctor §9.1)
+    Stats(ctx context.Context) (Stats, error)
+    List(ctx context.Context, f BrowseFilter) (items []Memory, total int, err error)
+    VectorStatus(ctx context.Context, id string) (VectorStatus, error)
+    SemanticNeighbors(ctx context.Context, id string, k int) ([]Candidate, error)
+    Health(ctx context.Context) (HealthInfo, error) // PRAGMA quick_check + journal_mode
 }
 
 type Embedder interface {
