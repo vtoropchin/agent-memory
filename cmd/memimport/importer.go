@@ -146,8 +146,8 @@ func parseRecord(raw string) (record, error) {
 	}
 
 	return record{
-		Slug:       fm.Name,
-		Kind:       memory.KindSemantic,
+		Slug: fm.Name,
+		Kind: memory.KindSemantic,
 		// Нормализуем тем же правилом, что и write.Save/Update, чтобы -dry-run
 		// печатал ровно то importance, что реально сохранится (Save клампит ещё раз).
 		Importance: write.ClampImportance(fm.Importance),
@@ -312,7 +312,9 @@ func Run(ctx context.Context, w *write.Writer, dir, scope string, dryRun bool, o
 			continue // сама запись не сохранилась (см. warning выше) — линковать нечего
 		}
 
-		var targetIDs []string
+		// [[wiki-ссылки]] файловой памяти не несут типа связи — только факт связи,
+		// поэтому rel оставляем пустым (write.resolveLinks дефолтит его в related).
+		var targetIDs []write.LinkInput
 		for _, slug := range p.rec.LinkSlugs {
 			if slug == p.rec.Slug {
 				continue // ссылка на свой slug — self-петля, не считаем и не линкуем
@@ -322,7 +324,7 @@ func Run(ctx context.Context, w *write.Writer, dir, scope string, dryRun bool, o
 				sum.Warnings = append(sum.Warnings, fmt.Sprintf("%s: ссылка на неизвестную запись [[%s]] пропущена", p.rec.Slug, slug))
 				continue
 			}
-			targetIDs = append(targetIDs, id)
+			targetIDs = append(targetIDs, write.LinkInput{Dst: id})
 		}
 		if len(targetIDs) == 0 {
 			continue

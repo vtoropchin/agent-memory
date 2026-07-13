@@ -36,6 +36,16 @@ func (f *fakeEmbedder) Dim() int      { return len(f.Vec) }
 
 var _ embed.Embedder = (*fakeEmbedder)(nil)
 
+// linksTo строит []LinkInput с rel=related (пустой Rel) для перечисленных id —
+// краткая форма для тестов, которым не важен конкретный тип связи.
+func linksTo(ids ...string) []LinkInput {
+	out := make([]LinkInput, len(ids))
+	for i, id := range ids {
+		out[i] = LinkInput{Dst: id}
+	}
+	return out
+}
+
 func newTestWriter(t *testing.T) (*Writer, store.Store) {
 	t.Helper()
 	return newTestWriterWithEmbedder(t, embed.NewNoop())
@@ -297,7 +307,7 @@ func TestSaveLinks(t *testing.T) {
 
 	srcID, _, err := w.Save(ctx, SaveInput{
 		Kind: memory.KindSemantic, Scope: "s-links", Content: "запись-источник ссылается на цель",
-		Links: []string{targetID, "01ARZ3NDEKTSV4RRFFQ69G5FAV" /* несуществующий, но валидный ULID */},
+		Links: linksTo(targetID, "01ARZ3NDEKTSV4RRFFQ69G5FAV" /* несуществующий, но валидный ULID */),
 	})
 	if err != nil {
 		t.Fatalf("Save src: %v", err)
@@ -336,7 +346,7 @@ func TestReinforceKeepsExistingLinks(t *testing.T) {
 	srcID, _, err := w.Save(ctx, SaveInput{
 		Kind: memory.KindSemantic, Scope: "s-reinforce",
 		Content: "Проект использует Go 1.23 и SQLite через mattn/go-sqlite3",
-		Links:   []string{targetID},
+		Links:   linksTo(targetID),
 	})
 	if err != nil {
 		t.Fatalf("Save src: %v", err)
@@ -467,7 +477,7 @@ func TestWriterUpdateLinks(t *testing.T) {
 		t.Fatalf("Save src: %v", err)
 	}
 
-	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []string{targetA}}); err != nil {
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: linksTo(targetA)}); err != nil {
 		t.Fatalf("Update (первая ссылка): %v", err)
 	}
 	got, err := st.Get(ctx, srcID)
@@ -480,7 +490,7 @@ func TestWriterUpdateLinks(t *testing.T) {
 
 	// Второй Update с новой ссылкой + висячей должен ДОБАВИТЬ targetB, сохранив
 	// targetA, и молча пропустить несуществующий id.
-	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []string{targetB, "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}); err != nil {
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: linksTo(targetB, "01ARZ3NDEKTSV4RRFFQ69G5FAV")}); err != nil {
 		t.Fatalf("Update (вторая ссылка): %v", err)
 	}
 	got, err = st.Get(ctx, srcID)
@@ -493,6 +503,81 @@ func TestWriterUpdateLinks(t *testing.T) {
 	dsts := map[string]bool{got.Links[0].Dst: true, got.Links[1].Dst: true}
 	if !dsts[targetA] || !dsts[targetB] {
 		t.Errorf("Links = %+v, want содержать %q и %q", got.Links, targetA, targetB)
+	}
+}
+
+// TestSaveLinksWithRel — Rel из LinkInput доезжает до сохранённой записи как есть
+// (задача 9.3): типизированные связи, а не только rel=related по умолчанию.
+func TestSaveLinksWithRel(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	targetID, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-links-rel", Content: "запись-цель"})
+	if err != nil {
+		t.Fatalf("Save target: %v", err)
+	}
+
+	srcID, _, err := w.Save(ctx, SaveInput{
+		Kind: memory.KindSemantic, Scope: "s-links-rel", Content: "запись-источник, следствие цели",
+		Links: []LinkInput{{Dst: targetID, Rel: memory.RelCauses}},
+	})
+	if err != nil {
+		t.Fatalf("Save src: %v", err)
+	}
+
+	got, err := st.Get(ctx, srcID)
+	if err != nil {
+		t.Fatalf("Get src: %v", err)
+	}
+	if len(got.Links) != 1 || got.Links[0].Dst != targetID || got.Links[0].Rel != memory.RelCauses {
+		t.Errorf("Links = %+v, want ровно 1 ссылку на %q с rel=%q", got.Links, targetID, memory.RelCauses)
+	}
+}
+
+// TestUpdateLinksDedupByDstAndRel — mergeLinks дедуплицирует по паре (Dst, Rel), не
+// только по Dst: related и causes между одной и той же парой записей — два разных
+// ребра графа, оба должны сохраниться (задача 9.3, часть B).
+func TestUpdateLinksDedupByDstAndRel(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	targetID, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-links-dedup", Content: "запись-цель"})
+	if err != nil {
+		t.Fatalf("Save target: %v", err)
+	}
+	srcID, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s-links-dedup", Content: "запись-источник"})
+	if err != nil {
+		t.Fatalf("Save src: %v", err)
+	}
+
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []LinkInput{{Dst: targetID, Rel: memory.RelRelated}}}); err != nil {
+		t.Fatalf("Update (related): %v", err)
+	}
+	// То же самое ребро с rel=related повторно — не должно задублироваться.
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []LinkInput{{Dst: targetID, Rel: memory.RelRelated}}}); err != nil {
+		t.Fatalf("Update (related повторно): %v", err)
+	}
+	// Тот же Dst, но другой Rel — это ДРУГОЕ ребро, должно добавиться, а не слиться.
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []LinkInput{{Dst: targetID, Rel: memory.RelCauses}}}); err != nil {
+		t.Fatalf("Update (causes): %v", err)
+	}
+
+	got, err := st.Get(ctx, srcID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Links) != 2 {
+		t.Fatalf("Links = %+v, want ровно 2 ребра (related + causes на ту же цель)", got.Links)
+	}
+	rels := map[string]bool{}
+	for _, l := range got.Links {
+		if l.Dst != targetID {
+			t.Errorf("Links = %+v, все рёбра должны указывать на %q", got.Links, targetID)
+		}
+		rels[l.Rel] = true
+	}
+	if !rels[memory.RelRelated] || !rels[memory.RelCauses] {
+		t.Errorf("Links = %+v, want содержать оба rel: %q и %q", got.Links, memory.RelRelated, memory.RelCauses)
 	}
 }
 
@@ -512,7 +597,7 @@ func TestWriterUpdateSkipsSelfLink(t *testing.T) {
 		t.Fatalf("Save src: %v", err)
 	}
 
-	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: []string{srcID, other}}); err != nil {
+	if err := w.Update(ctx, UpdateInput{Id: srcID, Links: linksTo(srcID, other)}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	got, err := st.Get(ctx, srcID)

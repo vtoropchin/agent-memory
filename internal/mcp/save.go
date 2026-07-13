@@ -24,13 +24,18 @@ func (s *Server) handleSave(ctx context.Context, _ *sdkmcp.CallToolRequest, in s
 		scope = s.scope.SaveScope()
 	}
 
+	links, err := normalizeLinks(in.Links)
+	if err != nil {
+		return nil, nil, fmt.Errorf("memory_save: %w", err)
+	}
+
 	id, merged, err := s.writer.Save(ctx, write.SaveInput{
 		Kind:       memory.Kind(in.Kind),
 		Scope:      scope,
 		Content:    in.Content,
 		Importance: in.Importance,
 		Tags:       in.Tags,
-		Links:      in.Links,
+		Links:      links,
 		Source:     in.Source,
 	})
 	if err != nil {

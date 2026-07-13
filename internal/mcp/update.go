@@ -21,12 +21,18 @@ func (s *Server) handleUpdate(ctx context.Context, _ *sdkmcp.CallToolRequest, in
 		return nil, nil, fmt.Errorf("memory_update: id обязателен")
 	}
 
+	links, err := normalizeLinks(in.Links)
+	if err != nil {
+		return nil, nil, fmt.Errorf("memory_update: %w", err)
+	}
+
 	if err := s.writer.Update(ctx, write.UpdateInput{
 		Id:         id,
 		Content:    in.Content,
 		Summary:    in.Summary,
 		Importance: in.Importance,
 		Tags:       in.Tags,
+		Links:      links,
 	}); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, nil, fmt.Errorf("memory_update: запись %q не найдена", id)

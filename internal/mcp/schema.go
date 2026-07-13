@@ -1,14 +1,107 @@
 package mcp
 
 import (
+	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+
+	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/write"
 )
 
 // kindEnum — допустимые значения поля kind/kinds во входных схемах инструментов
 // (DESIGN.md §2: semantic | episodic | procedural).
 var kindEnum = []any{"semantic", "episodic", "procedural"}
+
+// linkRelValues — допустимые значения rel во входном links (DESIGN.md §4: типы
+// рёбер графа связей). Используются и для валидации (normalizeLinks), и для
+// текста ошибки/описания схемы — одно перечисление, не расходится.
+var linkRelValues = []string{memory.RelRelated, memory.RelSupersedes, memory.RelCauses, memory.RelPartOf}
+
+// linksDescription — общее описание поля links для memory_save/memory_update
+// (задача 9.3, закрывает тех-долг задачи 5.1: типизированные связи доступны из
+// обоих инструментов). Обратная совместимость обязательна — элемент массива либо
+// ULID-строка (id существующей записи, тип связи будет related), либо объект
+// {"id":"...", "rel":"..."} с явным типом связи.
+const linksDescription = "связи с уже существующими записями графа памяти. Элемент — либо строка-id (ULID), либо объект {\"id\":\"01J...\",\"rel\":\"causes\"}. Типы связи (rel): related — просто связано (по умолчанию, в т.ч. для строковой формы); supersedes — эта запись новая версия целевой (ТОЛЬКО ребро графа, не заменяет фактическое устаревание — для него используй memory_update+memory_forget); causes — эта запись следствие целевой; part_of — эта запись часть процедуры/темы целевой. Пример: [\"01J8Z...\", {\"id\":\"01J8Z...\",\"rel\":\"causes\"}]."
+
+// linkEntry — один элемент входного links (DESIGN.md §4, §7, §12; задача 9.3):
+// либо ULID-строка цели (back-compat, Rel остаётся пустым — дефолт в related
+// применяет write.resolveLinks, единственное место), либо объект
+// {"id":"...","rel":"..."}. UnmarshalJSON нормализует обе формы в единый
+// внутренний вид (Dst, Rel) до передачи в write; сама валидация значения Rel —
+// в normalizeLinks, не здесь (разбор формата и валидация значения — разные заботы).
+type linkEntry struct {
+	Dst string
+	Rel string
+}
+
+// UnmarshalJSON принимает элемент links либо как JSON-строку (id, back-compat),
+// либо как объект {"id":"...", "rel":"..."}.
+func (l *linkEntry) UnmarshalJSON(data []byte) error {
+	var id string
+	if err := json.Unmarshal(data, &id); err == nil {
+		l.Dst = id
+		l.Rel = ""
+		return nil
+	}
+	var obj struct {
+		ID  string `json:"id"`
+		Rel string `json:"rel"`
+	}
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("links: элемент должен быть строкой id либо объектом {\"id\":.., \"rel\":..}: %w", err)
+	}
+	l.Dst = obj.ID
+	l.Rel = obj.Rel
+	return nil
+}
+
+// normalizeLinks валидирует и переводит уже разобранные элементы links (обе формы
+// unifицированы linkEntry.UnmarshalJSON) в write.LinkInput — общая для
+// memory_save/memory_update точка валидации (DESIGN.md §12, задача 9.3). Непустой
+// Rel обязан входить в linkRelValues: неизвестное значение (опечатка) сразу
+// возвращает ошибку инструмента с перечнем допустимых, БЕЗ молчаливого фолбэка в
+// related (fail-fast). Пустой Rel (back-compat строковая форма или объект без
+// rel) пропускается как есть — дефолт в related делает write.resolveLinks.
+func normalizeLinks(entries []linkEntry) ([]write.LinkInput, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	out := make([]write.LinkInput, 0, len(entries))
+	for _, e := range entries {
+		if e.Rel != "" && !slices.Contains(linkRelValues, e.Rel) {
+			return nil, fmt.Errorf("links: неизвестный rel %q, допустимые значения: %s", e.Rel, strings.Join(linkRelValues, ", "))
+		}
+		out = append(out, write.LinkInput{Dst: e.Dst, Rel: e.Rel})
+	}
+	return out, nil
+}
+
+// linkItemSchema строит JSON-схему одного элемента links: oneOf строки
+// (back-compat) и объекта {"id":.., "rel":..} — типизированная форма (DESIGN.md
+// §4, §7, §12; задача 9.3). Rel сознательно без Enum в схеме — валидация значения
+// (с содержательной ошибкой, перечисляющей допустимые варианты) делается кодом в
+// normalizeLinks, а не JSON-схемой: там текст ошибки полностью под нашим
+// контролем и покрыт тестами, а не зависит от формата сообщений валидатора схемы.
+func linkItemSchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
+		OneOf: []*jsonschema.Schema{
+			{Type: "string", Description: "id (ULID) существующей записи — back-compat форма, тип связи будет related"},
+			{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"id":  {Type: "string", Description: "id (ULID) целевой записи"},
+					"rel": {Type: "string", Description: "тип связи: related | supersedes | causes | part_of (см. описание поля links)"},
+				},
+				Required: []string{"id"},
+			},
+		},
+	}
+}
 
 // mustSchema строит JSON-схему из Go-типа T через инференс jsonschema-go (описания
 // берутся из тегов `jsonschema`, обязательность — из отсутствия `omitempty`/`omitzero`,
@@ -25,18 +118,19 @@ func mustSchema[T any]() *jsonschema.Schema {
 
 // saveInput — вход инструмента memory_save (DESIGN.md §12).
 type saveInput struct {
-	Kind       string   `json:"kind" jsonschema:"тип памяти: semantic (факт/знание/предпочтение) | episodic (событие сессии) | procedural (рецепт/воркфлоу)"`
-	Content    string   `json:"content" jsonschema:"сам факт, атомарно — 1-3 предложения"`
-	Scope      string   `json:"scope" jsonschema:"пространство имён записи: user:*, project:<name> или agent:self"`
-	Importance int      `json:"importance,omitempty" jsonschema:"важность 1..5 (по умолчанию 3, если не указано)"`
-	Tags       []string `json:"tags,omitempty" jsonschema:"теги для группировки и поиска"`
-	Links      []string `json:"links,omitempty" jsonschema:"id (ULID) уже существующих записей, с которыми связан этот факт"`
-	Source     string   `json:"source,omitempty" jsonschema:"откуда пришёл факт: id сессии или иной источник"`
+	Kind       string      `json:"kind" jsonschema:"тип памяти: semantic (факт/знание/предпочтение) | episodic (событие сессии) | procedural (рецепт/воркфлоу)"`
+	Content    string      `json:"content" jsonschema:"сам факт, атомарно — 1-3 предложения"`
+	Scope      string      `json:"scope" jsonschema:"пространство имён записи: user:*, project:<name> или agent:self"`
+	Importance int         `json:"importance,omitempty" jsonschema:"важность 1..5 (по умолчанию 3, если не указано)"`
+	Tags       []string    `json:"tags,omitempty" jsonschema:"теги для группировки и поиска"`
+	Links      []linkEntry `json:"links,omitempty"`
+	Source     string      `json:"source,omitempty" jsonschema:"откуда пришёл факт: id сессии или иной источник"`
 }
 
 func saveInputSchema() *jsonschema.Schema {
 	s := mustSchema[saveInput]()
 	s.Properties["kind"].Enum = kindEnum
+	s.Properties["links"] = &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription}
 	return s
 }
 
@@ -68,15 +162,19 @@ func recallInputSchema() *jsonschema.Schema {
 // «поле не передано» (nil, не трогаем) от «поле передано» — так правка меняет только
 // то, что агент явно прислал.
 type updateInput struct {
-	ID         string   `json:"id" jsonschema:"id (ULID) обновляемой записи"`
-	Content    *string  `json:"content,omitempty" jsonschema:"новый текст факта, если его нужно изменить"`
-	Summary    *string  `json:"summary,omitempty" jsonschema:"новая краткая форма для брифа; пустая строка очищает summary"`
-	Importance *int     `json:"importance,omitempty" jsonschema:"новая важность 1..5"`
-	Tags       []string `json:"tags,omitempty" jsonschema:"новый полный набор тегов — полностью заменяет старый"`
+	ID         string      `json:"id" jsonschema:"id (ULID) обновляемой записи"`
+	Content    *string     `json:"content,omitempty" jsonschema:"новый текст факта, если его нужно изменить"`
+	Summary    *string     `json:"summary,omitempty" jsonschema:"новая краткая форма для брифа; пустая строка очищает summary"`
+	Importance *int        `json:"importance,omitempty" jsonschema:"новая важность 1..5"`
+	Tags       []string    `json:"tags,omitempty" jsonschema:"новый полный набор тегов — полностью заменяет старый"`
+	Links      []linkEntry `json:"links,omitempty"` // ДОБАВЛЯЮТСЯ к текущим links записи (не заменяют, в отличие от Tags — см. write.UpdateInput.Links)
 }
 
 func updateInputSchema() *jsonschema.Schema {
-	return mustSchema[updateInput]()
+	s := mustSchema[updateInput]()
+	linksSchema := &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription + " В отличие от tags, links ДОБАВЛЯЕТСЯ к уже существующим связям записи, а не заменяет их."}
+	s.Properties["links"] = linksSchema
+	return s
 }
 
 // forgetInput — вход инструмента memory_forget (DESIGN.md §12).

@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"agentmemory/internal/config"
+	"agentmemory/internal/memory"
 	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/recall"
@@ -358,9 +361,9 @@ func TestScopeIsolationE2E(t *testing.T) {
 			t.Fatalf("handleSave(%q): %v", in.Content, err)
 		}
 	}
-	saveVia(alpha, saveInput{Kind: "semantic", Content: "МАРКЕРАЛЬФА проектный факт alpha"})              // → project:alpha
-	saveVia(beta, saveInput{Kind: "semantic", Content: "МАРКЕРБЕТА проектный факт beta"})                 // → project:beta
-	saveVia(alpha, saveInput{Kind: "semantic", Content: "МАРКЕРЮЗЕР общий факт", Scope: "user:*"})        // → user:*
+	saveVia(alpha, saveInput{Kind: "semantic", Content: "МАРКЕРАЛЬФА проектный факт alpha"})       // → project:alpha
+	saveVia(beta, saveInput{Kind: "semantic", Content: "МАРКЕРБЕТА проектный факт beta"})          // → project:beta
+	saveVia(alpha, saveInput{Kind: "semantic", Content: "МАРКЕРЮЗЕР общий факт", Scope: "user:*"}) // → user:*
 
 	recallVia := func(srv *Server) string {
 		t.Helper()
@@ -537,7 +540,226 @@ func TestHandleRecall_TagsAndDateFiltersReachQuery(t *testing.T) {
 	}
 }
 
+// TestHandleSaveLinksStringBackCompat проверяет обратную совместимость (задача
+// 9.3, часть A): элемент links в виде строки-id ведёт себя так же, как до
+// типизированных связей — rel=related. Разбор идёт через настоящий
+// json.Unmarshal в saveInput (как это делает MCP SDK с сырыми аргументами
+// вызова), а не через прямое конструирование linkEntry в Go.
+func TestHandleSaveLinksStringBackCompat(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	targetRes, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "цель для линка", Scope: "project:agentmemory"})
+	if err != nil {
+		t.Fatalf("handleSave (target): %v", err)
+	}
+	target := extractID(t, textOf(targetRes))
+
+	in := unmarshalSaveInput(t, fmt.Sprintf(`{"kind":"semantic","content":"источник со строковым links","scope":"project:agentmemory","links":[%q]}`, target))
+
+	res, _, err := srv.handleSave(ctx, nil, in)
+	if err != nil {
+		t.Fatalf("handleSave (src): %v", err)
+	}
+	srcID := extractID(t, textOf(res))
+
+	m, err := srv.store.Get(ctx, srcID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if len(m.Links) != 1 || m.Links[0].Dst != target || m.Links[0].Rel != memory.RelRelated {
+		t.Errorf("Links = %+v, want ровно 1 ссылку на %q с rel=related", m.Links, target)
+	}
+}
+
+// TestHandleSaveLinksObjectFormReachesNeighbors проверяет часть A+B задачи 9.3:
+// объектная форма {"id":..,"rel":"causes"} доезжает от сырого JSON аргумента
+// memory_save до записи в БД, и типизированное ребро видно через Store.Neighbors
+// (граф-обход) — то же, что смотрит web-морда на карточке записи.
+func TestHandleSaveLinksObjectFormReachesNeighbors(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	targetRes, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "первопричина", Scope: "project:agentmemory"})
+	if err != nil {
+		t.Fatalf("handleSave (target): %v", err)
+	}
+	target := extractID(t, textOf(targetRes))
+
+	in := unmarshalSaveInput(t, fmt.Sprintf(`{"kind":"semantic","content":"следствие первопричины","scope":"project:agentmemory","links":[{"id":%q,"rel":"causes"}]}`, target))
+
+	res, _, err := srv.handleSave(ctx, nil, in)
+	if err != nil {
+		t.Fatalf("handleSave (src): %v", err)
+	}
+	srcID := extractID(t, textOf(res))
+
+	m, err := srv.store.Get(ctx, srcID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if len(m.Links) != 1 || m.Links[0].Dst != target || m.Links[0].Rel != memory.RelCauses {
+		t.Fatalf("Links = %+v, want ровно 1 ссылку на %q с rel=causes", m.Links, target)
+	}
+
+	neighbors, err := srv.store.Neighbors(ctx, target)
+	if err != nil {
+		t.Fatalf("Neighbors: %v", err)
+	}
+	if len(neighbors) != 1 || neighbors[0].Id != srcID {
+		t.Fatalf("Neighbors(%q) = %+v, want содержать только %q", target, neighbors, srcID)
+	}
+}
+
+// TestHandleSaveLinksMixedArray — один вызов memory_save со смешанным массивом
+// links: строка (back-compat) вперемешку с объектом (типизированная форма) —
+// оба должны разрешиться и сохраниться со своими rel.
+func TestHandleSaveLinksMixedArray(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	targetA, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "первая цель", Scope: "project:agentmemory"})
+	if err != nil {
+		t.Fatalf("handleSave (targetA): %v", err)
+	}
+	a := extractID(t, textOf(targetA))
+	targetB, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "вторая цель", Scope: "project:agentmemory"})
+	if err != nil {
+		t.Fatalf("handleSave (targetB): %v", err)
+	}
+	b := extractID(t, textOf(targetB))
+
+	in := unmarshalSaveInput(t, fmt.Sprintf(`{"kind":"semantic","content":"источник со смешанным links","scope":"project:agentmemory","links":[%q,{"id":%q,"rel":"part_of"}]}`, a, b))
+
+	res, _, err := srv.handleSave(ctx, nil, in)
+	if err != nil {
+		t.Fatalf("handleSave: %v", err)
+	}
+	srcID := extractID(t, textOf(res))
+
+	m, err := srv.store.Get(ctx, srcID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if len(m.Links) != 2 {
+		t.Fatalf("Links = %+v, want 2 ссылки", m.Links)
+	}
+	byDst := map[string]string{}
+	for _, l := range m.Links {
+		byDst[l.Dst] = l.Rel
+	}
+	if byDst[a] != memory.RelRelated {
+		t.Errorf("Links[%q].Rel = %q, want related (строковая форма)", a, byDst[a])
+	}
+	if byDst[b] != memory.RelPartOf {
+		t.Errorf("Links[%q].Rel = %q, want part_of (объектная форма)", b, byDst[b])
+	}
+}
+
+// TestHandleSaveLinksInvalidRelReturnsError — опечатка в rel не откатывается
+// молча в related, а возвращает ошибку инструмента с перечнем допустимых значений
+// (fail-fast, DESIGN.md §12, задача 9.3).
+func TestHandleSaveLinksInvalidRelReturnsError(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	in := unmarshalSaveInput(t, `{"kind":"semantic","content":"факт с опечаткой в rel","scope":"project:agentmemory","links":[{"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","rel":"casue"}]}`)
+
+	_, _, err := srv.handleSave(ctx, nil, in)
+	if err == nil {
+		t.Fatal("ожидалась ошибка на неизвестный rel, получили nil")
+	}
+	for _, want := range []string{memory.RelRelated, memory.RelSupersedes, memory.RelCauses, memory.RelPartOf} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, ожидалось упоминание допустимого значения %q", err.Error(), want)
+		}
+	}
+}
+
+// TestHandleUpdateLinksAdditiveAndSelfLinkGuard — часть C задачи 9.3: memory_update
+// принимает links в том же формате, что и memory_save, и добавляет их к уже
+// существующим связям записи (существующие целы), self-петля отсекается
+// существующим guard'ом write-пути.
+func TestHandleUpdateLinksAdditiveAndSelfLinkGuard(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	oldRes, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "старая запись", Scope: "project:agentmemory"})
+	if err != nil {
+		t.Fatalf("handleSave (old): %v", err)
+	}
+	oldID := extractID(t, textOf(oldRes))
+
+	firstTarget, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "первая связанная запись", Scope: "project:agentmemory"})
+	if err != nil {
+		t.Fatalf("handleSave (firstTarget): %v", err)
+	}
+	firstID := extractID(t, textOf(firstTarget))
+
+	// Первый Update — добавляем ссылку rel=causes на firstID.
+	firstIn := unmarshalUpdateInput(t, fmt.Sprintf(`{"id":%q,"links":[{"id":%q,"rel":"causes"}]}`, oldID, firstID))
+	if _, _, err := srv.handleUpdate(ctx, nil, firstIn); err != nil {
+		t.Fatalf("handleUpdate (первая ссылка): %v", err)
+	}
+
+	secondTarget, _, err := srv.handleSave(ctx, nil, saveInput{Kind: "semantic", Content: "вторая связанная запись", Scope: "project:agentmemory"})
+	if err != nil {
+		t.Fatalf("handleSave (secondTarget): %v", err)
+	}
+	secondID := extractID(t, textOf(secondTarget))
+
+	// Второй Update — добавляем ссылку на secondID + self-петлю на oldID; первая
+	// связь должна остаться целой, self-петля должна быть отсечена.
+	secondIn := unmarshalUpdateInput(t, fmt.Sprintf(`{"id":%q,"links":[%q,{"id":%q,"rel":"part_of"}]}`, oldID, oldID, secondID))
+	if _, _, err := srv.handleUpdate(ctx, nil, secondIn); err != nil {
+		t.Fatalf("handleUpdate (вторая ссылка): %v", err)
+	}
+
+	m, err := srv.store.Get(ctx, oldID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if len(m.Links) != 2 {
+		t.Fatalf("Links = %+v, want 2 ссылки (self-петля отсечена)", m.Links)
+	}
+	byDst := map[string]string{}
+	for _, l := range m.Links {
+		byDst[l.Dst] = l.Rel
+	}
+	if byDst[firstID] != memory.RelCauses {
+		t.Errorf("Links[%q].Rel = %q, want causes (сохранено с первого Update)", firstID, byDst[firstID])
+	}
+	if byDst[secondID] != memory.RelPartOf {
+		t.Errorf("Links[%q].Rel = %q, want part_of (добавлено вторым Update)", secondID, byDst[secondID])
+	}
+	if _, ok := byDst[oldID]; ok {
+		t.Errorf("Links = %+v, self-петля на %q не должна была сохраниться", m.Links, oldID)
+	}
+}
+
 // --- вспомогательные функции ---
+
+// unmarshalSaveInput разбирает сырой JSON аргументов memory_save в saveInput —
+// тот же путь, что использует MCP SDK для req.Params.Arguments, важно для links
+// (linkEntry.UnmarshalJSON различает строковую и объектную форму по сырым байтам).
+func unmarshalSaveInput(t *testing.T, raw string) saveInput {
+	t.Helper()
+	var in saveInput
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		t.Fatalf("json.Unmarshal(saveInput) %s: %v", raw, err)
+	}
+	return in
+}
+
+// unmarshalUpdateInput — как unmarshalSaveInput, но для memory_update.
+func unmarshalUpdateInput(t *testing.T, raw string) updateInput {
+	t.Helper()
+	var in updateInput
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		t.Fatalf("json.Unmarshal(updateInput) %s: %v", raw, err)
+	}
+	return in
+}
 
 // textOf извлекает текст первого текстового блока результата инструмента —
 // вся выдача наших хендлеров состоит из одного TextContent (см. textResult).

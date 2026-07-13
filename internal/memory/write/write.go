@@ -77,6 +77,24 @@ func New(s store.Store, e embed.Embedder, opts ...Option) *Writer {
 	return w
 }
 
+// LinkInput — один элемент входного Links для Save/Update: Dst — id целевой записи,
+// Rel — тип связи графа (DESIGN.md §4: related | supersedes | causes | part_of).
+// Пустой Rel трактуется как related — единственное место этого дефолта, см.
+// resolveLinks (задача 9.3, закрывает тех-долг задачи 5.1: типизированные связи
+// доступны и из memory_save, и из memory_update). Валидация Rel против набора
+// допустимых значений — забота вызывающего слоя (mcp), на границе входа; write
+// доверяет уже провалидированному значению и лишь применяет дефолт для пустого.
+//
+// rel=supersedes здесь — ПРОСТО ребро графа связей, наравне с остальными; оно НЕ
+// подменяет поле memory.Memory.SupersededBy и механику Writer.Forget/Store.Supersede
+// (мягкое удаление, исключение записи из recall) — это две независимые вещи: ребро
+// graph — знание агента о связи между двумя живыми записями, superseded_by —
+// экспирация конкретной записи.
+type LinkInput struct {
+	Dst string
+	Rel string
+}
+
 // SaveInput — структурированный факт, который агент передаёт на вход Save.
 // Классификацию (Kind) и разбиение на атомарные факты делает агент (DESIGN.md §7.1).
 type SaveInput struct {
@@ -86,8 +104,8 @@ type SaveInput struct {
 	Summary    string // ультра-короткая форма для брифа (DESIGN.md §4); пусто = не указана.
 	Importance int    // 1..5; 0 трактуется как «не указано» → дефолт 3
 	Tags       []string
-	Links      []string // id целевых записей; висячие ссылки пропускаются молча (см. Save)
-	Source     string   // session id / откуда пришло; пусто = не указан
+	Links      []LinkInput // связи с целевыми записями; висячие ссылки пропускаются молча (см. Save)
+	Source     string      // session id / откуда пришло; пусто = не указан
 }
 
 // UpdateInput — правка существующей записи для Writer.Update. Указатели различают
@@ -107,7 +125,7 @@ type UpdateInput struct {
 	Summary    *string
 	Importance *int // нормализуется ClampImportance — тем же правилом, что и Save
 	Tags       []string
-	Links      []string // id целевых записей, добавляемых к текущим links (rel=related);
+	Links      []LinkInput // связи, добавляемые к текущим links записи (пустой Rel -> related);
 	// висячие ссылки пропускаются молча, как в Save (см. resolveLinks); nil — не менять.
 }
 
@@ -138,7 +156,8 @@ type UpdateInput struct {
 // Известный пробел MVP: схема §4 объявляет `links.dst REFERENCES memories(id)` (FK),
 // поэтому сослаться на ещё не существующий id (истинно «висячая» ссылка, как
 // допускает §7.3) невозможно без нарушения FK. Save трактует это консервативно:
-// ссылки на существующие id устанавливаются с rel=related, ссылки на несуществующие
+// ссылки на существующие id устанавливаются с типом Rel, который передал вызывающий
+// (пустой Rel -> related, см. LinkInput/resolveLinks), ссылки на несуществующие
 // id молча отбрасываются (Save не должен падать из-за одной плохой ссылки).
 // Настоящий резолвер отложенных/висячих ссылок — предмет будущих этапов.
 func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool, err error) {
@@ -325,12 +344,15 @@ func (w *Writer) reinforce(ctx context.Context, existingID string, importance in
 	return existingID, nil
 }
 
-// resolveLinks проверяет существование каждого id из ids и возвращает связи rel=related
-// только для существующих записей; несуществующие id пропускаются молча (см. godoc Save).
-func (w *Writer) resolveLinks(ctx context.Context, ids []string) ([]memory.Link, error) {
+// resolveLinks проверяет существование каждого Dst из ins и возвращает связи только
+// для существующих записей; несуществующие id пропускаются молча (см. godoc Save).
+// Единственное место дефолта Rel: пустой Rel (back-compat строковая форма входа
+// MCP, см. mcp.linkEntry) трактуется как memory.RelRelated — Save и Update оба
+// проходят через resolveLinks, поэтому дефолт не расходится между инструментами.
+func (w *Writer) resolveLinks(ctx context.Context, ins []LinkInput) ([]memory.Link, error) {
 	var links []memory.Link
-	for _, raw := range ids {
-		id := strings.TrimSpace(raw)
+	for _, in := range ins {
+		id := strings.TrimSpace(in.Dst)
 		if id == "" {
 			continue
 		}
@@ -340,7 +362,11 @@ func (w *Writer) resolveLinks(ctx context.Context, ids []string) ([]memory.Link,
 			}
 			return nil, fmt.Errorf("write: проверка link %q: %w", id, err)
 		}
-		links = append(links, memory.Link{Dst: id, Rel: memory.RelRelated})
+		rel := strings.TrimSpace(in.Rel)
+		if rel == "" {
+			rel = memory.RelRelated
+		}
+		links = append(links, memory.Link{Dst: id, Rel: rel})
 	}
 	return links, nil
 }
