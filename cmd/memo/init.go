@@ -5,6 +5,14 @@
 // (с введённым провайдером эмбеддинга/reasoner, store, project) и, если
 // введены ключи выбранных провайдеров, .env (+ строку .env в .gitignore). Не
 // трогает загрузку конфига (internal/config) и серверный путь.
+//
+// Повторный `memo init` в уже инициализированном проекте ведёт себя по-разному
+// в зависимости от файла: MCP-конфиг и agentmemory.toml всегда перезаписываются
+// целиком (overwriteFile) — они полностью выводятся из параметров текущего
+// прогона, и -force на них не влияет; .env мержится (mergeEnvFile) — ключи
+// выбранных провайдеров дописываются/обновляются, остальные строки сохраняются,
+// тоже независимо от -force; скиллы SKILL.md — единственные, кто уважает
+// -force в исходном смысле "пропустить существующий файл" (writeScaffoldFile).
 package main
 
 import (
@@ -577,7 +585,11 @@ func doInit(cfg initConfig, out io.Writer) error {
 	tomlContent := fmt.Sprintf(configTomlTemplate,
 		escapeTOMLString(project), escapeTOMLString(cfg.StorePath), renderEmbedderTomlBlock(cfg), renderReasonerTomlBlock(cfg))
 
-	if err := writeScaffoldFile(target.mcpConfigPath(cfg.Dir), mcpContent, cfg.Force, out); err != nil {
+	// .mcp.json/opencode.json — всегда перезаписывается целиком (overwriteFile,
+	// а не writeScaffoldFile): единственный источник истины для него — параметры
+	// текущего прогона init, -force тут ни при чём (осознанный tradeoff: ручные
+	// правки этого файла не переживают повторный `memo init`).
+	if err := overwriteFile(target.mcpConfigPath(cfg.Dir), mcpContent, out); err != nil {
 		return err
 	}
 
@@ -591,7 +603,9 @@ func doInit(cfg initConfig, out io.Writer) error {
 		}
 	}
 
-	if err := writeScaffoldFile(filepath.Join(cfg.Dir, "agentmemory.toml"), tomlContent, cfg.Force, out); err != nil {
+	// agentmemory.toml — та же логика "всегда перезаписывается", что и у
+	// mcp-конфига выше (см. комментарий overwriteFile).
+	if err := overwriteFile(filepath.Join(cfg.Dir, "agentmemory.toml"), tomlContent, out); err != nil {
 		return err
 	}
 
@@ -599,6 +613,10 @@ func doInit(cfg initConfig, out io.Writer) error {
 	// applyInitDefaults уже обнулил ключи невыбранных провайдеров выше, здесь
 	// достаточно проверить, что оставшееся непусто. selectedProviders — тот же
 	// реестр, из которого renderMCPJSON/renderOpencodeJSON берут env-плейсхолдеры.
+	// mergeEnvFile дописывает/обновляет только эти ключи в существующем .env, не
+	// трогая остальные строки — независимо от cfg.Force (в отличие от
+	// agentmemory.toml/mcp-конфига выше, .env никогда не перезаписывается
+	// целиком: секреты, введённые в прошлых прогонах init, не должны теряться).
 	envVars := map[string]string{}
 	for _, p := range selectedProviders(cfg) {
 		if f := p.keyField(&cfg); f != nil && *f != "" {
@@ -606,7 +624,7 @@ func doInit(cfg initConfig, out io.Writer) error {
 		}
 	}
 	if len(envVars) > 0 {
-		if err := writeEnvFile(filepath.Join(cfg.Dir, ".env"), envVars, cfg.Force, out); err != nil {
+		if err := mergeEnvFile(filepath.Join(cfg.Dir, ".env"), envVars, out); err != nil {
 			return err
 		}
 		if err := ensureGitignoreEntry(filepath.Join(cfg.Dir, ".gitignore"), ".env", out); err != nil {
@@ -749,7 +767,11 @@ func renderOpencodeJSON(command string, cfg initConfig) (string, error) {
 
 // writeScaffoldFile пишет content в path с правами 0o644. Если файл уже
 // существует и force не задан — пропускает его с предупреждением в out (не
-// ошибка): повторный `memo init` идемпотентен и безопасен.
+// ошибка): повторный `memo init` идемпотентен и безопасен. Используется для
+// артефактов, где потеря ручных правок при повторном init нежелательна
+// (скиллы SKILL.md) — в отличие от agentmemory.toml/mcp-конфига
+// (см. overwriteFile) и .env (см. mergeEnvFile), которые сознательно ведут
+// себя иначе.
 func writeScaffoldFile(path, content string, force bool, out io.Writer) error {
 	if !force {
 		if _, err := os.Stat(path); err == nil {
@@ -766,18 +788,85 @@ func writeScaffoldFile(path, content string, force bool, out io.Writer) error {
 	return nil
 }
 
-// writeEnvFile пишет vars (KEY=VALUE построчно, отсортировано по ключу для
-// детерминированного вывода) в path с правами 0o600 (секрет). Пишутся только
-// ключи выбранных провайдеров — vars собирает doInit. Идемпотентность и
-// -force семантика — как у writeScaffoldFile.
-func writeEnvFile(path string, vars map[string]string, force bool, out io.Writer) error {
-	if !force {
-		if _, err := os.Stat(path); err == nil {
-			fmt.Fprintf(out, "пропущено (уже существует): %s\n", path)
-			return nil
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("проверка %q: %w", path, err)
+// overwriteFile пишет content в path с правами 0o644, безусловно перезаписывая
+// существующий файл. Используется для agentmemory.toml и MCP-конфига
+// (.mcp.json/opencode.json): их единственный источник истины — параметры
+// текущего прогона `memo init`, поэтому -force на них не влияет и повторный
+// init всегда синхронизирует их с введёнными параметрами — осознанный
+// tradeoff (ручные правки этих двух файлов не переживают повторный init), в
+// отличие от writeScaffoldFile (скиллы) и mergeEnvFile (.env).
+func overwriteFile(path, content string, out io.Writer) error {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("запись %q: %w", path, err)
+	}
+	fmt.Fprintf(out, "записано: %s\n", path)
+	return nil
+}
+
+// mergeEnvFile делает upsert vars (KEY=VALUE) в существующий .env по path, не
+// теряя остальные строки (чужие переменные, комментарии, пустые строки):
+// если ключ из vars уже есть в файле — его значение обновляется на месте
+// (без дублирования строки), иначе строка KEY=VALUE дописывается в конец
+// (новые ключи — в отсортированном порядке, для детерминированного вывода).
+// Мержится ТОЛЬКО набор ключей из vars — vars собирает doInit из выбранных в
+// этом прогоне провайдеров (DESIGN.md §13, задача 11.1); переменные с другими
+// именами (напр. OPENAI_API_KEY, оставшийся от прошлого прогона с
+// embedder=openai, при текущем reasoner=deepseek) не трогаются. В отличие от
+// writeScaffoldFile/overwriteFile мержится безусловно, независимо от -force:
+// ключ, введённый повторным `memo init` в уже существующий .env, обязан туда
+// долететь, а не молча потеряться. Разбор существующих строк — по формату
+// loadDotEnv (dotenv.go): `KEY=VALUE`, `#`-комментарии, пустые строки — но
+// здесь, в отличие от loadDotEnv, все нераспознанные/незатронутые строки
+// сохраняются как есть байт-в-байт. Права результата всегда 0o600 (секрет) —
+// проставляются явно поверх os.WriteFile, т.к. WriteFile не меняет права уже
+// существующего файла.
+func mergeEnvFile(path string, vars map[string]string, out io.Writer) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("чтение %q: %w", path, err)
+	}
+
+	remaining := make(map[string]string, len(vars))
+	for k, v := range vars {
+		remaining[k] = v
+	}
+
+	var lines []string
+	if len(existing) > 0 {
+		lines = strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
+	}
+	merged := make([]string, 0, len(lines)+len(vars))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if key, _, ok := strings.Cut(trimmed, "="); ok && trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			key = strings.TrimSpace(key)
+			if newVal, ok := remaining[key]; ok {
+				merged = append(merged, key+"="+newVal)
+				delete(remaining, key)
+				continue
+			}
 		}
+		merged = append(merged, line)
+	}
+
+	newKeys := make([]string, 0, len(remaining))
+	for k := range remaining {
+		newKeys = append(newKeys, k)
+	}
+	sort.Strings(newKeys)
+	for _, k := range newKeys {
+		merged = append(merged, k+"="+remaining[k])
+	}
+
+	content := strings.Join(merged, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("запись %q: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("установка прав 0600 %q: %w", path, err)
 	}
 
 	keys := make([]string, 0, len(vars))
@@ -785,14 +874,6 @@ func writeEnvFile(path string, vars map[string]string, force bool, out io.Writer
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-
-	var sb strings.Builder
-	for _, k := range keys {
-		fmt.Fprintf(&sb, "%s=%s\n", k, vars[k])
-	}
-	if err := os.WriteFile(path, []byte(sb.String()), 0o600); err != nil {
-		return fmt.Errorf("запись %q: %w", path, err)
-	}
 	fmt.Fprintf(out, "записано: %s (ключи: %s, права 0600)\n", path, strings.Join(keys, ", "))
 	return nil
 }

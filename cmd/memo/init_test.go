@@ -260,45 +260,53 @@ func TestDoInit_DefaultProjectNameFromDir(t *testing.T) {
 	}
 }
 
-// TestDoInit_ExistingFileSkippedWithoutForce проверяет, что существующий файл
-// без Force пропускается (содержимое не меняется, повтор идемпотентен), а с
-// Force — перезаписывается.
-func TestDoInit_ExistingFileSkippedWithoutForce(t *testing.T) {
+// TestDoInit_OverwritesConfigFiles проверяет, что agentmemory.toml и
+// .mcp.json ВСЕГДА перезаписываются целиком при повторном `memo init` —
+// независимо от Force (единственный источник истины для них — параметры
+// текущего прогона, см. overwriteFile в init.go; ручные правки этих двух
+// файлов сознательно не переживают повторный init).
+func TestDoInit_OverwritesConfigFiles(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "agentmemory.toml")
-	const sentinel = "# уже существующий конфиг, не трогать\n"
-	if err := os.WriteFile(tomlPath, []byte(sentinel), 0o644); err != nil {
-		t.Fatalf("запись стартового файла: %v", err)
+	mcpPath := filepath.Join(dir, ".mcp.json")
+	const tomlSentinel = "# уже существующий конфиг, не трогать\n"
+	const mcpSentinel = `{"mcpServers":{}}`
+	if err := os.WriteFile(tomlPath, []byte(tomlSentinel), 0o644); err != nil {
+		t.Fatalf("запись стартового agentmemory.toml: %v", err)
+	}
+	if err := os.WriteFile(mcpPath, []byte(mcpSentinel), 0o644); err != nil {
+		t.Fatalf("запись стартового .mcp.json: %v", err)
 	}
 
 	var out strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
+
 	got, err := os.ReadFile(tomlPath)
 	if err != nil {
-		t.Fatalf("чтение: %v", err)
+		t.Fatalf("чтение agentmemory.toml: %v", err)
 	}
-	if string(got) != sentinel {
-		t.Errorf("файл изменился без Force: %s", got)
+	if string(got) == tomlSentinel {
+		t.Errorf("agentmemory.toml не перезаписан без Force: %s", got)
 	}
-	if !strings.Contains(out.String(), "пропущено") {
-		t.Errorf("вывод не сообщает о пропуске: %s", out.String())
+	if !strings.Contains(string(got), "myproj") {
+		t.Errorf("перезаписанный agentmemory.toml не содержит project: %s", got)
 	}
 
-	var out2 strings.Builder
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Force: true}, &out2); err != nil {
-		t.Fatalf("doInit с Force: %v", err)
-	}
-	got2, err := os.ReadFile(tomlPath)
+	mcpGot, err := os.ReadFile(mcpPath)
 	if err != nil {
-		t.Fatalf("чтение: %v", err)
+		t.Fatalf("чтение .mcp.json: %v", err)
 	}
-	if string(got2) == sentinel {
-		t.Errorf("файл не перезаписан с Force")
+	if string(mcpGot) == mcpSentinel {
+		t.Errorf(".mcp.json не перезаписан без Force: %s", mcpGot)
 	}
-	if !strings.Contains(string(got2), "myproj") {
-		t.Errorf("перезаписанный файл не содержит project: %s", got2)
+	var mcpCfg mcpConfigFile
+	if err := json.Unmarshal(mcpGot, &mcpCfg); err != nil {
+		t.Fatalf("перезаписанный .mcp.json невалиден: %v\n%s", err, mcpGot)
+	}
+	if _, ok := mcpCfg.MCPServers["memo"]; !ok {
+		t.Errorf("перезаписанный .mcp.json не содержит сервер memo: %s", mcpGot)
 	}
 }
 
@@ -444,7 +452,8 @@ func TestDoInit_WritesEnvAndGitignore(t *testing.T) {
 		t.Errorf(".gitignore содержит не одну строку .env: %q", gitignoreContent)
 	}
 
-	// Повторный запуск с Force не дублирует строку .env в .gitignore.
+	// Повторный запуск с Force не дублирует строку .env в .gitignore и
+	// обновляет ключ в .env (merge, а не skip).
 	var out2 strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, ReasonerProvider: "deepseek", DeepseekKey: "sk-test-456", Force: true}, &out2); err != nil {
 		t.Fatalf("doInit повторно: %v", err)
@@ -455,6 +464,28 @@ func TestDoInit_WritesEnvAndGitignore(t *testing.T) {
 	}
 	if strings.Count(string(gitignoreContent2), ".env") != 1 {
 		t.Errorf(".gitignore задублировал строку .env: %q", gitignoreContent2)
+	}
+	envContent2, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("чтение .env повторно: %v", err)
+	}
+	if strings.TrimSpace(string(envContent2)) != "DEEPSEEK_API_KEY=sk-test-456" {
+		t.Errorf(".env после повторного init с Force = %q, хочу обновлённый ключ sk-test-456", envContent2)
+	}
+
+	// Повторный запуск БЕЗ Force тоже обновляет .env (проблема из репорта
+	// пользователя: раньше writeEnvFile без -force молча пропускал уже
+	// существующий файл, новый ключ никогда не долетал до .env).
+	var out3 strings.Builder
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, ReasonerProvider: "deepseek", DeepseekKey: "sk-test-789"}, &out3); err != nil {
+		t.Fatalf("doInit повторно без Force: %v", err)
+	}
+	envContent3, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("чтение .env повторно без Force: %v", err)
+	}
+	if strings.TrimSpace(string(envContent3)) != "DEEPSEEK_API_KEY=sk-test-789" {
+		t.Errorf(".env после повторного init без Force = %q, хочу обновлённый ключ sk-test-789 (не пропуск)", envContent3)
 	}
 }
 
@@ -495,20 +526,21 @@ func TestEnsureGitignoreEntry_AppendsToExisting(t *testing.T) {
 	}
 }
 
-// TestWriteEnvFile_MultipleKeys проверяет, что writeEnvFile пишет несколько
-// ключей отсортированно и с правами 0600 (задача 11.1: обобщение на набор
-// ключей выбранных провайдеров).
-func TestWriteEnvFile_MultipleKeys(t *testing.T) {
+// TestMergeEnvFile_CreatesWhenMissing проверяет, что mergeEnvFile в
+// отсутствующий файл пишет несколько ключей отсортированно и с правами 0600
+// (задача 11.1: обобщение на набор ключей выбранных провайдеров) — merge в
+// отсутствующий файл эквивалентен созданию с нуля.
+func TestMergeEnvFile_CreatesWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")
 	var out strings.Builder
 
-	err := writeEnvFile(path, map[string]string{
+	err := mergeEnvFile(path, map[string]string{
 		"OPENAI_API_KEY":   "sk-oa",
 		"DEEPSEEK_API_KEY": "sk-ds",
-	}, false, &out)
+	}, &out)
 	if err != nil {
-		t.Fatalf("writeEnvFile: %v", err)
+		t.Fatalf("mergeEnvFile: %v", err)
 	}
 
 	fi, err := os.Stat(path)
@@ -526,6 +558,82 @@ func TestWriteEnvFile_MultipleKeys(t *testing.T) {
 	want := "DEEPSEEK_API_KEY=sk-ds\nOPENAI_API_KEY=sk-oa\n"
 	if string(content) != want {
 		t.Errorf(".env содержимое = %q, хочу %q (отсортировано по ключу)", content, want)
+	}
+}
+
+// TestMergeEnvFile_UpsertsExistingKeyPreservesOthers проверяет ключевое
+// свойство merge (проблема из репорта пользователя): существующий .env с
+// чужой переменной и комментарием не теряет их, а значение уже присутствующего
+// ключа обновляется на месте — без дублирования строки.
+func TestMergeEnvFile_UpsertsExistingKeyPreservesOthers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	const initial = "# комментарий, не трогать\nEXISTING_VAR=keep\nDEEPSEEK_API_KEY=oldkey\n"
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatalf("запись стартового .env: %v", err)
+	}
+
+	var out strings.Builder
+	if err := mergeEnvFile(path, map[string]string{"DEEPSEEK_API_KEY": "newkey"}, &out); err != nil {
+		t.Fatalf("mergeEnvFile: %v", err)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf(".env права = %o, хочу 0600", perm)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("чтение: %v", err)
+	}
+	got := string(content)
+	if !strings.Contains(got, "# комментарий, не трогать") {
+		t.Errorf("комментарий потерян: %q", got)
+	}
+	if !strings.Contains(got, "EXISTING_VAR=keep") {
+		t.Errorf("чужая переменная потеряна: %q", got)
+	}
+	if strings.Count(got, "DEEPSEEK_API_KEY=") != 1 {
+		t.Errorf("DEEPSEEK_API_KEY задублирован: %q", got)
+	}
+	if !strings.Contains(got, "DEEPSEEK_API_KEY=newkey") {
+		t.Errorf("DEEPSEEK_API_KEY не обновился на newkey: %q", got)
+	}
+	if strings.Contains(got, "DEEPSEEK_API_KEY=oldkey") {
+		t.Errorf("осталось старое значение DEEPSEEK_API_KEY: %q", got)
+	}
+}
+
+// TestMergeEnvFile_AddsMissingKeyToExistingFile проверяет, что ключ,
+// отсутствующий в существующем .env, дописывается в конец, не трогая
+// остальное содержимое.
+func TestMergeEnvFile_AddsMissingKeyToExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	const initial = "EXISTING_VAR=keep\n"
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatalf("запись стартового .env: %v", err)
+	}
+
+	var out strings.Builder
+	if err := mergeEnvFile(path, map[string]string{"DEEPSEEK_API_KEY": "sk-new"}, &out); err != nil {
+		t.Fatalf("mergeEnvFile: %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("чтение: %v", err)
+	}
+	got := string(content)
+	if !strings.Contains(got, "EXISTING_VAR=keep") {
+		t.Errorf("существующая строка потеряна: %q", got)
+	}
+	if !strings.Contains(got, "DEEPSEEK_API_KEY=sk-new") {
+		t.Errorf("новый ключ не дописан: %q", got)
 	}
 }
 
