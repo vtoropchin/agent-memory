@@ -11,7 +11,7 @@ import "fmt"
 // приложение его раскладывает (frontmatter и путь файла — специфика
 // конкретного agentTarget, см. agentRegistry в init.go). При добавлении
 // opencode/codex это тело переиспользуется без изменений — меняется только
-// обёртка в agentTarget.renderSkill. %[1]s — имя проекта.
+// обёртка в skillSpec.render (agentTarget.skills). %[1]s — имя проекта.
 const memorySkillBodyTemplate = `# Протокол работы с памятью — %[1]s
 
 Проект **%[1]s** хранит долговременную память в MCP-сервере ` + "`agentmemory`" + `
@@ -83,7 +83,7 @@ func skillDescription(project string) string {
 // renderSkillMD оборачивает memorySkillBody в SKILL.md — валидный YAML-
 // фронтматтер (name/description) поверх общего тела. Общий рендерер для всех
 // записей agentRegistry: фронтматтер и тело скила не зависят от конкретного
-// агентского приложения, различается только путь файла (agentTarget.skillPath).
+// агентского приложения, различается только путь файла (agentTarget.skillsDir + skillSpec.dirName).
 func renderSkillMD(project string) string {
 	frontMatter := fmt.Sprintf("---\nname: memoryd\ndescription: %s\n---\n\n", skillDescription(project))
 	return frontMatter + memorySkillBody(project)

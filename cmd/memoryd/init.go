@@ -271,18 +271,38 @@ type mcpServerSpec struct {
 	Env     map[string]string `json:"env"`
 }
 
+// skillSpec описывает один скил, раскладываемый `memoryd init` в
+// `<skillsDir>/<dirName>/SKILL.md`: dirName — подкаталог под
+// agentTarget.skillsDir, render — рендерер тела SKILL.md под конкретный
+// проект.
+type skillSpec struct {
+	dirName string
+	render  func(project string) string
+}
+
+// memorySkills — набор скиллов, которые `memoryd init` раскладывает КАЖДОМУ
+// поддерживаемому агентскому приложению (одинаковый для всех записей
+// agentRegistry — различается только корень skillsDir): "memoryd" — протокол
+// работы с памятью (skill.go), "memoryd-bootstrap" — разовая инициализация
+// памяти проекта (bootstrap_skill.go). Добавить следующий скил — одна запись
+// в этом слайсе.
+var memorySkills = []skillSpec{
+	{dirName: "memoryd", render: renderSkillMD},
+	{dirName: "memoryd-bootstrap", render: renderBootstrapSkillMD},
+}
+
 // agentTarget описывает одно агентское приложение и то, как оно раскладывает
-// артефакты AgentMemory в проекте: MCP-конфиг и скил-инструкцию. В
-// agentRegistry — claude (Claude Code) и opencode; структура рассчитана на то,
-// чтобы добавить следующее приложение (например codex) ещё одной записью.
+// артефакты AgentMemory в проекте: MCP-конфиг и скилы. В agentRegistry —
+// claude (Claude Code) и opencode; структура рассчитана на то, чтобы добавить
+// следующее приложение (например codex) ещё одной записью.
 type agentTarget struct {
 	label string // человекочитаемое имя для промптов/вывода
 
 	mcpConfigPath   func(dir string) string
 	renderMCPConfig func(command string, cfg initConfig) (string, error)
 
-	skillPath   func(dir string) string
-	renderSkill func(project string) string
+	skillsDir func(dir string) string // корень каталога скиллов агента
+	skills    []skillSpec
 }
 
 // agentRegistry — реестр поддерживаемых агентских приложений, ключ — значение
@@ -292,19 +312,19 @@ var agentRegistry = map[string]agentTarget{
 		label:           "Claude Code",
 		mcpConfigPath:   func(dir string) string { return filepath.Join(dir, ".mcp.json") },
 		renderMCPConfig: renderMCPJSON,
-		skillPath: func(dir string) string {
-			return filepath.Join(dir, ".claude", "skills", "memoryd", "SKILL.md")
+		skillsDir: func(dir string) string {
+			return filepath.Join(dir, ".claude", "skills")
 		},
-		renderSkill: renderSkillMD,
+		skills: memorySkills,
 	},
 	"opencode": {
 		label:           "opencode",
 		mcpConfigPath:   func(dir string) string { return filepath.Join(dir, "opencode.json") },
 		renderMCPConfig: renderOpencodeJSON,
-		skillPath: func(dir string) string {
-			return filepath.Join(dir, ".opencode", "skills", "memoryd", "SKILL.md")
+		skillsDir: func(dir string) string {
+			return filepath.Join(dir, ".opencode", "skills")
 		},
-		renderSkill: renderSkillMD,
+		skills: memorySkills,
 	},
 }
 
@@ -525,7 +545,6 @@ func doInit(cfg initConfig, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	skillContent := target.renderSkill(project)
 	tomlContent := fmt.Sprintf(configTomlTemplate,
 		escapeTOMLString(project), escapeTOMLString(cfg.StorePath), renderEmbedderTomlBlock(cfg), renderReasonerTomlBlock(cfg))
 
@@ -533,12 +552,14 @@ func doInit(cfg initConfig, out io.Writer) error {
 		return err
 	}
 
-	skillPath := target.skillPath(cfg.Dir)
-	if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
-		return fmt.Errorf("создание каталога %q: %w", filepath.Dir(skillPath), err)
-	}
-	if err := writeScaffoldFile(skillPath, skillContent, cfg.Force, out); err != nil {
-		return err
+	for _, spec := range target.skills {
+		skillPath := filepath.Join(target.skillsDir(cfg.Dir), spec.dirName, "SKILL.md")
+		if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
+			return fmt.Errorf("создание каталога %q: %w", filepath.Dir(skillPath), err)
+		}
+		if err := writeScaffoldFile(skillPath, spec.render(project), cfg.Force, out); err != nil {
+			return err
+		}
 	}
 
 	if err := writeScaffoldFile(filepath.Join(cfg.Dir, "agentmemory.toml"), tomlContent, cfg.Force, out); err != nil {

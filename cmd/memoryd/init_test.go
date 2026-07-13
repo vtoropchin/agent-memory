@@ -12,9 +12,10 @@ import (
 
 // TestDoInit_WritesAllFiles проверяет, что init в чистый временный каталог
 // пишет все артефакты: .mcp.json — валидный JSON с сервером agentmemory,
-// SKILL.md — скил под claude, agentmemory.toml — конфиг, из которого
-// config.Load восстанавливает нужный scope.project и провайдеров (round-trip
-// сгенерированного конфига). Дефолт без явных провайдеров — ollama/deepseek.
+// оба SKILL.md под claude (memoryd и memoryd-bootstrap), agentmemory.toml —
+// конфиг, из которого config.Load восстанавливает нужный scope.project и
+// провайдеров (round-trip сгенерированного конфига). Дефолт без явных
+// провайдеров — ollama/deepseek.
 func TestDoInit_WritesAllFiles(t *testing.T) {
 	dir := t.TempDir()
 	var out strings.Builder
@@ -94,6 +95,28 @@ func TestDoInit_WritesAllFiles(t *testing.T) {
 	}
 	if !strings.Contains(skill, "memory_recall") || !strings.Contains(skill, "memory_save") {
 		t.Errorf("SKILL.md не описывает memory_recall/memory_save: %s", skill)
+	}
+
+	bootstrapPath := filepath.Join(dir, ".claude", "skills", "memoryd-bootstrap", "SKILL.md")
+	bootstrapRaw, err := os.ReadFile(bootstrapPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", bootstrapPath, err)
+	}
+	bootstrap := string(bootstrapRaw)
+	if !strings.HasPrefix(bootstrap, "---\nname: memoryd-bootstrap\ndescription:") {
+		t.Errorf("SKILL.md bootstrap не начинается с валидного фронтматтера name/description")
+	}
+	if strings.Count(bootstrap, "---\n") < 2 {
+		t.Errorf("SKILL.md bootstrap не содержит закрывающий разделитель фронтматтера: %s", bootstrap)
+	}
+	if !strings.Contains(bootstrap, "myproj") {
+		t.Errorf("SKILL.md bootstrap не упоминает имя проекта: %s", bootstrap)
+	}
+	if !strings.Contains(bootstrap, "memory_save") {
+		t.Errorf("SKILL.md bootstrap не упоминает memory_save: %s", bootstrap)
+	}
+	if !strings.Contains(bootstrap, "graphify") {
+		t.Errorf("SKILL.md bootstrap не упоминает graphify: %s", bootstrap)
 	}
 
 	if !strings.Contains(out.String(), "myproj") {
@@ -296,7 +319,7 @@ func TestDoInit_UnknownAgent(t *testing.T) {
 // TestDoInit_OpencodeTarget проверяет, что при Agent="opencode" doInit пишет
 // opencode.json (local MCP-сервер agentmemory, форма которого отличается от
 // .mcp.json Claude Code — единый массив command, environment вместо env) и
-// SKILL.md по opencode-specific пути .opencode/skills/memoryd/SKILL.md.
+// оба SKILL.md по opencode-specific пути .opencode/skills/{memoryd,memoryd-bootstrap}/SKILL.md.
 func TestDoInit_OpencodeTarget(t *testing.T) {
 	dir := t.TempDir()
 	var out strings.Builder
@@ -367,6 +390,22 @@ func TestDoInit_OpencodeTarget(t *testing.T) {
 	}
 	if !strings.Contains(skill, "memory_recall") {
 		t.Errorf("SKILL.md не упоминает memory_recall: %s", skill)
+	}
+
+	bootstrapPath := filepath.Join(dir, ".opencode", "skills", "memoryd-bootstrap", "SKILL.md")
+	bootstrapRaw, err := os.ReadFile(bootstrapPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", bootstrapPath, err)
+	}
+	bootstrap := string(bootstrapRaw)
+	if !strings.HasPrefix(bootstrap, "---\nname: memoryd-bootstrap\ndescription:") {
+		t.Errorf("SKILL.md bootstrap не начинается с валидного фронтматтера name/description")
+	}
+	if !strings.Contains(bootstrap, "myproj") {
+		t.Errorf("SKILL.md bootstrap не упоминает имя проекта: %s", bootstrap)
+	}
+	if !strings.Contains(bootstrap, "memory_save") {
+		t.Errorf("SKILL.md bootstrap не упоминает memory_save: %s", bootstrap)
 	}
 }
 
