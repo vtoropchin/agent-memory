@@ -8,3 +8,6 @@ bin/
 .codegraph
 .opencode/
 .claude/
+.mcp.json
+agentmemory.toml
+opencode.json
