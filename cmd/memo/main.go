@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Vladimir Toropchin
+//
 // Command memo — точка входа AgentMemory: MCP-сервер долговременной памяти
 // поверх SQLite, обслуживающий инструменты save/recall/update/forget по stdio
 // (DESIGN.md §3, §12).

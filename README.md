@@ -318,3 +318,14 @@ make web     # CGO_ENABLED=1 go run -tags sqlite_fts5 ./cmd/memo web — web-м�
 - `internal/config` — загрузка TOML/env.
 
 Архитектурные решения и границы пакетов — в `DESIGN.md`, читай перед изменениями.
+
+## Лицензия
+
+Copyright (C) 2026 Vladimir Toropchin
+
+Agent Memory — свободное ПО: вы можете распространять и/или изменять его на условиях
+GNU General Public License, опубликованной Free Software Foundation, версии 3 или
+(на ваш выбор) любой более поздней версии — `GPL-3.0-or-later`.
+
+Программа распространяется в надежде, что она будет полезной, но БЕЗ КАКИХ-ЛИБО
+ГАРАНТИЙ. Полный текст — в файле [`LICENSE`](LICENSE).
