@@ -24,6 +24,11 @@ var (
 	ErrEmptyContent = errors.New("write: content не может быть пустым")
 	ErrEmptyScope   = errors.New("write: scope не может быть пустым")
 	ErrUnknownKind  = errors.New("write: неизвестный kind")
+	// ErrInvalidTTL — TTL не разобрался как Go-длительность (time.ParseDuration)
+	// либо разобрался в неположительную длительность (задача 9.4). Fail-fast:
+	// Save/Update возвращают ошибку, а не молча трактуют невалидный ttl как
+	// "вечно" — агент должен узнать об опечатке в формате сразу.
+	ErrInvalidTTL = errors.New("write: невалидный ttl")
 )
 
 // defaultDedupLimit — сколько кандидатов из того же scope/kind рассматриваем при
@@ -106,6 +111,13 @@ type SaveInput struct {
 	Tags       []string
 	Links      []LinkInput // связи с целевыми записями; висячие ссылки пропускаются молча (см. Save)
 	Source     string      // session id / откуда пришло; пусто = не указан
+	// TTL — явный срок жизни факта: Go-длительность от текущего момента
+	// (time.ParseDuration, напр. "72h"), а не абсолютная дата — агенту почти
+	// всегда известно "сколько актуально", а не "до какого unix ts" (тот же
+	// принцип, что у recall CreatedAfter/CreatedBefore, DESIGN.md §12). Пусто —
+	// вечная запись (ExpiresAt=0). Невалидная строка или неположительная
+	// длительность — ErrInvalidTTL (fail-fast, см. parseTTL).
+	TTL string
 }
 
 // UpdateInput — правка существующей записи для Writer.Update. Указатели различают
@@ -127,6 +139,13 @@ type UpdateInput struct {
 	Tags       []string
 	Links      []LinkInput // связи, добавляемые к текущим links записи (пустой Rel -> related);
 	// висячие ссылки пропускаются молча, как в Save (см. resolveLinks); nil — не менять.
+	// TTL продлевает или снимает срок жизни записи (задача 9.4): nil — не менять
+	// текущий ExpiresAt; "" или "0" — снять срок (запись становится вечной,
+	// ЯВНО задокументированный сентинел, тот же паттерн, что у Summary выше:
+	// пустая строка снимает поле); любая другая Go-длительность (напр. "72h") —
+	// новый срок, считается от ТЕКУЩЕГО момента (не от исходного created_at) —
+	// это и есть "продлить". Невалидная строка (кроме "0"/"") — ErrInvalidTTL.
+	TTL *string
 }
 
 // Save принимает атомарный факт и сохраняет его по write path DESIGN.md §7:
@@ -144,6 +163,10 @@ type UpdateInput struct {
 //     сохраняет его через Store.PutVector; ошибка эмбеддинга/PutVector не
 //     проваливает Save — запись остаётся без вектора до фонового досчёта
 //     (см. embedNow, Store.ListMissingVectors, DESIGN.md §7.4, §9).
+//
+// SaveInput.TTL (задача 9.4) разбирается ДО дедупликации (fail-fast: невалидная
+// строка возвращает ErrInvalidTTL, даже если факт в итоге слился бы с
+// существующей записью, а не вставился новой) — см. parseTTL.
 //
 // Возвращаемый merged честно сообщает вызывающему коду (mcp.handleSave), был ли
 // факт слит с существующим дублем, вместо вставки новой записи, — без отдельного
@@ -174,6 +197,11 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 	default:
 		return "", false, fmt.Errorf("%w: %q", ErrUnknownKind, in.Kind)
 	}
+	now := w.now()
+	expiresAt, err := parseTTL(in.TTL, now)
+	if err != nil {
+		return "", false, err
+	}
 	importance := ClampImportance(in.Importance)
 	tags := unionTags(nil, in.Tags)
 
@@ -202,7 +230,6 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		summaryPtr = &s
 	}
 
-	now := w.now()
 	m := memory.Memory{
 		Id:         id,
 		Kind:       in.Kind,
@@ -213,6 +240,7 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		CreatedAt:  now,
 		UpdatedAt:  now,
 		Source:     sourcePtr,
+		ExpiresAt:  expiresAt,
 		Tags:       tags,
 		Links:      links,
 	}
@@ -371,6 +399,29 @@ func (w *Writer) resolveLinks(ctx context.Context, ins []LinkInput) ([]memory.Li
 	return links, nil
 }
 
+// parseTTL разбирает строку TTL (SaveInput.TTL/непустой *UpdateInput.TTL,
+// задача 9.4) — Go-длительность (time.ParseDuration, напр. "72h") — в abs unix ts
+// истечения (now + длительность). Пустая строка означает "без срока" и
+// возвращает (0, nil) — вечная запись/поле не тронуто вызывающим кодом (сентинел
+// "0" для Update разбирается отдельно, ДО вызова этой функции, см.
+// Writer.Update). Невалидная строка (не парсится time.ParseDuration) или
+// неположительная длительность (<= 0) — ErrInvalidTTL: fail-fast, а не
+// молчаливый откат к вечной записи.
+func parseTTL(ttl string, now int64) (int64, error) {
+	ttl = strings.TrimSpace(ttl)
+	if ttl == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(ttl)
+	if err != nil {
+		return 0, fmt.Errorf("%w %q: %w", ErrInvalidTTL, ttl, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%w %q: длительность должна быть положительной", ErrInvalidTTL, ttl)
+	}
+	return now + int64(d.Seconds()), nil
+}
+
 // newULID генерирует новый ULID на основе w.now()/w.entropy.
 func (w *Writer) newULID() (string, error) {
 	id, err := ulid.New(ulid.Timestamp(time.Unix(w.now(), 0)), w.entropy)
@@ -387,6 +438,8 @@ func (w *Writer) newULID() (string, error) {
 // расходились (одна падает ошибкой, другая клампит). Links, в отличие от Tags,
 // не заменяет текущий набор связей, а добавляет к нему (см. UpdateInput.Links) —
 // резолвится той же resolveLinks, что и Save (висячие ссылки пропускаются молча).
+// TTL (задача 9.4) продлевает срок жизни (новый ExpiresAt = сейчас + длительность)
+// или снимает его ("0"/"" → вечная, см. годок UpdateInput.TTL) — см. parseTTL.
 // Если записи с Id нет, возвращает ошибку, оборачивающую store.ErrNotFound
 // (проверяется errors.Is).
 func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
@@ -420,6 +473,21 @@ func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 	}
 	if in.Importance != nil {
 		m.Importance = ClampImportance(*in.Importance)
+		changed = true
+	}
+	if in.TTL != nil {
+		ttl := strings.TrimSpace(*in.TTL)
+		if ttl == "" || ttl == "0" {
+			// Сентинел "снять срок" (задача 9.4, см. годок UpdateInput.TTL) —
+			// та же трактовка пустой строки, что и у Summary выше.
+			m.ExpiresAt = 0
+		} else {
+			expiresAt, err := parseTTL(ttl, w.now())
+			if err != nil {
+				return err
+			}
+			m.ExpiresAt = expiresAt
+		}
 		changed = true
 	}
 	if in.Tags != nil {

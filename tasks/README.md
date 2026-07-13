@@ -104,7 +104,7 @@ API из 6.2.
 | 9.1 `memoryd doctor` — диагностика здоровья | [9.1-doctor.md](9.1-doctor.md) | ✅ выполнена |
 | 9.2 `memoryd export`/`import` — бэкап и перенос | [9.2-export-import.md](9.2-export-import.md) | ✅ выполнена |
 | 9.3 Типизированные связи + links в `memory_update` | [9.3-typed-links-mcp.md](9.3-typed-links-mcp.md) | ✅ выполнена |
-| 9.4 TTL — явное время жизни записи | [9.4-ttl-expiry.md](9.4-ttl-expiry.md) | ⬜ ожидает |
+| 9.4 TTL — явное время жизни записи | [9.4-ttl-expiry.md](9.4-ttl-expiry.md) | ✅ выполнена |
 
 ## Этап 10 — Web v2
 

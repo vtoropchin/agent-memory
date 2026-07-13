@@ -154,6 +154,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 	tagsFlag := fs.String("tags", "", "теги через запятую")
 	scopeFlag := fs.String("scope", "", "пространство записи (пусто — домашний scope инстанса из [scope])")
 	sourceFlag := fs.String("source", "", "источник факта (пусто — \"cli\")")
+	ttlFlag := fs.String("ttl", "", "явный срок жизни факта: Go-длительность от сейчас (\"72h\"); пусто — вечно (задача 9.4)")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
 
 	content := *contentFlag
@@ -216,6 +217,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 		Importance: *importance,
 		Tags:       splitCSV(*tagsFlag),
 		Source:     source,
+		TTL:        *ttlFlag,
 	})
 	if err != nil {
 		return fmt.Errorf("save: %w", err)

@@ -21,6 +21,12 @@ var kindEnum = []any{"semantic", "episodic", "procedural"}
 // текста ошибки/описания схемы — одно перечисление, не расходится.
 var linkRelValues = []string{memory.RelRelated, memory.RelSupersedes, memory.RelCauses, memory.RelPartOf}
 
+// ttlDescription — общее описание поля ttl для memory_save/memory_update
+// (DESIGN.md §4, §11, §12, задача 9.4): Go-длительность от текущего момента, а
+// не абсолютная дата — тот же принцип, что у recall created_after/created_before
+// (агенту проще сказать "актуально ещё сутки", чем посчитать unix ts).
+const ttlDescription = "явный срок жизни факта: Go-длительность от текущего момента (\"24h\" — сутки, \"72h\" — трое суток, \"168h\" — неделя); пусто = вечно, без срока. Задавай, когда у факта есть заранее известная дата истечения (токен деплоя действует до даты X, фичефлаг до релиза, встреча в конкретный день) — по истечении запись перестаёт участвовать в recall и уходит в архив."
+
 // linksDescription — общее описание поля links для memory_save/memory_update
 // (задача 9.3, закрывает тех-долг задачи 5.1: типизированные связи доступны из
 // обоих инструментов). Обратная совместимость обязательна — элемент массива либо
@@ -125,12 +131,14 @@ type saveInput struct {
 	Tags       []string    `json:"tags,omitempty" jsonschema:"теги для группировки и поиска"`
 	Links      []linkEntry `json:"links,omitempty"`
 	Source     string      `json:"source,omitempty" jsonschema:"откуда пришёл факт: id сессии или иной источник"`
+	TTL        string      `json:"ttl,omitempty" jsonschema:"явный срок жизни факта (см. описание поля)"`
 }
 
 func saveInputSchema() *jsonschema.Schema {
 	s := mustSchema[saveInput]()
 	s.Properties["kind"].Enum = kindEnum
 	s.Properties["links"] = &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription}
+	s.Properties["ttl"].Description = ttlDescription
 	return s
 }
 
@@ -168,12 +176,16 @@ type updateInput struct {
 	Importance *int        `json:"importance,omitempty" jsonschema:"новая важность 1..5"`
 	Tags       []string    `json:"tags,omitempty" jsonschema:"новый полный набор тегов — полностью заменяет старый"`
 	Links      []linkEntry `json:"links,omitempty"` // ДОБАВЛЯЮТСЯ к текущим links записи (не заменяют, в отличие от Tags — см. write.UpdateInput.Links)
+	// TTL — указатель, а не string: отличает "не менять срок" (nil, поле не
+	// передано) от "снять срок" (пустая строка или "0", write.UpdateInput.TTL).
+	TTL *string `json:"ttl,omitempty"`
 }
 
 func updateInputSchema() *jsonschema.Schema {
 	s := mustSchema[updateInput]()
 	linksSchema := &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription + " В отличие от tags, links ДОБАВЛЯЕТСЯ к уже существующим связям записи, а не заменяет их."}
 	s.Properties["links"] = linksSchema
+	s.Properties["ttl"].Description = ttlDescription + " Чтобы продлить или установить срок, передай длительность; чтобы снять срок (сделать запись вечной), передай \"0\"; не указано — текущий срок не меняется."
 	return s
 }
 

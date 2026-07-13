@@ -21,6 +21,7 @@ func buildInstructions(scope config.ScopeConfig) string {
 	b.WriteString("- memory_recall — вызывай в начале задачи: возвращает Markdown-бриф релевантной памяти по смыслу запроса.\n")
 	b.WriteString("- memory_recall поддерживает фильтры tags (хотя бы один из тегов) и created_after/created_before (длительность назад от сейчас, напр. \"168h\" = за неделю).\n")
 	b.WriteString("- memory_save — сохраняй один атомарный факт/событие/процедуру (1–3 предложения) за вызов, не сваливай несколько фактов в одну запись.\n")
+	b.WriteString("- факту с известным сроком годности задавай ttl (memory_save/memory_update) — Go-длительность от сейчас, напр. \"72h\"; в memory_update \"0\" снимает срок.\n")
 	b.WriteString("- links (в memory_save и memory_update) — связь либо строка-id (rel=related), либо объект {\"id\":..,\"rel\":..} с типом: related|supersedes|causes|part_of; links в memory_update ДОБАВЛЯЕТ связи, не заменяет их.\n")
 	b.WriteString("- memory_update — правка существующего факта (содержание, важность, теги, links).\n")
 	b.WriteString("- memory_forget — мягкое удаление (тумстоун): запись перестаёт участвовать в recall, история сохраняется.\n\n")

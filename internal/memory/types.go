@@ -43,8 +43,16 @@ type Memory struct {
 	AccessCount  int
 	SupersededBy *string // id заменившей записи (мягкое забывание)
 	Source       *string // session id / откуда пришло
-	Tags         []string
-	Links        []Link
+	// ExpiresAt — явный срок жизни записи (unix ts, задача 9.4): 0 (или NULL в
+	// БД) означает вечную запись, без срока. В отличие от decay (эвристическое
+	// затухание неиспользуемых episodic, DESIGN.md §11), TTL — точная, заранее
+	// известная агенту дата истечения факта (см. write.SaveInput.TTL/
+	// UpdateInput.TTL, maint.Expirer). recall скрывает просроченные записи
+	// сразу (Store.SearchLexical/SearchVector), фоновый ExpireSweep превращает
+	// их в тумстоун (Supersede) при следующем прогоне планировщика.
+	ExpiresAt int64
+	Tags      []string
+	Links     []Link
 }
 
 // Query — параметры поиска для recall.

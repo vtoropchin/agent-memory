@@ -209,6 +209,7 @@ func run() error {
 		return fmt.Errorf("разбор maint-таймингов: %w", err)
 	}
 	scheduler := maint.NewScheduler(
+		maint.NewExpirer(s),
 		maint.NewDecayer(s, w),
 		maint.NewDedupSweeper(s),
 		maint.NewConsolidator(s, reasoner, w),

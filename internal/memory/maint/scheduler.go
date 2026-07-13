@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// expireSweepLimit — мягкая граница на число просроченных кандидатов,
+// рассматриваемых ExpireSweep за один прогон Scheduler (та же мотивация, что у
+// decaySweepLimit ниже: не часть горячего пути, не даём одному прогону
+// растянуться на большой базе — следующий тик доберёт остаток).
+const expireSweepLimit = 500
+
 // decaySweepLimit — мягкая граница на число episodic-кандидатов, рассматриваемых
 // Decay за один прогон Scheduler. Decay/consolidate — фоновые джобы, не часть
 // горячего пути; лимит нужен только чтобы один прогон не растянулся на
@@ -18,12 +24,15 @@ const decaySweepLimit = 500
 const consolidateBatchLimit = 50
 
 // Scheduler запускает все maintenance-джобы (DESIGN.md §11) по расписанию:
-// decay → dedup sweep → consolidation → досчёт векторов (reindex). Порядок
-// внутри одного прогона фиксирован и продуман: decay/sweep сначала сокращают
-// объём и шум эпизодов, которые иначе попали бы в дорогую консолидацию через
-// Reasoner; reindex — последним, чтобы подхватить и то, что успели создать/
-// изменить предыдущие джобы этого же прогона.
+// expire sweep → decay → dedup sweep → consolidation → досчёт векторов
+// (reindex). Порядок внутри одного прогона фиксирован и продуман: expire —
+// первым, чтобы явно просроченные записи (детерминированный TTL, задача 9.4) не
+// тратили прогон decay/consolidate впустую, превратившись в тумстоун ещё до них;
+// decay/sweep дальше сокращают объём и шум эпизодов, которые иначе попали бы в
+// дорогую консолидацию через Reasoner; reindex — последним, чтобы подхватить и
+// то, что успели создать/изменить предыдущие джобы этого же прогона.
 type Scheduler struct {
+	expirer      *Expirer
 	decayer      *Decayer
 	dedup        *DedupSweeper
 	consolidator *Consolidator
@@ -34,13 +43,15 @@ type Scheduler struct {
 }
 
 // NewScheduler создаёт Scheduler поверх уже сконструированных джобов. Порядок
-// параметров d, ds, c, r соответствует порядку их выполнения в RunOnce (decay →
-// sweep → consolidate → reindex). interval берётся из конфига
-// maint.decay_interval, consolidateAfter — из maint.consolidate_after
+// параметров e, d, ds, c, r соответствует порядку их выполнения в RunOnce
+// (expire → decay → sweep → consolidate → reindex). interval берётся из
+// конфига maint.decay_interval, consolidateAfter — из maint.consolidate_after
 // (DESIGN.md §13). consolidateAfter используется не только для Consolidate, но и
-// как база порогов Decay — см. годок RunOnce.
-func NewScheduler(d *Decayer, ds *DedupSweeper, c *Consolidator, r *Reindexer, interval, consolidateAfter time.Duration) *Scheduler {
+// как база порогов Decay — см. годок RunOnce. ExpireSweep параметров конфига не
+// требует (TTL самой записи уже задаёт момент истечения, см. годок Expirer).
+func NewScheduler(e *Expirer, d *Decayer, ds *DedupSweeper, c *Consolidator, r *Reindexer, interval, consolidateAfter time.Duration) *Scheduler {
 	return &Scheduler{
+		expirer:          e,
 		decayer:          d,
 		dedup:            ds,
 		consolidator:     c,
@@ -51,24 +62,31 @@ func NewScheduler(d *Decayer, ds *DedupSweeper, c *Consolidator, r *Reindexer, i
 }
 
 // RunOnce выполняет один прогон всех джобов последовательно:
-//  1. Decay — demoteAfter = consolidateAfter (эпизод, ещё не доросший до
+//  1. ExpireSweep(expireSweepLimit) — архивирует записи с истёкшим явным TTL
+//     (задача 9.4), не дожидаясь decay/consolidate.
+//  2. Decay — demoteAfter = consolidateAfter (эпизод, ещё не доросший до
 //     консолидации, начинает терять importance ровно к тому же моменту, когда
 //     стал бы её кандидатом — единая точка отсчёта «эпизод устарел»);
 //     archiveAfter = 4×consolidateAfter (архивируем только то, что не
 //     консолидировалось и не обращалось к себе ещё вчетверо дольше — запас,
 //     чтобы медленные/редкие джобы консолидации успели забрать запись в
 //     semantic до архивации). limit — decaySweepLimit.
-//  2. Sweep — чистка накопившихся почти-дублей (в т.ч. тех, что мог породить
+//  3. Sweep — чистка накопившихся почти-дублей (в т.ч. тех, что мог породить
 //     предыдущий прогон Consolidate).
-//  3. Consolidate(consolidateAfter, consolidateBatchLimit).
-//  4. CheckAndReindex — досчёт векторов, в т.ч. для фактов, только что
+//  4. Consolidate(consolidateAfter, consolidateBatchLimit).
+//  5. CheckAndReindex — досчёт векторов, в т.ч. для фактов, только что
 //     созданных консолидацией.
 //
 // Ошибка отдельного джоба (DESIGN.md §15: деградация, а не падение) логируется
 // в stderr, и выполнение продолжается со следующего джоба — один сбойный джоб
 // не должен блокировать остальные. Результаты (или отметка об ошибке) всех
-// четырёх джобов сводятся в одну итоговую строку лога.
+// пяти джобов сводятся в одну итоговую строку лога.
 func (s *Scheduler) RunOnce(ctx context.Context) {
+	expireResult, expireErr := s.expirer.ExpireSweep(ctx, expireSweepLimit)
+	if expireErr != nil {
+		log.Printf("maint: scheduler: expire sweep: %v", expireErr)
+	}
+
 	decayResult, decayErr := s.decayer.Decay(ctx, s.consolidateAfter, 4*s.consolidateAfter, decaySweepLimit)
 	if decayErr != nil {
 		log.Printf("maint: scheduler: decay: %v", decayErr)
@@ -90,10 +108,12 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 	}
 
 	log.Printf(
-		"maint: scheduler: прогон завершён: decay(scanned=%d demoted=%d archived=%d err=%v) "+
+		"maint: scheduler: прогон завершён: expire(scanned=%d archived=%d err=%v) "+
+			"decay(scanned=%d demoted=%d archived=%d err=%v) "+
 			"dedup(scanned=%d superseded=%d err=%v) "+
 			"consolidate(scanned=%d created=%d merged=%d superseded=%d skipped=%d err=%v) "+
 			"reindex(reindexed=%v embedded=%d failed=%d err=%v)",
+		expireResult.Scanned, expireResult.Archived, expireErr,
 		decayResult.Scanned, decayResult.Demoted, decayResult.Archived, decayErr,
 		dedupResult.Scanned, dedupResult.Superseded, dedupErr,
 		consolidateResult.Scanned, consolidateResult.Created, consolidateResult.Merged, consolidateResult.Superseded, consolidateResult.Skipped, consolidateErr,

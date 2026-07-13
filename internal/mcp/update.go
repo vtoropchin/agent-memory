@@ -33,6 +33,7 @@ func (s *Server) handleUpdate(ctx context.Context, _ *sdkmcp.CallToolRequest, in
 		Importance: in.Importance,
 		Tags:       in.Tags,
 		Links:      links,
+		TTL:        in.TTL,
 	}); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, nil, fmt.Errorf("memory_update: запись %q не найдена", id)

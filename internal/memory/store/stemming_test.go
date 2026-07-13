@@ -273,12 +273,12 @@ func TestMigrateStemmedFTSPreservesExistingData(t *testing.T) {
 	}
 }
 
-// ftsHasColumnPublic — обёртка над ftsHasColumn для теста (своя транзакция).
+// ftsHasColumnPublic — обёртка над hasColumn для теста (своя транзакция).
 func ftsHasColumnPublic(db *sql.DB, ctx context.Context) (bool, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	return ftsHasColumn(ctx, tx, "content_stemmed")
+	return hasColumn(ctx, tx, "memories_fts", "content_stemmed")
 }

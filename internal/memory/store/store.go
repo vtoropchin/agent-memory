@@ -115,6 +115,13 @@ type Store interface {
 	// у записи нет вектора, либо векторный индекс ещё не создавался — пустой
 	// список без ошибки (деградация, DESIGN.md §15).
 	SemanticNeighbors(ctx context.Context, id string, k int) ([]memory.Candidate, error)
+	// ListExpired возвращает живые записи (superseded_by IS NULL) с истёкшим явным
+	// сроком жизни: 0 < expires_at < now (DESIGN.md §4, §11, задача 9.4) —
+	// очередь на архивирование фоновым джобом maint.Expirer. Отсортированы по
+	// expires_at по возрастанию (самые просроченные первыми). limit <= 0
+	// означает без ограничения. Как и ListEpisodicForDecay/Consolidation,
+	// Tags/Links не подгружаются — потребителю нужен только Id.
+	ListExpired(ctx context.Context, now int64, limit int) ([]memory.Memory, error)
 	// Health возвращает быстрый read-only снимок целостности файла БД
 	// (DESIGN.md §15, задача 9.1 `memoryd doctor`): quick_check и текущий
 	// journal_mode. Не изменяет данные, не выполняет полный integrity_check

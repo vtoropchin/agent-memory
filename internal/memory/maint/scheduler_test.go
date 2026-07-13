@@ -20,6 +20,7 @@ import (
 func newTestScheduler(s store.Store, r reason.Reasoner, e embed.Embedder) *Scheduler {
 	w := write.New(s, e)
 	return NewScheduler(
+		NewExpirer(s),
 		NewDecayer(s, w),
 		NewDedupSweeper(s),
 		NewConsolidator(s, r, w),
@@ -30,9 +31,10 @@ func newTestScheduler(s store.Store, r reason.Reasoner, e embed.Embedder) *Sched
 }
 
 // TestSchedulerRunOnceCallsAllJobs проверяет, что один прогон RunOnce реально
-// затрагивает все четыре джоба: consolidate (эпизод старше consolidateAfter
-// консолидируется через echoReasoner), dedup sweep (near-duplicate пара
-// схлопывается) и reindex (у всех живых записей появляется вектор).
+// затрагивает все пять джобов: expire sweep (запись с истёкшим TTL становится
+// тумстоуном), consolidate (эпизод старше consolidateAfter консолидируется через
+// echoReasoner), dedup sweep (near-duplicate пара схлопывается) и reindex (у всех
+// живых записей появляется вектор).
 func TestSchedulerRunOnceCallsAllJobs(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -48,12 +50,23 @@ func TestSchedulerRunOnceCallsAllJobs(t *testing.T) {
 	base := time.Now().Unix()
 	putMemoryWith(t, s, "project:x", near1, 2, base)
 	putMemoryWith(t, s, "project:x", near2, 4, base)
+	// запись с истёкшим TTL (задача 9.4) — должна стать тумстоуном ExpireSweep,
+	// первым джобом RunOnce, до того как до неё вообще дошли бы decay/consolidate.
+	expired := putMemoryWithTTL(t, s, "project:x", "факт с истёкшим сроком годности", base-10)
 
 	rs := &echoReasoner{}
 	fe := &reindexFakeEmbedder{model: "fake-model", dim: 3}
 	sched := newTestScheduler(s, rs, fe)
 
 	sched.RunOnce(ctx)
+
+	gotExpired, err := s.Get(ctx, expired.Id)
+	if err != nil {
+		t.Fatalf("Get expired: %v", err)
+	}
+	if gotExpired.SupersededBy == nil {
+		t.Errorf("expired.SupersededBy = nil, want непусто (expire sweep должен был архивировать запись с истёкшим TTL)")
+	}
 
 	if rs.calls == 0 {
 		t.Errorf("Reasoner.Complete вызовов = 0, want > 0 (consolidate должен был отработать)")

@@ -158,20 +158,24 @@ func newWebHandler(s store.Store, w *write.Writer) http.Handler {
 // и нормализация nullable-полей (*string/*int64 сериализуются в null, когда
 // не заданы).
 type memoryDTO struct {
-	Id           string    `json:"id"`
-	Kind         string    `json:"kind"`
-	Scope        string    `json:"scope"`
-	Content      string    `json:"content"`
-	Summary      *string   `json:"summary"`
-	Importance   int       `json:"importance"`
-	CreatedAt    int64     `json:"createdAt"`
-	UpdatedAt    int64     `json:"updatedAt"`
-	AccessedAt   *int64    `json:"accessedAt"`
-	AccessCount  int       `json:"accessCount"`
-	SupersededBy *string   `json:"supersededBy"`
-	Source       *string   `json:"source"`
-	Tags         []string  `json:"tags"`
-	Links        []linkDTO `json:"links"`
+	Id           string  `json:"id"`
+	Kind         string  `json:"kind"`
+	Scope        string  `json:"scope"`
+	Content      string  `json:"content"`
+	Summary      *string `json:"summary"`
+	Importance   int     `json:"importance"`
+	CreatedAt    int64   `json:"createdAt"`
+	UpdatedAt    int64   `json:"updatedAt"`
+	AccessedAt   *int64  `json:"accessedAt"`
+	AccessCount  int     `json:"accessCount"`
+	SupersededBy *string `json:"supersededBy"`
+	Source       *string `json:"source"`
+	// ExpiresAt — явный срок жизни записи (unix ts, задача 9.4): 0 = вечная,
+	// без срока (Memory.ExpiresAt). Read-only показ в карточке — правка TTL из
+	// web-морды вне этой версии (см. DESIGN.md §12: read + мягкое удаление).
+	ExpiresAt int64     `json:"expiresAt"`
+	Tags      []string  `json:"tags"`
+	Links     []linkDTO `json:"links"`
 }
 
 // linkDTO — представление memory.Link ({dst, rel}) для JSON API.
@@ -224,6 +228,7 @@ func toDTO(m memory.Memory) memoryDTO {
 		AccessCount:  m.AccessCount,
 		SupersededBy: m.SupersededBy,
 		Source:       m.Source,
+		ExpiresAt:    m.ExpiresAt,
 		Tags:         tags,
 		Links:        links,
 	}

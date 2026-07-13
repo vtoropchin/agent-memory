@@ -297,6 +297,10 @@ func TestRunImport_RoundTripByteForByte(t *testing.T) {
 		summary: strPtr("A summary"), accessedAt: int64Ptr(1300), accessCount: 7,
 		source: strPtr("session-42"), tags: []string{"b-tag", "a-tag"},
 		links: []exportLink{{Dst: idB, Rel: "related"}},
+		// expiresAt (задача 9.4) — регресс на кросс-задачную потерю TTL при
+		// export->import: recordToMemory/memoryToExportRecord обязаны
+		// пробрасывать expires_at так же честно, как остальные поля.
+		expiresAt: 999999999,
 	})
 	mustPut(t, srcStore, memoryRec{
 		id: idC, scope: "project:agentmemory", content: "запись C — тумстоун",
@@ -322,6 +326,15 @@ func TestRunImport_RoundTripByteForByte(t *testing.T) {
 	}
 	if !strings.Contains(importOut.String(), "imported 3, skipped 0, links 2 (dropped 0)") {
 		t.Errorf("вывод import = %q, want imported 3, links 2 (dropped 0)", importOut.String())
+	}
+
+	// Регресс-проверка (задача 9.4): expires_at должен реально попасть в JSONL
+	// первого экспорта, а не просто совпасть между первым/вторым экспортом по
+	// какой-то другой причине (например, если бы поле всегда терялось молча на
+	// обоих прогонах). ExpiresAt=0 (вечная, идёт с omitempty) для idB/idC ниже
+	// подтверждает, что поле не появляется в JSONL для не-TTL записей.
+	if !strings.Contains(firstExport.String(), `"expires_at":999999999`) {
+		t.Fatalf("первый export не содержит expires_at записи A:\n%s", firstExport.String())
 	}
 
 	var secondExport bytes.Buffer
@@ -355,6 +368,7 @@ type memoryRec struct {
 	summary, source, supersededBy *string
 	accessedAt                    *int64
 	accessCount                   int
+	expiresAt                     int64 // TTL (задача 9.4), 0 = вечная
 	tags                          []string
 	links                         []exportLink
 }
@@ -370,7 +384,7 @@ func mustPut(t *testing.T, s store.Store, r memoryRec) {
 		Id: r.id, Kind: "semantic", Scope: r.scope, Content: r.content,
 		Summary: r.summary, Importance: r.importance, CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
 		AccessedAt: r.accessedAt, AccessCount: r.accessCount, SupersededBy: r.supersededBy,
-		Source: r.source, Tags: r.tags,
+		Source: r.source, ExpiresAt: r.expiresAt, Tags: r.tags,
 	})
 	for _, l := range r.links {
 		m.Links = append(m.Links, memory.Link{Dst: l.Dst, Rel: l.Rel})

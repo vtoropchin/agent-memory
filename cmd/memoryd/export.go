@@ -1,13 +1,13 @@
 // Подкоманда `memoryd export` — полный/частичный экспорт памяти в переносимый
 // JSONL-бэкап (DESIGN.md §12, задача 9.2): первая строка — заголовок с
 // метаданными формата, далее одна запись памяти на строку (id, kind, scope,
-// content, summary, importance, все таймстампы, superseded_by, source, tags,
-// links). Векторы НЕ экспортируются — производные данные, которые досчитает
-// Reindexer при следующем запуске memoryd (пустая embed_meta новой БД → полный
-// reindex, DESIGN.md §9, §11). Тумстоуны (superseded) экспортируются как есть
-// — история переносится вместе с фактами. Формат стримится построчно (JSONL) —
-// диффабелен и grep'абелен; порядок строк детерминирован (по id, задаёт
-// Store.AllForExport).
+// content, summary, importance, все таймстампы, superseded_by, source,
+// expires_at, tags, links). Векторы НЕ экспортируются — производные данные,
+// которые досчитает Reindexer при следующем запуске memoryd (пустая embed_meta
+// новой БД → полный reindex, DESIGN.md §9, §11). Тумстоуны (superseded)
+// экспортируются как есть — история переносится вместе с фактами. Формат
+// стримится построчно (JSONL) — диффабелен и grep'абелен; порядок строк
+// детерминирован (по id, задаёт Store.AllForExport).
 package main
 
 import (
@@ -53,20 +53,26 @@ type exportLink struct {
 // без вектора (DESIGN.md §9 — производные данные, их досчитает Reindexer).
 // Порядок полей соответствует примеру формата в задаче 9.2.
 type exportRecord struct {
-	Id           string       `json:"id"`
-	Kind         string       `json:"kind"`
-	Scope        string       `json:"scope"`
-	Content      string       `json:"content"`
-	Summary      *string      `json:"summary"`
-	Importance   int          `json:"importance"`
-	CreatedAt    int64        `json:"created_at"`
-	UpdatedAt    int64        `json:"updated_at"`
-	AccessedAt   *int64       `json:"accessed_at"`
-	AccessCount  int          `json:"access_count"`
-	SupersededBy *string      `json:"superseded_by"`
-	Source       *string      `json:"source"`
-	Tags         []string     `json:"tags"`
-	Links        []exportLink `json:"links"`
+	Id           string  `json:"id"`
+	Kind         string  `json:"kind"`
+	Scope        string  `json:"scope"`
+	Content      string  `json:"content"`
+	Summary      *string `json:"summary"`
+	Importance   int     `json:"importance"`
+	CreatedAt    int64   `json:"created_at"`
+	UpdatedAt    int64   `json:"updated_at"`
+	AccessedAt   *int64  `json:"accessed_at"`
+	AccessCount  int     `json:"access_count"`
+	SupersededBy *string `json:"superseded_by"`
+	Source       *string `json:"source"`
+	// ExpiresAt — явный TTL записи (unix ts, задача 9.4). omitempty: 0 (вечная,
+	// подавляющее большинство записей) не засоряет JSONL полем-нулём; отсутствие
+	// поля при импорте (recordToMemory, старые бэкапы без TTL включительно)
+	// читается как нулевое значение Go — те же 0/вечная, обратная совместимость
+	// без инкремента exportVersion (поле аддитивное и опциональное).
+	ExpiresAt int64        `json:"expires_at,omitempty"`
+	Tags      []string     `json:"tags"`
+	Links     []exportLink `json:"links"`
 }
 
 // memoryToExportRecord переводит доменную Memory в сериализуемую запись.
@@ -97,6 +103,7 @@ func memoryToExportRecord(m memory.Memory) exportRecord {
 		AccessCount:  m.AccessCount,
 		SupersededBy: m.SupersededBy,
 		Source:       m.Source,
+		ExpiresAt:    m.ExpiresAt,
 		Tags:         tags,
 		Links:        links,
 	}

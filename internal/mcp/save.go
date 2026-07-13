@@ -37,6 +37,7 @@ func (s *Server) handleSave(ctx context.Context, _ *sdkmcp.CallToolRequest, in s
 		Tags:       in.Tags,
 		Links:      links,
 		Source:     in.Source,
+		TTL:        in.TTL,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("memory_save: %w", err)
