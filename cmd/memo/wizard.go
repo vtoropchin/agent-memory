@@ -6,14 +6,17 @@
 // фолбэка при не-TTY" — huh/bubbletea сами по себе не вызываются в пайпе или
 // под -no-input, поэтому их поведение без TTY здесь не имеет значения. Каждое
 // поле — тонкая обёртка над уже протестированными без TUI функциями
-// (fetchOllamaModels/fetchOpenAIEmbeddingModels, providers.go); сам виджет не
-// юнит-тестируется (библиотека), тестируется только плумбинг под ним.
+// (fetchOllamaModels/fetchOpenAIEmbeddingModels — providers.go;
+// resolveOllamaEmbedState/classifyOllamaEmbedModels — ollama.go); сам виджет
+// не юнит-тестируется (библиотека), тестируется только плумбинг под ним.
 package main
 
 import (
 	"context"
 	"fmt"
 	"io"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -50,26 +53,44 @@ func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConf
 		cfg.Project = project
 	}
 
-	if cfg.EmbedderProvider == "" {
-		provider := defaultEmbedderProvider
-		if err := huh.NewSelect[string]().
-			Title("Провайдер эмбеддинга").
-			Options(providerSelectOptions(embedderProviders)...).
-			Value(&provider).Run(); err != nil {
-			return cfg, err
+	// Петля вокруг выбора провайдера эмбеддинга + его настройки: ollama-ветка
+	// (promptOllamaEmbedder) может попросить "выбрать другую настройку"
+	// (reselect=true) при недоступности/отсутствии ollama — тогда сбрасываем
+	// выбор провайдера и модель и возвращаемся к select провайдера (задача
+	// 11.1, цикл исправлений). openai/noop не запрашивают reselect —
+	// однократный проход.
+	for {
+		if cfg.EmbedderProvider == "" {
+			provider := defaultEmbedderProvider
+			if err := huh.NewSelect[string]().
+				Title("Провайдер эмбеддинга").
+				Options(providerSelectOptions(embedderProviders)...).
+				Value(&provider).Run(); err != nil {
+				return cfg, err
+			}
+			cfg.EmbedderProvider = provider
 		}
-		cfg.EmbedderProvider = provider
-	}
 
-	switch cfg.EmbedderProvider {
-	case "ollama":
-		if err := promptOllamaEmbedder(ctx, out, &cfg); err != nil {
-			return cfg, err
+		reselect := false
+		switch cfg.EmbedderProvider {
+		case "ollama":
+			r, err := promptOllamaEmbedder(ctx, out, &cfg)
+			if err != nil {
+				return cfg, err
+			}
+			reselect = r
+		case "openai":
+			if err := promptOpenAIEmbedder(ctx, out, &cfg); err != nil {
+				return cfg, err
+			}
 		}
-	case "openai":
-		if err := promptOpenAIEmbedder(ctx, out, &cfg); err != nil {
-			return cfg, err
+
+		if !reselect {
+			break
 		}
+		cfg.EmbedderProvider = ""
+		cfg.EmbedderModel = ""
+		cfg.EmbedderBaseURL = ""
 	}
 
 	if cfg.ReasonerProvider == "" {
@@ -149,16 +170,25 @@ func providerSelectOptions(providers []providerSpec) []huh.Option[string] {
 	return opts
 }
 
-// promptOllamaEmbedder спрашивает base URL ollama (если не задан), затем
-// пробует получить реально установленные модели (fetchOllamaModels) и
-// показать их select-списком; при недоступности сервера/пустом списке —
-// печатает причину в out и откатывается на ручной ввод модели (дефолт
-// defaultOllamaModel) — не блокирует установку (задача 11.1).
-func promptOllamaEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) error {
+// promptOllamaEmbedder спрашивает base URL ollama (если не задан), затем в
+// петле диагностирует окружение (resolveOllamaEmbedState, ollama.go) и
+// различает 4 состояния (задача 11.1, цикл исправлений):
+//   - happy — показывает select ТОЛЬКО из распознанных моделей эмбеддинга
+//     (рекомендованные первыми, первая преселекчена), пишет выбор в
+//     cfg.EmbedderModel и возвращает (false, nil);
+//   - no-models/not-running/not-installed — печатает в out рекомендации/
+//     инструкцию под текущую ОС, затем меню из 2 пунктов: "Готово,
+//     продолжаем" повторяет пробу (следующая итерация петли), "Выбрать
+//     другую настройку" возвращает (true, nil) — сигнал promptInitTUI
+//     сбросить провайдера эмбеддинга и вернуться к его select.
+//
+// Если cfg.EmbedderModel уже задан (флагом) — модель повторно не
+// спрашивается, функция возвращает (false, nil) сразу после base URL.
+func promptOllamaEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) (reselect bool, err error) {
 	if cfg.EmbedderBaseURL == "" {
 		base := defaultOllamaBaseURL
 		if err := huh.NewInput().Title("ollama base URL").Value(&base).Run(); err != nil {
-			return err
+			return false, err
 		}
 		if base == "" {
 			base = defaultOllamaBaseURL
@@ -166,30 +196,49 @@ func promptOllamaEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) e
 		cfg.EmbedderBaseURL = base
 	}
 	if cfg.EmbedderModel != "" {
-		return nil
+		return false, nil
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, fetchModelsTimeout)
-	models, err := fetchOllamaModels(fetchCtx, cfg.EmbedderBaseURL)
-	cancel()
-	if err != nil {
-		fmt.Fprintf(out, "не удалось получить список моделей ollama (%v) — введи имя модели вручную\n", err)
-		return promptModelManual(&cfg.EmbedderModel, defaultOllamaModel)
-	}
-	if len(models) == 0 {
-		fmt.Fprintln(out, "ollama не сообщила ни одной установленной модели — введи имя модели вручную")
-		return promptModelManual(&cfg.EmbedderModel, defaultOllamaModel)
-	}
+	for {
+		state, models, fetchErr := resolveOllamaEmbedState(ctx, cfg.EmbedderBaseURL, exec.LookPath)
+		switch state {
+		case ollamaStateHappy:
+			model := models[0]
+			if err := huh.NewSelect[string]().
+				Title("модель эмбеддингов ollama (установленные)").
+				Options(toModelOptions(models)...).
+				Value(&model).Run(); err != nil {
+				return false, err
+			}
+			cfg.EmbedderModel = model
+			return false, nil
+		case ollamaStateNoModels:
+			printOllamaNoModelsHelp(out, models)
+		case ollamaStateNotRunning:
+			printOllamaNotRunningHelp(out, fetchErr, runtime.GOOS)
+		default: // ollamaStateNotInstalled
+			printOllamaNotInstalledHelp(out, fetchErr, runtime.GOOS)
+		}
 
-	model := models[0]
-	if err := huh.NewSelect[string]().
-		Title("модель эмбеддингов ollama (установленные)").
-		Options(toModelOptions(models)...).
-		Value(&model).Run(); err != nil {
-		return err
+		const (
+			menuRetry    = "retry"
+			menuReselect = "reselect"
+		)
+		action := menuRetry
+		if err := huh.NewSelect[string]().
+			Title("Что дальше?").
+			Options(
+				huh.NewOption("Готово, продолжаем", menuRetry),
+				huh.NewOption("Выбрать другую настройку", menuReselect),
+			).
+			Value(&action).Run(); err != nil {
+			return false, err
+		}
+		if action == menuReselect {
+			return true, nil
+		}
+		// menuRetry — назад к пере-пробе resolveOllamaEmbedState.
 	}
-	cfg.EmbedderModel = model
-	return nil
 }
 
 // promptOpenAIEmbedder спрашивает токен (скрытый ввод, если не задан), потом
