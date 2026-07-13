@@ -43,20 +43,12 @@ const semanticNeighborsPad = 5
 // исходного limit.
 const vectorTagFilterPad = 5
 
-// schema — DDL хранилища (DESIGN.md §4). Идемпотентен: все объекты создаются
-// через IF NOT EXISTS, поэтому Open можно вызывать многократно на одном файле.
-//
-// Отклонение от иллюстративной схемы в DESIGN.md: memories_fts объявлена как
-// самодостаточная (не external-content, без `content='memories'`). Причина: колонка
-// `tags` в fts — денормализованный агрегат из таблицы `tags`, а не колонка `memories`,
-// поэтому корректная синхронизация через специальные 'delete'-команды external-content
-// режима потребовала бы либо дублирования агрегата тегов в самой `memories` (лишняя
-// колонка вне схемы §4), либо риска рассинхронизации индекса при неточном совпадении
-// удаляемых значений. Самодостаточная fts5-таблица поддерживает обычные UPDATE/DELETE
-// по rowid, что делает триггеры синхронизации простыми и заведомо корректными;
-// накладные расходы на дублирование текста незначительны на масштабах MVP (см. §1
-// «не-цели»: не промышленный масштаб).
-const schema = `
+// baseSchema — DDL хранилища для таблиц метаданных (DESIGN.md §4). Идемпотентен: все
+// объекты создаются через IF NOT EXISTS, поэтому Open можно вызывать многократно на
+// одном файле. memories_fts сюда НЕ входит — её форма версионируется через механизм
+// миграций схемы (см. migrate/migrations ниже, задача 8.3), поскольку она меняется
+// между версиями (добавление content_stemmed, а в будущем — возможно другие правки).
+const baseSchema = `
 CREATE TABLE IF NOT EXISTS memories (
     id            TEXT PRIMARY KEY,
     kind          TEXT NOT NULL,
@@ -85,36 +77,6 @@ CREATE TABLE IF NOT EXISTS links (
     PRIMARY KEY (src, dst, rel)
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    content, summary, tags
-);
-
-CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts(rowid, content, summary, tags)
-    VALUES (new.rowid, new.content, coalesce(new.summary, ''), '');
-END;
-
-CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-    UPDATE memories_fts SET content = new.content, summary = coalesce(new.summary, '')
-    WHERE rowid = new.rowid;
-END;
-
-CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-    DELETE FROM memories_fts WHERE rowid = old.rowid;
-END;
-
-CREATE TRIGGER IF NOT EXISTS tags_ai AFTER INSERT ON tags BEGIN
-    UPDATE memories_fts SET tags = (
-        SELECT coalesce(group_concat(tag, ' '), '') FROM tags WHERE memory_id = new.memory_id
-    ) WHERE rowid = (SELECT rowid FROM memories WHERE id = new.memory_id);
-END;
-
-CREATE TRIGGER IF NOT EXISTS tags_ad AFTER DELETE ON tags BEGIN
-    UPDATE memories_fts SET tags = (
-        SELECT coalesce(group_concat(tag, ' '), '') FROM tags WHERE memory_id = old.memory_id
-    ) WHERE rowid = (SELECT rowid FROM memories WHERE id = old.memory_id);
-END;
-
 -- Векторный индекс memories_vec НЕ создаётся здесь: dim (размерность эмбеддинга)
 -- неизвестен заранее — она определяется моделью Embedder и подставляется только при
 -- первом вызове ResetVectorIndex (см. ниже), который создаёт таблицу через
@@ -127,6 +89,257 @@ CREATE TABLE IF NOT EXISTS embed_meta (
     dim   INTEGER NOT NULL
 );
 `
+
+// ftsTriggers синхронизирует memories_fts с memories/tags. Выполняется КАЖДЫЙ Open,
+// обязательно ПОСЛЕ migrate() — потому что триггеры ссылаются на memories_fts, а на
+// свежей БД её создаёт именно миграция (см. migrateStemmedFTS). Тела триггеров
+// синхронизируют content/summary/tags как раньше (задача 8.3 их не меняет) — колонку
+// content_stemmed заполняет отдельным UPDATE прикладной код Put (см. ниже): там же,
+// где считается normalizeForFTS, естественно и держать её актуальной, не заводя для
+// стемминга SQL-функцию.
+//
+// DROP TRIGGER IF EXISTS + CREATE (а не CREATE TRIGGER IF NOT EXISTS): при миграции
+// существующей БД со старой схемой (migrateStemmedFTS переименовывает memories_fts в
+// memories_fts_old) SQLite сам переписывает ссылку на таблицу ВНУТРИ уже существующих
+// триггеров на новое имя (memories_fts_old) — «просто досоздать при отсутствии» после
+// этого оставило бы старые триггеры молча смотрящими на уже удалённую
+// memories_fts_old. Безусловный DROP+CREATE каждый Open гарантированно приводит
+// триггеры к актуальному определению независимо от того, что с ними сделал rename.
+//
+// Отклонение от иллюстративной схемы в DESIGN.md: memories_fts объявлена как
+// самодостаточная (не external-content, без `content='memories'`). Причина: колонка
+// `tags` в fts — денормализованный агрегат из таблицы `tags`, а не колонка `memories`,
+// поэтому корректная синхронизация через специальные 'delete'-команды external-content
+// режима потребовала бы либо дублирования агрегата тегов в самой `memories` (лишняя
+// колонка вне схемы §4), либо риска рассинхронизации индекса при неточном совпадении
+// удаляемых значений. Самодостаточная fts5-таблица поддерживает обычные UPDATE/DELETE
+// по rowid, что делает триггеры синхронизации простыми и заведомо корректными;
+// накладные расходы на дублирование текста незначительны на масштабах MVP (см. §1
+// «не-цели»: не промышленный масштаб).
+const ftsTriggers = `
+DROP TRIGGER IF EXISTS memories_ai;
+CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content, summary, tags)
+    VALUES (new.rowid, new.content, coalesce(new.summary, ''), '');
+END;
+
+DROP TRIGGER IF EXISTS memories_au;
+CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+    UPDATE memories_fts SET content = new.content, summary = coalesce(new.summary, '')
+    WHERE rowid = new.rowid;
+END;
+
+DROP TRIGGER IF EXISTS memories_ad;
+CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+    DELETE FROM memories_fts WHERE rowid = old.rowid;
+END;
+
+DROP TRIGGER IF EXISTS tags_ai;
+CREATE TRIGGER tags_ai AFTER INSERT ON tags BEGIN
+    UPDATE memories_fts SET tags = (
+        SELECT coalesce(group_concat(tag, ' '), '') FROM tags WHERE memory_id = new.memory_id
+    ) WHERE rowid = (SELECT rowid FROM memories WHERE id = new.memory_id);
+END;
+
+DROP TRIGGER IF EXISTS tags_ad;
+CREATE TRIGGER tags_ad AFTER DELETE ON tags BEGIN
+    UPDATE memories_fts SET tags = (
+        SELECT coalesce(group_concat(tag, ' '), '') FROM tags WHERE memory_id = old.memory_id
+    ) WHERE rowid = (SELECT rowid FROM memories WHERE id = old.memory_id);
+END;
+`
+
+// createMemoriesFTS — целевая (текущая) форма memories_fts: задача 8.3 добавляет
+// content_stemmed к исходным content/summary/tags. Используется и для свежей БД
+// (создаёт таблицу напрямую), и как целевая форма при миграции существующей БД со
+// старой схемой (см. migrateStemmedFTS).
+const createMemoriesFTS = `CREATE VIRTUAL TABLE memories_fts USING fts5(content, summary, tags, content_stemmed)`
+
+// schemaVersion — целевая версия схемы (PRAGMA user_version). Растёт на 1 с каждым
+// новым шагом миграции, добавленным в migrations. Задача 8.3 ВВОДИТ сам механизм:
+// все существующие на момент введения БД (как и совсем свежие) имеют user_version=0
+// (PRAGMA user_version никогда раньше не выставлялась) — поэтому migrations[0]
+// обязана идемпотентно привести к целевой форме ОБА случая: и БД, где memories_fts
+// ещё вовсе нет (создать сразу в целевом виде), и БД со старой схемой memories_fts
+// (content, summary, tags) без content_stemmed (пересобрать и перегнать контент).
+// Следующая задача с миграцией (9.4, TTL) добавит migrations[1] и увеличит
+// schemaVersion до 2, не трогая этот код.
+const schemaVersion = 1
+
+// migrationStep — один шаг миграции схемы: переводит БД с версии i на версию i+1.
+// Выполняется целиком в одной транзакции.
+type migrationStep func(ctx context.Context, tx *sql.Tx) error
+
+// migrations — упорядоченный список шагов миграции, migrations[i] соответствует
+// переходу версии i -> i+1. Длина списка должна совпадать с schemaVersion.
+var migrations = []migrationStep{
+	migrateStemmedFTS, // 0 -> 1 (задача 8.3): memories_fts + колонка content_stemmed
+}
+
+// migrate применяет по порядку шаги migrations, начиная с версии, прочитанной из
+// PRAGMA user_version, до schemaVersion. Каждый шаг — в своей транзакции; user_version
+// обновляется сразу после успешного шага (а не одной транзакцией на всё) — при обрыве
+// между шагами повторный Open продолжит с незавершённого шага, а не переиграет уже
+// применённые. Вызывается из Open ПОСЛЕ baseSchema и ДО ftsTriggers.
+func (s *sqliteStore) migrate(ctx context.Context) error {
+	var version int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("чтение user_version: %w", err)
+	}
+
+	for version < schemaVersion {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("начало транзакции миграции: %w", err)
+		}
+
+		if err := migrations[version](ctx, tx); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("миграция схемы %d -> %d: %w", version, version+1, err)
+		}
+
+		version++
+		// PRAGMA не поддерживает bind-параметры в mattn/go-sqlite3 — version посчитан
+		// в Go (не из пользовательского ввода), подстановка через Sprintf безопасна.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, version)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("обновление user_version до %d: %w", version, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit миграции схемы (версия %d): %w", version, err)
+		}
+	}
+	return nil
+}
+
+// ftsTableExists сообщает, создана ли уже виртуальная таблица memories_fts (в этой же
+// транзакции — видит незакоммиченные изменения самой миграции).
+func ftsTableExists(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var name string
+	err := tx.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ftsHasColumn сообщает, объявлена ли у memories_fts колонка column.
+func ftsHasColumn(ctx context.Context, tx *sql.Tx, column string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(memories_fts)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, rows.Err()
+		}
+	}
+	return false, rows.Err()
+}
+
+// migrateStemmedFTS — миграция 0 -> 1 (задача 8.3). Идемпотентно приводит memories_fts
+// к целевой форме fts5(content, summary, tags, content_stemmed):
+//   - таблицы ещё нет (свежая БД) — создаёт сразу в целевом виде;
+//   - таблица есть, content_stemmed уже есть — ничего не делает (защита от повторного
+//     запуска на уже мигрированной БД, если версия схемы почему-то не проставилась);
+//   - таблица есть в старой форме (content, summary, tags) — пересобирает: старая
+//     таблица переименовывается, создаётся новая, содержимое переносится построчно с
+//     доклейкой content_stemmed = normalizeForFTS(content)+" "+normalizeForFTS(summary)
+//     (raw content/summary/tags копируются как есть — они не меняются), старая
+//     таблица удаляется. Ничего не теряется: количество строк до/после совпадает
+//     (проверено тестом на реальном файле старой схемы).
+//
+// Триггеры (ftsTriggers) не трогаются: их тела не ссылаются на content_stemmed
+// (её синхронизацией занимается Put, см. sqliteStore.Put), поэтому их не нужно
+// ни менять, ни пересоздавать при миграции.
+func migrateStemmedFTS(ctx context.Context, tx *sql.Tx) error {
+	exists, err := ftsTableExists(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("проверка memories_fts: %w", err)
+	}
+	if !exists {
+		if _, err := tx.ExecContext(ctx, createMemoriesFTS); err != nil {
+			return fmt.Errorf("создание memories_fts: %w", err)
+		}
+		return nil
+	}
+
+	hasStemmed, err := ftsHasColumn(ctx, tx, "content_stemmed")
+	if err != nil {
+		return fmt.Errorf("проверка колонки content_stemmed: %w", err)
+	}
+	if hasStemmed {
+		return nil
+	}
+
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE memories_fts RENAME TO memories_fts_old`); err != nil {
+		return fmt.Errorf("переименование memories_fts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, createMemoriesFTS); err != nil {
+		return fmt.Errorf("создание новой memories_fts: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT m.rowid, m.content, m.summary, old.tags
+		FROM memories m JOIN memories_fts_old old ON old.rowid = m.rowid
+	`)
+	if err != nil {
+		return fmt.Errorf("чтение старой memories_fts: %w", err)
+	}
+	type oldRow struct {
+		rowid   int64
+		content string
+		summary sql.NullString
+		tags    string
+	}
+	var oldRows []oldRow
+	for rows.Next() {
+		var r oldRow
+		if err := rows.Scan(&r.rowid, &r.content, &r.summary, &r.tags); err != nil {
+			rows.Close()
+			return fmt.Errorf("сканирование старой записи fts: %w", err)
+		}
+		oldRows = append(oldRows, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("чтение старой memories_fts: %w", err)
+	}
+	rows.Close()
+
+	for _, r := range oldRows {
+		stemmed := normalizeForFTS(r.content)
+		summary := ""
+		if r.summary.Valid {
+			summary = r.summary.String
+			if s := normalizeForFTS(summary); s != "" {
+				stemmed += " " + s
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO memories_fts(rowid, content, summary, tags, content_stemmed) VALUES (?, ?, ?, ?, ?)
+		`, r.rowid, r.content, summary, r.tags, stemmed); err != nil {
+			return fmt.Errorf("перенос записи fts rowid=%d: %w", r.rowid, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE memories_fts_old`); err != nil {
+		return fmt.Errorf("удаление memories_fts_old: %w", err)
+	}
+	return nil
+}
 
 // sqliteStore — реализация Store поверх SQLite (метаданные + FTS5 + sqlite-vec).
 type sqliteStore struct {
@@ -170,12 +383,23 @@ func Open(path string) (*sqliteStore, error) {
 		return nil, fmt.Errorf("проверка соединения sqlite %q: %w", expanded, err)
 	}
 
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(baseSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("применение схемы: %w", err)
 	}
 
-	return &sqliteStore{db: db, now: defaultNow}, nil
+	store := &sqliteStore{db: db, now: defaultNow}
+	if err := store.migrate(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("миграция схемы: %w", err)
+	}
+
+	if _, err := db.Exec(ftsTriggers); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("применение триггеров fts: %w", err)
+	}
+
+	return store, nil
 }
 
 func expandHome(path string) (string, error) {
@@ -221,6 +445,25 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 	`, m.Id, string(m.Kind), m.Scope, m.Content, m.Summary, m.Importance, m.CreatedAt, m.UpdatedAt, m.AccessedAt, m.AccessCount, m.SupersededBy, m.Source)
 	if err != nil {
 		return fmt.Errorf("upsert memories: %w", err)
+	}
+
+	// content_stemmed (задача 8.3) синхронизируется здесь прикладным кодом, а не
+	// триггером: тело триггера memories_ai/au не умеет звать Go-стеммер
+	// (потребовалась бы регистрация кастомной SQL-функции через ConnectHook — лишняя
+	// сложность ради того, что и так естественно посчитать тут же, рядом с Put).
+	// Тем же normalizeForFTS индексируется и content, и summary — оба относятся к
+	// одной записи и должны находиться одним и тем же MATCH-запросом.
+	stemmed := normalizeForFTS(m.Content)
+	if m.Summary != nil {
+		if s := normalizeForFTS(*m.Summary); s != "" {
+			stemmed += " " + s
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories_fts SET content_stemmed = ?
+		WHERE rowid = (SELECT rowid FROM memories WHERE id = ?)
+	`, stemmed, m.Id); err != nil {
+		return fmt.Errorf("обновление content_stemmed: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tags WHERE memory_id = ?`, m.Id); err != nil {
@@ -555,15 +798,38 @@ func (r rowWithExtra) Scan(dest ...any) error {
 // внутри экранируются удвоением), что нейтрализует операторы FTS5 (AND/OR/NOT,
 // колонковые фильтры, скобки, дефисы) — они становятся частью буквальной фразы.
 // Слова соединяются через OR (найти запись, содержащую хотя бы одно слово).
+//
+// Задача 8.3: на каждое слово запроса ДОПОЛНИТЕЛЬНО (тем же OR) добавляется его
+// normalizeForFTS-форма — для кириллических слов это стеммированная основа (находит
+// content_stemmed при несовпадении точной словоформы с content: "проекта" ->
+// добавляется термин "проект", который матчит "проект"/"проекты"/"проектом" и т.д.),
+// для остального (латиница, идентификаторы, пути) normalizeForFTS возвращает слово
+// без изменений — дубль отбрасывается (дедуп по regarded-как-lower ключу), поведение
+// для `sqlite_fts5`/`make build` не меняется. Термины без column-префикса (col:term)
+// сознательно не используются — bare MATCH и так ищет по всем колонкам таблицы
+// (content/summary/tags/content_stemmed), поэтому лишнее квалифицирование не нужно.
 func sanitizeFTSQuery(text string) string {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return ""
 	}
-	parts := make([]string, 0, len(fields))
-	for _, f := range fields {
-		escaped := strings.ReplaceAll(f, `"`, `""`)
+	seen := make(map[string]bool, len(fields)*2)
+	parts := make([]string, 0, len(fields)*2)
+	addTerm := func(term string) {
+		if term == "" {
+			return
+		}
+		key := strings.ToLower(term)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		escaped := strings.ReplaceAll(term, `"`, `""`)
 		parts = append(parts, `"`+escaped+`"`)
+	}
+	for _, f := range fields {
+		addTerm(f)
+		addTerm(normalizeForFTS(f))
 	}
 	return strings.Join(parts, " OR ")
 }
