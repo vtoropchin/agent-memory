@@ -1307,6 +1307,47 @@ func (s *sqliteStore) ResetVectorIndex(ctx context.Context, model string, dim in
 	return nil
 }
 
+// AllForExport возвращает ВСЕ записи под фильтром scopes — включая тумстоуны
+// (superseded_by IS NOT NULL, в отличие от AllForReindex) — вместе с tags/links,
+// отсортированные по id ASC (детерминированный порядок — экспорты одного и того
+// же инстанса диффабельны). Единственный метод, дающий полный обход инстанса
+// для `memoryd export` (DESIGN.md §12, задача 9.2); List для этого не подходит
+// (постранично, без Links), AllForReindex — тоже (только живые записи).
+func (s *sqliteStore) AllForExport(ctx context.Context, scopes []string) ([]memory.Memory, error) {
+	where := ""
+	var args []any
+	if clause, scopeArgs := scopePredicate(scopes, ""); clause != "" {
+		where = " WHERE " + clause
+		args = scopeArgs
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source
+		FROM memories m`+where+`
+		ORDER BY m.id ASC
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("чтение записей для export: %w", err)
+	}
+	defer rows.Close()
+
+	var all []memory.Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("сканирование записи для export: %w", err)
+		}
+		if m.Tags, err = s.loadTags(ctx, m.Id); err != nil {
+			return nil, err
+		}
+		if m.Links, err = s.loadLinks(ctx, m.Id); err != nil {
+			return nil, err
+		}
+		all = append(all, m)
+	}
+	return all, rows.Err()
+}
+
 // AllForReindex возвращает все не устаревшие (superseded_by IS NULL) записи вместе с
 // tags/links — источник для фонового reindex-джоба при смене модели Embedder
 // (DESIGN.md §9). Устаревшие записи не нужны новому вектору: они уже вне recall.

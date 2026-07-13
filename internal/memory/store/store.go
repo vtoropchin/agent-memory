@@ -67,6 +67,15 @@ type Store interface {
 	// Stats возвращает сводные счётчики (DESIGN.md §12, дашборд морды): всего живых,
 	// архивных, разбивки живых по scope и kind. Дёшево (агрегатные COUNT/GROUP BY).
 	Stats(ctx context.Context) (Stats, error)
+	// AllForExport возвращает ВСЕ записи под фильтром scopes — включая тумстоуны
+	// (superseded_by IS NOT NULL) — вместе с Tags и Links, отсортированные по id
+	// ASC (детерминированный, диффабельный порядок бэкапа). В отличие от
+	// AllForReindex (только живые записи, для досчёта вектора) и List
+	// (постранично, без Links) — это единственный метод, дающий полный снимок
+	// инстанса для `memoryd export` (DESIGN.md §12, задача 9.2). scopes пуст —
+	// вся БД; непусто — частичный экспорт (m.scope IN (...)). Векторы не
+	// возвращаются — они производные и не входят в формат экспорта.
+	AllForExport(ctx context.Context, scopes []string) ([]memory.Memory, error)
 	// reindex-поддержка
 	EmbedMeta(ctx context.Context) (model string, dim int, err error)
 	ResetVectorIndex(ctx context.Context, model string, dim int) error

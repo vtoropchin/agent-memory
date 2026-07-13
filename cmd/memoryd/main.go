@@ -111,6 +111,25 @@ func main() {
 		os.Exit(code)
 	}
 
+	// `memoryd export` / `memoryd import` — полный/частичный бэкап памяти в
+	// переносимый JSONL и восстановление обратно с сохранением id/таймстампов
+	// (задача 9.2), диспетчеризуются симметрично recall/save/doctor, до
+	// разбора серверных флагов.
+	if len(os.Args) >= 2 && os.Args[1] == "export" {
+		if err := runExport(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "memoryd export: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "import" {
+		if err := runImport(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "memoryd import: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// `memoryd hook` — обёртка над recall-путём для хуков Claude Code
 	// (SessionStart/UserPromptSubmit, задача 7.2). В отличие от recall/save,
 	// ошибка НЕ приводит к os.Exit(1) — только к логу в stderr: хук обязан
@@ -309,6 +328,8 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  memoryd save [флаги]\tразовое сохранение факта в память")
 	fmt.Fprintln(tw, "  memoryd hook -event <name> [флаги]\tхук Claude Code (session-start|prompt-submit), JSON события на stdin")
 	fmt.Fprintln(tw, "  memoryd doctor [флаги]\tread-only диагностика: в каком режиме реально работает память")
+	fmt.Fprintln(tw, "  memoryd export [флаги]\tэкспорт памяти в переносимый JSONL-бэкап (без векторов)")
+	fmt.Fprintln(tw, "  memoryd import [флаги] file.jsonl\tимпорт JSONL-бэкапа с сохранением id и таймстампов")
 	tw.Flush()
 	fmt.Fprintln(w)
 
@@ -330,6 +351,8 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  save\tодноразовый save из shell/скрипта; -content - читает факт из stdin")
 	fmt.Fprintln(tw, "  hook\tхук-режим для .claude/settings.json (см. `memoryd init`): любая ошибка → пустой stdout, exit 0")
 	fmt.Fprintln(tw, "  doctor\tдиагностика: конфиг/БД/записи/вектор/embedder/reasoner одной командой, ничего не пишет")
+	fmt.Fprintln(tw, "  export\tбэкап/перенос памяти: вся БД или -scopes в переносимый JSONL (векторы не экспортируются)")
+	fmt.Fprintln(tw, "  import\tвосстановление из JSONL: сохраняет id/таймстампы; -dry-run/-overwrite/-rescope")
 	tw.Flush()
-	fmt.Fprintln(w, "  memoryd init -h, memoryd web -h, memoryd recall -h, memoryd save -h, memoryd hook -h, memoryd doctor -h — подробности по флагам каждой.")
+	fmt.Fprintln(w, "  memoryd init -h, memoryd web -h, memoryd recall -h, memoryd save -h, memoryd hook -h, memoryd doctor -h, memoryd export -h, memoryd import -h — подробности по флагам каждой.")
 }
