@@ -1,5 +1,5 @@
 // app.js — вся логика web-морды AgentMemory (задача 6.3). Ванильный JS
-// (fetch + DOM), без фреймворков. Потребляет JSON API из cmd/memoryd/web.go
+// (fetch + DOM), без фреймворков. Потребляет JSON API из cmd/memo/web.go
 // "как есть" (см. DESIGN.md §12, Этап 6). Весь пользовательский текст
 // (content/tags/scope/summary/source) вставляется в DOM только через
 // textContent — никакого сырого innerHTML с данными из API.

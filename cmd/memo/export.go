@@ -1,9 +1,9 @@
-// Подкоманда `memoryd export` — полный/частичный экспорт памяти в переносимый
+// Подкоманда `memo export` — полный/частичный экспорт памяти в переносимый
 // JSONL-бэкап (DESIGN.md §12, задача 9.2): первая строка — заголовок с
 // метаданными формата, далее одна запись памяти на строку (id, kind, scope,
 // content, summary, importance, все таймстампы, superseded_by, source,
 // expires_at, tags, links). Векторы НЕ экспортируются — производные данные,
-// которые досчитает Reindexer при следующем запуске memoryd (пустая embed_meta
+// которые досчитает Reindexer при следующем запуске memo (пустая embed_meta
 // новой БД → полный reindex, DESIGN.md §9, §11). Тумстоуны (superseded)
 // экспортируются как есть — история переносится вместе с фактами. Формат
 // стримится построчно (JSONL) — диффабелен и grep'абелен; порядок строк
@@ -26,7 +26,7 @@ import (
 )
 
 // exportFormat/exportVersion — идентификатор и текущая версия формата экспорта
-// (заголовочная строка JSONL, задача 9.2). `memoryd import` отказывает на
+// (заголовочная строка JSONL, задача 9.2). `memo import` отказывает на
 // незнакомых format/version — см. runImport.
 const (
 	exportFormat  = "agentmemory-export"
@@ -117,7 +117,7 @@ func runExport(args []string, out io.Writer) error {
 	fs.SetOutput(out)
 	fs.Usage = func() {
 		fmt.Fprintln(out, "полный или частичный экспорт памяти в переносимый JSONL-бэкап (без векторов).")
-		fmt.Fprintln(out, "Использование: memoryd export [флаги]")
+		fmt.Fprintln(out, "Использование: memo export [флаги]")
 		fs.PrintDefaults()
 	}
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
@@ -140,7 +140,7 @@ func runExport(args []string, out io.Writer) error {
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
-			log.Printf("memoryd export: закрытие хранилища: %v", err)
+			log.Printf("memo export: закрытие хранилища: %v", err)
 		}
 	}()
 

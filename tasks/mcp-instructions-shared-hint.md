@@ -72,8 +72,8 @@ recall-строка напечатает `team:backend`, а save-совет — 
 
 - **Только** `internal/mcp/instructions.go` + `internal/mcp/instructions_test.go`.
 - НЕ трогать: `internal/mcp/mcp.go`, схемы/описания инструментов, `internal/config`,
-  `cmd/memoryd`, `DESIGN.md` (деталь ниже уровня §12 — синхронизация не требуется), скил
-  `/memoryd`.
+  `cmd/memo`, `DESIGN.md` (деталь ниже уровня §12 — синхронизация не требуется), скил
+  `/memo`.
 - За рамки не выходить: это косметика согласованности текста, поведение save/recall не
   меняется.
 

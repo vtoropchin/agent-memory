@@ -1,4 +1,4 @@
-// Подкоманда `memoryd web` — HTTP-морда просмотра памяти (DESIGN.md §12,
+// Подкоманда `memo web` — HTTP-морда просмотра памяти (DESIGN.md §12,
 // Этап 6, задача 6.2; семантический поиск — задача 10.1; правка метаданных —
 // задача 10.2). Открывает тот же общий файл БД, что и MCP-сервер (WAL +
 // busy_timeout безопасны для параллельных читателей), и отдаёт JSON API
@@ -51,7 +51,7 @@ import (
 	"agentmemory/internal/memory/write"
 )
 
-// defaultWebAddr — адрес прослушивания `memoryd web` по умолчанию: только
+// defaultWebAddr — адрес прослушивания `memo web` по умолчанию: только
 // localhost, т.к. морда показывает всю память и наружу по умолчанию не
 // выставляется.
 const defaultWebAddr = "127.0.0.1:7070"
@@ -75,7 +75,7 @@ func runWeb(args []string, stdout io.Writer) error {
 	flagSet.SetOutput(stdout)
 	flagSet.Usage = func() {
 		fmt.Fprintln(stdout, "поднимает HTTP-морду для просмотра и поиска памяти в браузере (read-only).")
-		fmt.Fprintln(stdout, "Использование: memoryd web [флаги]")
+		fmt.Fprintln(stdout, "Использование: memo web [флаги]")
 		flagSet.PrintDefaults()
 	}
 	addr := flagSet.String("addr", defaultWebAddr, "адрес прослушивания HTTP")
@@ -97,7 +97,7 @@ func runWeb(args []string, stdout io.Writer) error {
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
-			log.Printf("memoryd web: закрытие хранилища: %v", err)
+			log.Printf("memo web: закрытие хранилища: %v", err)
 		}
 	}()
 
@@ -174,7 +174,7 @@ func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder
 		// webFS собирается из //go:embed web в этом же пакете — подкаталог
 		// "web" гарантированно существует на момент сборки, иначе сборка сама
 		// не прошла бы; паника здесь недостижима, но fs.Sub возвращает error.
-		panic(fmt.Sprintf("memoryd web: подкаталог web не найден в embed.FS: %v", err))
+		panic(fmt.Sprintf("memo web: подкаталог web не найден в embed.FS: %v", err))
 	}
 	mux.Handle("/", http.FileServerFS(sub))
 
@@ -727,7 +727,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
-		log.Printf("memoryd web: кодирование JSON-ответа: %v", err)
+		log.Printf("memo web: кодирование JSON-ответа: %v", err)
 	}
 }
 

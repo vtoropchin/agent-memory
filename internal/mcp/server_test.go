@@ -342,7 +342,7 @@ func TestSaveDefaultScopeFromInstance(t *testing.T) {
 }
 
 // TestScopeIsolationE2E — сквозная проверка критерия приёмки MP-2 (DESIGN.md §2.1):
-// два инстанса memoryd с разными project над ОДНИМ файлом БД. Каждый видит через
+// два инстанса memo с разными project над ОДНИМ файлом БД. Каждый видит через
 // memory_recall свой project:<name> и общий user:*, но не чужой project:*. Прогоняет
 // весь read-path целиком (handleRecall → Recaller.Recall → store), а не только
 // разрешение scope в изоляции.

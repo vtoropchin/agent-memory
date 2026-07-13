@@ -1,4 +1,4 @@
-// Подкоманда `memoryd init` — интерактивный установщик памяти в проект под
+// Подкоманда `memo init` — интерактивный установщик памяти в проект под
 // конкретное агентское приложение (DESIGN.md §14 Этап 5, задачи 5.3/5.4;
 // выбор провайдеров и TUI — задача 11.1). Раскладывает в целевой каталог
 // MCP-конфиг, скил-инструкцию «Протокол работы с памятью», agentmemory.toml
@@ -158,10 +158,10 @@ var hooksOptions = []string{hooksSessionStart, hooksBoth, hooksNone}
 
 // hookEventMapping — одно событие Claude Code (ключ секции `hooks` в
 // settings.json) и соответствующее значение флага `-event` подкоманды
-// `memoryd hook`.
+// `memo hook`.
 type hookEventMapping struct {
-	ClaudeEvent  string // "SessionStart" | "UserPromptSubmit"
-	MemorydEvent string // "session-start" | "prompt-submit"
+	ClaudeEvent string // "SessionStart" | "UserPromptSubmit"
+	MemoEvent   string // "session-start" | "prompt-submit"
 }
 
 // hookEventsByChoice — какие события подключает каждое значение
@@ -169,11 +169,11 @@ type hookEventMapping struct {
 // нечего.
 var hookEventsByChoice = map[string][]hookEventMapping{
 	hooksSessionStart: {
-		{ClaudeEvent: "SessionStart", MemorydEvent: "session-start"},
+		{ClaudeEvent: "SessionStart", MemoEvent: "session-start"},
 	},
 	hooksBoth: {
-		{ClaudeEvent: "SessionStart", MemorydEvent: "session-start"},
-		{ClaudeEvent: "UserPromptSubmit", MemorydEvent: "prompt-submit"},
+		{ClaudeEvent: "SessionStart", MemoEvent: "session-start"},
+		{ClaudeEvent: "UserPromptSubmit", MemoEvent: "prompt-submit"},
 	},
 }
 
@@ -185,7 +185,7 @@ var hookEventsByChoice = map[string][]hookEventMapping{
 // (renderReasonerTomlBlock) — обе зависят от выбранного провайдера.
 const configTomlTemplate = `# Конфиг AgentMemory для проекта %[1]s (DESIGN.md §13).
 #
-# Агентское приложение поднимает MCP-сервер agentmemory из сгенерированного
+# Агентское приложение поднимает MCP-сервер memo из сгенерированного
 # рядом MCP-конфига и передаёт ему этот файл флагом -config.
 
 [store]
@@ -231,7 +231,7 @@ model    = "%s"
 		return "# Без вектора — recall работает на чистом FTS5 (DESIGN.md §15).\nprovider = \"noop\"\n"
 	default: // "ollama"
 		return fmt.Sprintf(`# Локальный ollama (dim определяется автоматически пробным эмбеддингом).
-# Если ollama недоступен — memoryd стартует, recall падает на чистый FTS5 (§15).
+# Если ollama недоступен — memo стартует, recall падает на чистый FTS5 (§15).
 provider = "ollama"
 base_url = "%s"
 model    = "%s"
@@ -246,8 +246,8 @@ func renderReasonerTomlBlock(cfg initConfig) string {
 		return "# Без LLM-суммаризации/консолидации (DESIGN.md §15).\nprovider = \"noop\"\n"
 	default: // "deepseek"
 		return `# DeepSeek chat: ключ берётся из env DEEPSEEK_API_KEY. Если в shell-env его нет,
-# memoryd сам подхватывает его из .env рядом с этим конфигом при старте (см.
-# loadDotEnv в main.go) — .env раскладывается этим же "memoryd init". Пустой
+# memo сам подхватывает его из .env рядом с этим конфигом при старте (см.
+# loadDotEnv в main.go) — .env раскладывается этим же "memo init". Пустой
 # ключ — деградация до noop (§15): recall без суммаризации, консолидация
 # недоступна, но память работает.
 provider = "deepseek"
@@ -257,7 +257,7 @@ model    = "deepseek-chat"
 }
 
 // mcpServerArgs — аргументы, с которыми агентское приложение запускает
-// memoryd как MCP-сервер agentmemory.
+// бинарь memo как MCP-сервер memo.
 var mcpServerArgs = []string{"-config", "${CLAUDE_PROJECT_DIR:-.}/agentmemory.toml"}
 
 // mcpConfigFile / mcpServerSpec — форма .mcp.json (см. корневой .mcp.json).
@@ -271,7 +271,7 @@ type mcpServerSpec struct {
 	Env     map[string]string `json:"env"`
 }
 
-// skillSpec описывает один скил, раскладываемый `memoryd init` в
+// skillSpec описывает один скил, раскладываемый `memo init` в
 // `<skillsDir>/<dirName>/SKILL.md`: dirName — подкаталог под
 // agentTarget.skillsDir, render — рендерер тела SKILL.md под конкретный
 // проект.
@@ -280,15 +280,15 @@ type skillSpec struct {
 	render  func(project string) string
 }
 
-// memorySkills — набор скиллов, которые `memoryd init` раскладывает КАЖДОМУ
+// memorySkills — набор скиллов, которые `memo init` раскладывает КАЖДОМУ
 // поддерживаемому агентскому приложению (одинаковый для всех записей
-// agentRegistry — различается только корень skillsDir): "memoryd" — протокол
-// работы с памятью (skill.go), "memoryd-bootstrap" — разовая инициализация
+// agentRegistry — различается только корень skillsDir): "memo" — протокол
+// работы с памятью (skill.go), "memo-bootstrap" — разовая инициализация
 // памяти проекта (bootstrap_skill.go). Добавить следующий скил — одна запись
 // в этом слайсе.
 var memorySkills = []skillSpec{
-	{dirName: "memoryd", render: renderSkillMD},
-	{dirName: "memoryd-bootstrap", render: renderBootstrapSkillMD},
+	{dirName: "memo", render: renderSkillMD},
+	{dirName: "memo-bootstrap", render: renderBootstrapSkillMD},
 }
 
 // agentTarget описывает одно агентское приложение и то, как оно раскладывает
@@ -339,7 +339,7 @@ func agentKeys() []string {
 	return keys
 }
 
-// initConfig — параметры одного прогона `memoryd init`: заданы флагом, либо (в
+// initConfig — параметры одного прогона `memo init`: заданы флагом, либо (в
 // интерактивном TTY-режиме) дозапрошены promptInitTUI, либо остаются пустыми
 // и получают дефолт в doInit/applyInitDefaults.
 type initConfig struct {
@@ -364,7 +364,7 @@ func runInit(args []string, out io.Writer) error {
 	fs.SetOutput(out)
 	fs.Usage = func() {
 		fmt.Fprintln(out, "устанавливает память в проект: генерирует MCP-конфиг, скил-инструкцию и agentmemory.toml.")
-		fmt.Fprintln(out, "Использование: memoryd init [флаги]")
+		fmt.Fprintln(out, "Использование: memo init [флаги]")
 		fs.PrintDefaults()
 	}
 	project := fs.String("project", "", "имя проекта (дефолт — базовое имя каталога -dir)")
@@ -421,7 +421,7 @@ func runInit(args []string, out io.Writer) error {
 
 // isInteractiveStdin проверяет, что stdin — реальный терминал (а не пайп/
 // файл/перенаправление/redirect с /dev/null): интерактивный TUI-промпт имеет
-// смысл только в этом случае, иначе `memoryd init` должен остаться
+// смысл только в этом случае, иначе `memo init` должен остаться
 // скриптуемым и не блокироваться на рендере bubbletea, у которого нет TTY.
 // os.ModeCharDevice здесь недостаточно: /dev/null — тоже символьное
 // устройство (частый redirect stdin в CI/тестовом окружении), поэтому
@@ -534,11 +534,11 @@ func doInit(cfg initConfig, out io.Writer) error {
 		return fmt.Errorf("создание каталога %q: %w", cfg.Dir, err)
 	}
 
-	command := "memoryd" // фолбэк на PATH, если os.Executable() недоступен
+	command := "memo" // фолбэк на PATH, если os.Executable() недоступен
 	if exe, err := os.Executable(); err == nil {
 		command = exe
 	} else {
-		fmt.Fprintf(out, "не удалось определить путь к memoryd (%v) — в MCP-конфиг записана команда \"memoryd\", проверь, что она доступна в PATH\n", err)
+		fmt.Fprintf(out, "не удалось определить путь к memo (%v) — в MCP-конфиг записана команда \"memo\", проверь, что она доступна в PATH\n", err)
 	}
 
 	mcpContent, err := target.renderMCPConfig(command, cfg)
@@ -603,7 +603,7 @@ func doInit(cfg initConfig, out io.Writer) error {
 	fmt.Fprintf(out, "эмбеддинг: %s\n", cfg.EmbedderProvider)
 	fmt.Fprintf(out, "reasoner: %s\n", cfg.ReasonerProvider)
 	fmt.Fprintf(out, "путь БД: %s\n", cfg.StorePath)
-	fmt.Fprintln(out, "дальше: перезапусти агентское приложение в этом каталоге и одобри сервер `agentmemory`; убедись, что memoryd доступен — `go install` кладёт его на PATH (см. `make install`).")
+	fmt.Fprintln(out, "дальше: перезапусти агентское приложение в этом каталоге и одобри сервер `memo`; убедись, что memo доступен — `go install` кладёт его на PATH (см. `make install`).")
 	return nil
 }
 
@@ -651,14 +651,14 @@ func buildProviderEnv(cfg initConfig, placeholder func(envKey string) string) ma
 	return env
 }
 
-// renderMCPJSON собирает .mcp.json (сервер agentmemory, stdio) через
+// renderMCPJSON собирает .mcp.json (сервер memo, stdio) через
 // encoding/json — гарантированно валидный JSON с отступом 2 пробела. env
 // содержит ТОЛЬКО плейсхолдеры выбранных провайдеров (shell-синтаксис "${VAR:-}").
 func renderMCPJSON(command string, cfg initConfig) (string, error) {
 	env := buildProviderEnv(cfg, func(envKey string) string { return "${" + envKey + ":-}" })
 	mcpCfg := mcpConfigFile{
 		MCPServers: map[string]mcpServerSpec{
-			"agentmemory": {
+			"memo": {
 				Command: command,
 				Args:    mcpServerArgs,
 				Env:     env,
@@ -690,7 +690,7 @@ type opencodeServerSpec struct {
 	Environment map[string]string `json:"environment"`
 }
 
-// renderOpencodeJSON собирает opencode.json (local MCP-сервер agentmemory)
+// renderOpencodeJSON собирает opencode.json (local MCP-сервер memo)
 // через encoding/json — гарантированно валидный JSON с отступом 2 пробела.
 // environment — те же правила выбора ключей, что у renderMCPJSON. Путь к
 // agentmemory.toml — относительный: opencode запускает local MCP-процесс с
@@ -703,7 +703,7 @@ func renderOpencodeJSON(command string, cfg initConfig) (string, error) {
 	ocCfg := opencodeConfigFile{
 		Schema: "https://opencode.ai/config.json",
 		MCP: map[string]opencodeServerSpec{
-			"agentmemory": {
+			"memo": {
 				Type:        "local",
 				Command:     []string{command, "-config", "agentmemory.toml"},
 				Enabled:     true,
@@ -720,7 +720,7 @@ func renderOpencodeJSON(command string, cfg initConfig) (string, error) {
 
 // writeScaffoldFile пишет content в path с правами 0o644. Если файл уже
 // существует и force не задан — пропускает его с предупреждением в out (не
-// ошибка): повторный `memoryd init` идемпотентен и безопасен.
+// ошибка): повторный `memo init` идемпотентен и безопасен.
 func writeScaffoldFile(path, content string, force bool, out io.Writer) error {
 	if !force {
 		if _, err := os.Stat(path); err == nil {
@@ -801,22 +801,22 @@ func ensureGitignoreEntry(path, entry string, out io.Writer) error {
 const hookConfigAnchor = "${CLAUDE_PROJECT_DIR:-.}/agentmemory.toml"
 
 // buildHookCommand собирает shell-команду одной matcher-записи хука:
-// абсолютный путь к бинарю memoryd (memorydPath — тот же, что уже разрешён в
-// doInit для .mcp.json, см. os.Executable()/фолбэк на "memoryd" из PATH) +
-// подкоманда `hook` с нужным -event и -config. memorydPath обёрнут в кавычки
+// абсолютный путь к бинарю memo (memoPath — тот же, что уже разрешён в
+// doInit для .mcp.json, см. os.Executable()/фолбэк на "memo" из PATH) +
+// подкоманда `hook` с нужным -event и -config. memoPath обёрнут в кавычки
 // (%q) — путь может содержать пробелы.
-func buildHookCommand(memorydPath, event string) string {
-	return fmt.Sprintf("%q hook -event %s -config %s", memorydPath, event, hookConfigAnchor)
+func buildHookCommand(memoPath, event string) string {
+	return fmt.Sprintf("%q hook -event %s -config %s", memoPath, event, hookConfigAnchor)
 }
 
-// setupClaudeHooks мержит в <dir>/.claude/settings.json команды `memoryd hook`
+// setupClaudeHooks мержит в <dir>/.claude/settings.json команды `memo hook`
 // для событий из mappings (DESIGN.md §12, задача 7.2) и печатает в out, что
 // именно обновлено.
-func setupClaudeHooks(dir, memorydPath string, mappings []hookEventMapping, out io.Writer) error {
+func setupClaudeHooks(dir, memoPath string, mappings []hookEventMapping, out io.Writer) error {
 	eventCommands := make(map[string]string, len(mappings))
 	claudeEvents := make([]string, 0, len(mappings))
 	for _, m := range mappings {
-		eventCommands[m.ClaudeEvent] = buildHookCommand(memorydPath, m.MemorydEvent)
+		eventCommands[m.ClaudeEvent] = buildHookCommand(memoPath, m.MemoEvent)
 		claudeEvents = append(claudeEvents, m.ClaudeEvent)
 	}
 

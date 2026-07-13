@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "agentmemory": {
-      "command": "/Users/vladimir/.local/bin/memoryd",
+    "memo": {
+      "command": "/Users/vladimir/.local/bin/memo",
       "args": [
         "-config",
         "${CLAUDE_PROJECT_DIR:-.}/agentmemory.toml"

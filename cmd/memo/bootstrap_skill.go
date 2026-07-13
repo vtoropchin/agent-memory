@@ -1,9 +1,9 @@
 // bootstrap_skill.go — генерация скила «Первичная инициализация памяти
-// проекта», второго скила, раскладываемого `memoryd init` в проект (см.
-// memorySkills в init.go). В отличие от memoryd (skill.go, протокол работы с
+// проекта», второго скила, раскладываемого `memo init` в проект (см.
+// memorySkills в init.go). В отличие от memo (skill.go, протокол работы с
 // памятью на каждую задачу), этот скил разовый: инструктирует агента один раз
 // изучить проект и сохранить в долговременную память ключевые проектные
-// факты, чтобы протокол memoryd было над чем recall'ить с первой задачи.
+// факты, чтобы протокол memo было над чем recall'ить с первой задачи.
 package main
 
 import "fmt"
@@ -13,8 +13,8 @@ import "fmt"
 const bootstrapSkillBodyTemplate = `# Первичная инициализация памяти — %[1]s
 
 Это **разовый** bootstrap: изучи проект **%[1]s** и сохрани в долговременную
-память (MCP-сервер ` + "`agentmemory`" + `) ключевые проектные факты — чтобы протокол
-работы с памятью (скил ` + "`memoryd`" + `) с первой же задачи имел что recall'ить.
+память (MCP-сервер ` + "`memo`" + `) ключевые проектные факты — чтобы протокол
+работы с памятью (скил ` + "`memo`" + `) с первой же задачи имел что recall'ить.
 
 ## 1. Проверь, не сделано ли это уже
 
@@ -37,10 +37,10 @@ const bootstrapSkillBodyTemplate = `# Первичная инициализац�
 - текущее состояние и цели;
 - важные ограничения.
 
-## 3. Сохраняй по протоколу memoryd
+## 3. Сохраняй по протоколу memo
 
 Правила scope и вызовов ` + "`memory_save`/`memory_update`/`memory_forget`" + ` держит
-соседний скил ` + "`memoryd`" + ` («Протокол работы с памятью») — следуй ему. Кратко:
+соседний скил ` + "`memo`" + ` («Протокол работы с памятью») — следуй ему. Кратко:
 
 - один атомарный факт (1–3 предложения) на вызов ` + "`memory_save`" + `;
 - ` + "`scope:\"\"`" + ` (дефолт) или явно ` + "`scope:\"project:%[1]s\"`" + ` — для проектных
@@ -60,7 +60,7 @@ const bootstrapSkillBodyTemplate = `# Первичная инициализац�
 ## Если сервер недоступен
 
 Если инструменты ` + "`memory_*`" + ` не видны в сессии — см. раздел «Если сервер
-недоступен» скила ` + "`memoryd`" + `: продолжай без памяти, предупредив об этом.
+недоступен» скила ` + "`memo`" + `: продолжай без памяти, предупредив об этом.
 `
 
 // bootstrapSkillDescription — текст поля description фронтматтера SKILL.md.
@@ -75,6 +75,6 @@ func bootstrapSkillDescription(project string) string {
 // валидный YAML-фронтматтер (name/description) поверх тела, по образцу
 // renderSkillMD (skill.go). Второй рендерер в memorySkills (init.go).
 func renderBootstrapSkillMD(project string) string {
-	frontMatter := fmt.Sprintf("---\nname: memoryd-bootstrap\ndescription: %s\n---\n\n", bootstrapSkillDescription(project))
+	frontMatter := fmt.Sprintf("---\nname: memo-bootstrap\ndescription: %s\n---\n\n", bootstrapSkillDescription(project))
 	return frontMatter + fmt.Sprintf(bootstrapSkillBodyTemplate, project)
 }

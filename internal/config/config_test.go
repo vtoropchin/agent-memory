@@ -55,11 +55,11 @@ func TestDefaultScope(t *testing.T) {
 // TestDefaultEmbedderBaseURLEmpty фиксирует регрессию: BaseURL по умолчанию должен
 // быть пуст, а не хардкодить ollama-специфичный адрес — иначе при provider="openai"
 // без явного base_url в TOML запрос ушёл бы на ollama-эндпоинт вместо
-// провайдер-специфичного дефолта (тот выбирается в cmd/memoryd.newEmbedder, не здесь).
+// провайдер-специфичного дефолта (тот выбирается в cmd/memo.newEmbedder, не здесь).
 func TestDefaultEmbedderBaseURLEmpty(t *testing.T) {
 	cfg := Default()
 	if cfg.Embedder.BaseURL != "" {
-		t.Errorf("Default().Embedder.BaseURL = %q, want пусто (дефолт провайдер-специфичен, живёт в cmd/memoryd)", cfg.Embedder.BaseURL)
+		t.Errorf("Default().Embedder.BaseURL = %q, want пусто (дефолт провайдер-специфичен, живёт в cmd/memo)", cfg.Embedder.BaseURL)
 	}
 }
 
@@ -145,7 +145,7 @@ func TestMaintConfigDurationsNonPositiveRejected(t *testing.T) {
 
 // TestLoadRejectsNonPositiveMaintDuration — тот же случай на уровне Load: TOML с
 // decay_interval = "0s" должен фейлить загрузку конфига, а не проходить как
-// валидный (что уронило бы memoryd на старте через time.NewTicker).
+// валидный (что уронило бы memo на старте через time.NewTicker).
 func TestLoadRejectsNonPositiveMaintDuration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

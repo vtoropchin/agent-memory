@@ -1,6 +1,6 @@
 // dispatch_test.go — регрессия БАГ 2 цикла исправлений задачи 11.1: миграция
-// диспетчера подкоманд на cobra сломала маршрутизацию `memoryd -db recall`/
-// `memoryd -config web` (флаг сервера, чьё значение совпадает с именем
+// диспетчера подкоманд на cobra сломала маршрутизацию `memo -db recall`/
+// `memo -config web` (флаг сервера, чьё значение совпадает с именем
 // подкоманды) — cobra.Command.Find (внутри root.Execute) сама решает, что
 // считать подкомандой, через эвристику stripFlags, которая в этих случаях
 // отбрасывает сам флаг "-db"/"-config" и трактует его значение как имя
@@ -8,8 +8,8 @@
 //
 //	root.Find([]string{"-db", "recall"})                      -> cmd="recall"  (БАГ)
 //	root.Find([]string{"-config", "web"})                     -> cmd="web"     (БАГ)
-//	root.Find([]string{"-config", "/proj/agentmemory.toml"})  -> cmd="memoryd" (ок, основной путь .mcp.json не задет)
-//	root.Find([]string{"bogus"})                               -> cmd="memoryd" (ок, неизвестное имя и раньше падало на сервер)
+//	root.Find([]string{"-config", "/proj/agentmemory.toml"})  -> cmd="memo" (ок, основной путь .mcp.json не задет)
+//	root.Find([]string{"bogus"})                               -> cmd="memo" (ок, неизвестное имя и раньше падало на сервер)
 //
 // decideRoute/runMain (main.go) чинят это, полностью обходя cobra.Find для
 // аргументов, похожих на флаг (начинаются с "-") — такие args вообще не
@@ -63,7 +63,7 @@ func TestRunMain_HelpRoute(t *testing.T) {
 	if code != 0 {
 		t.Errorf("код выхода = %d, хочу 0", code)
 	}
-	if !strings.Contains(stdout.String(), "memoryd init") {
+	if !strings.Contains(stdout.String(), "memo init") {
 		t.Errorf("stdout не похож на writeUsage(): %s", stdout.String())
 	}
 	if stderr.Len() != 0 {
@@ -81,8 +81,8 @@ func TestRunMain_CobraRoute_KnownSubcommand(t *testing.T) {
 	if code != 1 {
 		t.Errorf("код выхода = %d, хочу 1 (recall без запроса — ошибка)", code)
 	}
-	if !strings.Contains(stderr.String(), "memoryd recall:") {
-		t.Errorf("stderr = %q, хочу префикс \"memoryd recall:\" (подтверждает маршрут в подкоманду recall)", stderr.String())
+	if !strings.Contains(stderr.String(), "memo recall:") {
+		t.Errorf("stderr = %q, хочу префикс \"memo recall:\" (подтверждает маршрут в подкоманду recall)", stderr.String())
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, хочу пусто", stdout.String())

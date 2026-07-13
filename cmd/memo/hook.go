@@ -1,4 +1,4 @@
-// Подкоманда `memoryd hook -event <name> [-config path]` — тонкая обёртка над
+// Подкоманда `memo hook -event <name> [-config path]` — тонкая обёртка над
 // recall-путём 7.1 (doRecall, cli.go) для хуков агентского харнесса Claude
 // Code (SessionStart/UserPromptSubmit, DESIGN.md §12, задача 7.2). Харнесс
 // передаёт хук-команде на stdin JSON события и вставляет её stdout прямиком в
@@ -9,7 +9,7 @@
 // ЖЕЛЕЗНЫЙ инвариант: хук никогда не ломает сессию агента. Любая ошибка (нет
 // конфига, нет БД, битый stdin, неизвестный -event) должна привести к пустому
 // stdout и нулевому коду выхода — это осознанное отступление от fail-fast
-// остального `memoryd` (recall/save падают с exit 1): хук — фоновая роскошь,
+// остального `memo` (recall/save падают с exit 1): хук — фоновая роскошь,
 // не критический путь запуска сессии. Эту гарантию обеспечивает диспетчер в
 // main.go (не вызывает os.Exit при ошибке runHook, только логирует в stderr);
 // здесь достаточно не писать в out до того, как есть что печатать.
@@ -72,13 +72,13 @@ func runHook(args []string, stdin io.Reader, out io.Writer) error {
 	// Хук не должен ничего печатать в out (stdout) ни при каких обстоятельствах
 	// — в отличие от recall/save, где fs.SetOutput(out) осознанно указывает на
 	// stdout. usage/ошибки разбора флагов идут в stderr (полезно для ручной
-	// отладки `memoryd hook -h`), но никогда в out — единственный канал наружу
+	// отладки `memo hook -h`), но никогда в out — единственный канал наружу
 	// для самой ошибки всё равно возвращаемый err, который main.go логирует в
 	// stderr ещё раз.
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "хук для .claude/settings.json — печатает Markdown-бриф в stdout, пуст при любой ошибке (exit 0).")
-		fmt.Fprintln(os.Stderr, "Использование: memoryd hook -event <session-start|prompt-submit> [-config path] < event.json")
+		fmt.Fprintln(os.Stderr, "Использование: memo hook -event <session-start|prompt-submit> [-config path] < event.json")
 		fs.PrintDefaults()
 	}
 	event := fs.String("event", "", "событие хука: session-start | prompt-submit")
@@ -99,7 +99,7 @@ func runHook(args []string, stdin io.Reader, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("hook: загрузка конфига: %w", err)
 	}
-	loadDotEnvForConfig(*configPath, "memoryd hook")
+	loadDotEnvForConfig(*configPath, "memo hook")
 
 	ctx := context.Background()
 	switch *event {
@@ -118,7 +118,7 @@ func runHook(args []string, stdin io.Reader, out io.Writer) error {
 // фильтровать по типу факта нечем. Summarize выключен (латентность хука).
 // Пустой бриф (Count==0) — пустой out, без заголовка.
 func runHookSessionStart(ctx context.Context, cfg config.Config, out io.Writer) error {
-	brief, err := doRecall(ctx, cfg, "memoryd hook", memory.Query{
+	brief, err := doRecall(ctx, cfg, "memo hook", memory.Query{
 		Text:        hookSessionStartQuery,
 		Scopes:      cfg.Scope.RecallScopes(),
 		TokenBudget: hookSessionStartBudget,
@@ -140,7 +140,7 @@ func runHookPromptSubmit(ctx context.Context, cfg config.Config, prompt string, 
 		return nil
 	}
 
-	brief, err := doRecall(ctx, cfg, "memoryd hook", memory.Query{
+	brief, err := doRecall(ctx, cfg, "memo hook", memory.Query{
 		Text:        prompt,
 		Scopes:      cfg.Scope.RecallScopes(),
 		TokenBudget: hookPromptSubmitBudget,

@@ -1,8 +1,8 @@
-// dotenv.go — загрузка .env рядом с конфигом memoryd (DESIGN.md §13, задача 5.4).
+// dotenv.go — загрузка .env рядом с конфигом memo (DESIGN.md §13, задача 5.4).
 // Claude Code (и агентские приложения вообще) не пробрасывают .env в env
-// MCP-сервера автоматически, поэтому memoryd сам подхватывает переменные из
+// MCP-сервера автоматически, поэтому memo сам подхватывает переменные из
 // .env при старте (см. вызов loadDotEnv в run(), main.go) — так ключ
-// DEEPSEEK_API_KEY, записанный `memoryd init`, реально долетает до reasoner'а.
+// DEEPSEEK_API_KEY, записанный `memo init`, реально долетает до reasoner'а.
 package main
 
 import (
@@ -19,7 +19,7 @@ import (
 // loadDotEnv, логируя результат через log.Printf (стандартный вывод log —
 // os.Stderr, что важно для one-shot CLI-подкоманд recall/save, задача 7.1: их
 // stdout не должен содержать ничего, кроме брифа/результата save). label —
-// префикс лог-строки ("memoryd", "memoryd recall", "memoryd save"). Общая
+// префикс лог-строки ("memo", "memo recall", "memo save"). Общая
 // точка входа между серверным режимом (run, main.go) и recall/save (cli.go) —
 // обоим нужен DEEPSEEK_API_KEY в env до вызова newReasoner.
 func loadDotEnvForConfig(configPath, label string) {
@@ -46,7 +46,7 @@ func loadDotEnvForConfig(configPath, label string) {
 //
 // loaded=false без ошибки означает, что файла нет — это штатный случай (.env
 // опционален), а не ошибка. Ошибка чтения существующего файла возвращается
-// вызывающему для логирования в stderr — memoryd не должен из-за неё падать
+// вызывающему для логирования в stderr — memo не должен из-за неё падать
 // (DESIGN.md §15, деградация вместо падения).
 func loadDotEnv(path string) (loaded bool, err error) {
 	f, err := os.Open(path)

@@ -11,7 +11,7 @@ import (
 // памятью, публикуемый сервером как server-level instructions при MCP
 // initialize (DESIGN.md §12). Это переносимый минимум для любого MCP-клиента
 // (не только Claude Code) — богатый проектный протокол остаётся в скиле
-// `/memoryd` (.claude/skills/memoryd/SKILL.md), это дублирование ядра
+// `/memo` (.claude/skills/memo/SKILL.md), это дублирование ядра
 // осознанное. Текст выводит дефолты scope из уже разрешённого scope инстанса
 // через SaveScope()/RecallScopes().
 func buildInstructions(scope config.ScopeConfig) string {

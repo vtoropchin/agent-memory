@@ -1,6 +1,6 @@
-// Подкоманда `memoryd doctor [-config path] [-json] [-live]` — read-only
+// Подкоманда `memo doctor [-config path] [-json] [-live]` — read-only
 // диагностика фактического режима работы памяти (DESIGN.md §15, задача 9.1).
-// Система построена на принципе «деградация, а не падение»: memoryd может
+// Система построена на принципе «деградация, а не падение»: memo может
 // молча работать в урезанном режиме (ollama лежит → recall без вектора; ключ
 // DeepSeek не подхватился → без сводок; embed_meta от другой модели → reindex
 // ещё не догнал), и без этой команды это видно только по stderr работающего
@@ -114,7 +114,7 @@ type section struct {
 	Detail string `json:"detail"`
 }
 
-// doctorReport — полный отчёт `memoryd doctor` (человекочитаемый и -json
+// doctorReport — полный отчёт `memo doctor` (человекочитаемый и -json
 // вывод строятся из одной и той же структуры).
 type doctorReport struct {
 	Sections []section `json:"sections"`
@@ -134,7 +134,7 @@ func runDoctor(args []string, out io.Writer) (exitCode int, err error) {
 	fs.SetOutput(out)
 	fs.Usage = func() {
 		fmt.Fprintln(out, "read-only диагностика: в каком режиме реально работает память и всё ли с ней хорошо.")
-		fmt.Fprintln(out, "Использование: memoryd doctor [-config path] [-db path] [-json] [-live]")
+		fmt.Fprintln(out, "Использование: memo doctor [-config path] [-db path] [-json] [-live]")
 		fs.PrintDefaults()
 	}
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
@@ -152,7 +152,7 @@ func runDoctor(args []string, out io.Writer) (exitCode int, err error) {
 	}
 	// .env рядом с конфигом — до проверки env-ключей Reasoner/Embedder(openai) в
 	// секциях 5/6, симметрично серверному режиму и recall/save (задача 5.4).
-	loadDotEnvForConfig(*configPath, "memoryd doctor")
+	loadDotEnvForConfig(*configPath, "memo doctor")
 
 	report := buildDoctorReport(context.Background(), cfg, *configPath, *live)
 

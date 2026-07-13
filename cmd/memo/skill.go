@@ -1,6 +1,6 @@
 // skill.go — генерация скила «Протокол работы с памятью», раскладываемого
-// `memoryd init` в проект (DESIGN.md §14 Этап 5, задача 5.4). Инструктирует
-// агентское приложение, как пользоваться MCP-инструментами agentmemory
+// `memo init` в проект (DESIGN.md §14 Этап 5, задача 5.4). Инструктирует
+// агентское приложение, как пользоваться MCP-инструментами memo
 // (memory_recall/memory_save/memory_update/memory_forget) — обобщённая версия
 // раздела «Память проекта» из .claude/skills/dev/SKILL.md.
 package main
@@ -14,7 +14,7 @@ import "fmt"
 // обёртка в skillSpec.render (agentTarget.skills). %[1]s — имя проекта.
 const memorySkillBodyTemplate = `# Протокол работы с памятью — %[1]s
 
-Проект **%[1]s** хранит долговременную память в MCP-сервере ` + "`agentmemory`" + `
+Проект **%[1]s** хранит долговременную память в MCP-сервере ` + "`memo`" + `
 (инструменты ` + "`memory_recall`/`memory_save`/`memory_update`/`memory_forget`" + `,
 конфиг — ` + "`agentmemory.toml`" + ` в корне репозитория).
 
@@ -37,7 +37,7 @@ const memorySkillBodyTemplate = `# Протокол работы с память
 
 ## Ambient-режим (хуки)
 
-Если ` + "`memoryd init`" + ` в этом проекте подключил хуки Claude Code (SessionStart и,
+Если ` + "`memo init`" + ` в этом проекте подключил хуки Claude Code (SessionStart и,
 опционально, UserPromptSubmit) — recall уже выполнен автоматически ДО того, как ты
 увидел промпт: ищи в начале контекста блок ` + "`## Долговременная память проекта (авто-recall)`" + `.
 В этом случае вызывай ` + "`memory_recall`" + ` вручную только для точечных уточняющих
@@ -56,10 +56,10 @@ const memorySkillBodyTemplate = `# Протокол работы с память
 ## Если сервер недоступен
 
 Если инструменты ` + "`memory_*`" + ` не видны в сессии — агентское приложение не
-подняло MCP-сервер ` + "`agentmemory`" + ` (сервер не сконфигурирован или не одобрен
-приложением, бинарь ` + "`memoryd`" + ` недоступен) или reasoner/embedder работают в
+подняло MCP-сервер ` + "`memo`" + ` (сервер не сконфигурирован или не одобрен
+приложением, бинарь ` + "`memo`" + ` недоступен) или reasoner/embedder работают в
 деградированном режиме (пустой
-` + "`DEEPSEEK_API_KEY`" + ` — проверь ` + "`.env`" + ` рядом с ` + "`agentmemory.toml`" + `, memoryd
+` + "`DEEPSEEK_API_KEY`" + ` — проверь ` + "`.env`" + ` рядом с ` + "`agentmemory.toml`" + `, memo
 подхватывает его сам при старте). Продолжай задачу без долговременной памяти,
 предупредив об этом.
 `
@@ -75,7 +75,7 @@ func memorySkillBody(project string) string {
 // Claude Code и opencode.
 func skillDescription(project string) string {
 	return fmt.Sprintf(
-		"Протокол работы с долговременной памятью проекта %[1]s через MCP-сервер agentmemory (memory_recall/memory_save/memory_update/memory_forget). Используй в начале задачи для recall и по ходу/в конце задачи для сохранения новых фактов и решений в проекте %[1]s.",
+		"Протокол работы с долговременной памятью проекта %[1]s через MCP-сервер memo (memory_recall/memory_save/memory_update/memory_forget). Используй в начале задачи для recall и по ходу/в конце задачи для сохранения новых фактов и решений в проекте %[1]s.",
 		project,
 	)
 }
@@ -85,6 +85,6 @@ func skillDescription(project string) string {
 // записей agentRegistry: фронтматтер и тело скила не зависят от конкретного
 // агентского приложения, различается только путь файла (agentTarget.skillsDir + skillSpec.dirName).
 func renderSkillMD(project string) string {
-	frontMatter := fmt.Sprintf("---\nname: memoryd\ndescription: %s\n---\n\n", skillDescription(project))
+	frontMatter := fmt.Sprintf("---\nname: memo\ndescription: %s\n---\n\n", skillDescription(project))
 	return frontMatter + memorySkillBody(project)
 }

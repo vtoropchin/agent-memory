@@ -18,7 +18,7 @@ import (
 
 // serverName/serverVersion — идентификация сервера в MCP-рукопожатии.
 const (
-	serverName    = "agentmemory"
+	serverName    = "memo"
 	serverVersion = "0.1.0"
 )
 
@@ -78,7 +78,7 @@ func (s *Server) registerTools() {
 
 // Run запускает MCP-сервер поверх stdio-транспорта и блокируется до отключения
 // клиента или отмены ctx. Весь ввод/вывод протокола идёт через stdin/stdout —
-// вызывающий код не должен писать в stdout ничего постороннего (см. cmd/memoryd).
+// вызывающий код не должен писать в stdout ничего постороннего (см. cmd/memo).
 func (s *Server) Run(ctx context.Context) error {
 	if err := s.sdk.Run(ctx, &sdkmcp.StdioTransport{}); err != nil {
 		return fmt.Errorf("mcp: работа сервера: %w", err)

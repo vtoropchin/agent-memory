@@ -1,4 +1,4 @@
-// wizard.go — интерактивный TUI-промпт `memoryd init` (задача 11.1): select
+// wizard.go — интерактивный TUI-промпт `memo init` (задача 11.1): select
 // стрелками/Enter + скрытый ввод для ключей, поверх github.com/charmbracelet/huh
 // (спайк-решение — см. "Решение" в tasks/11.1-init-cobra-provider-setup.md).
 // Вызывается ТОЛЬКО когда isInteractiveStdin() уже подтвердил, что stdin —

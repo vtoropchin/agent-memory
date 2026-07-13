@@ -1,4 +1,4 @@
-// Подкоманда `memoryd import` — восстановление переносимого JSONL-бэкапа (см.
+// Подкоманда `memo import` — восстановление переносимого JSONL-бэкапа (см.
 // export.go) в SQLite-хранилище с сохранением идентичности записей: id (ULID)
 // и все таймстампы переносятся как есть, а не пересчитываются. В отличие от
 // `memimport`/write.Writer (легаси-путь для .claude/memory/*.md), импорт идёт
@@ -98,7 +98,7 @@ func recordToMemory(rec exportRecord) memory.Memory {
 	}
 }
 
-// importSummary — итог одного прогона `memoryd import` (см. printImportSummary).
+// importSummary — итог одного прогона `memo import` (см. printImportSummary).
 // LinksOK/LinksDropped считают рёбра (не записи): одна запись с тремя links,
 // из которых один повис, даёт LinksOK+=2, LinksDropped+=1.
 type importSummary struct {
@@ -239,8 +239,8 @@ func runImport(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("import", flag.ExitOnError)
 	fs.SetOutput(out)
 	fs.Usage = func() {
-		fmt.Fprintln(out, "импорт JSONL-бэкапа (см. `memoryd export`) с сохранением id и всех таймстампов.")
-		fmt.Fprintln(out, "Использование: memoryd import [флаги] file.jsonl")
+		fmt.Fprintln(out, "импорт JSONL-бэкапа (см. `memo export`) с сохранением id и всех таймстампов.")
+		fmt.Fprintln(out, "Использование: memo import [флаги] file.jsonl")
 		fs.PrintDefaults()
 	}
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
@@ -251,7 +251,7 @@ func runImport(args []string, out io.Writer) error {
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
 
 	if fs.NArg() < 1 {
-		return fmt.Errorf("import: не указан файл экспорта — memoryd import [флаги] file.jsonl")
+		return fmt.Errorf("import: не указан файл экспорта — memo import [флаги] file.jsonl")
 	}
 	path := fs.Arg(0)
 
@@ -274,7 +274,7 @@ func runImport(args []string, out io.Writer) error {
 		return fmt.Errorf("import: неизвестный формат файла %q (ожидался %q)", header.Format, exportFormat)
 	}
 	if header.Version != exportVersion {
-		return fmt.Errorf("import: неизвестная version %d (эта memoryd поддерживает %d)", header.Version, exportVersion)
+		return fmt.Errorf("import: неизвестная version %d (эта memo поддерживает %d)", header.Version, exportVersion)
 	}
 
 	if rescopeFrom != "" {
@@ -305,7 +305,7 @@ func runImport(args []string, out io.Writer) error {
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
-			log.Printf("memoryd import: закрытие хранилища: %v", err)
+			log.Printf("memo import: закрытие хранилища: %v", err)
 		}
 	}()
 
@@ -315,6 +315,6 @@ func runImport(args []string, out io.Writer) error {
 		return fmt.Errorf("import: %w", err)
 	}
 	printImportSummary(out, sum)
-	fmt.Fprintln(out, "векторы будут досчитаны фоновым reindex при следующем запуске memoryd (DESIGN.md §9, §11)")
+	fmt.Fprintln(out, "векторы будут досчитаны фоновым reindex при следующем запуске memo (DESIGN.md §9, §11)")
 	return nil
 }

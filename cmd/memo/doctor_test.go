@@ -268,7 +268,7 @@ func writeMinimalConfig(t *testing.T, dbPath string) string {
 
 // TestDoctorReadOnly_DBUnchanged проверяет, что doctor не вносит в БД ничего
 // сверх неизбежных механизмов самого SQLite в режиме WAL. store.Open/Close
-// (используемые doctor'ом, как и любым другим read-путём memoryd) сами по
+// (используемые doctor'ом, как и любым другим read-путём memo) сами по
 // себе трогают файл: SQLite делает "courtesy checkpoint" при закрытии
 // последнего соединения (sqlite.org/wal.html) — переносит накопленные
 // WAL-фреймы в основной файл, даже если за сессию не было ни одной записи;

@@ -1,5 +1,5 @@
 // cobra_test.go — регрессия задачи 11.1: миграция диспетчера подкоманд на
-// cobra не должна была изменить ни маршрутизацию (голый `memoryd -config X`
+// cobra не должна была изменить ни маршрутизацию (голый `memo -config X`
 // без подкоманды по-прежнему поднимает сервер — обратная совместимость с уже
 // установленными .mcp.json), ни контракты exit-кода/разделения stdout-stderr
 // каждой подкоманды. Тесты идут через newRootCmd(...).Execute() с буферами
@@ -75,7 +75,7 @@ func TestRootCmd_TopLevelHelp(t *testing.T) {
 		if exitCode != 0 {
 			t.Errorf("Execute(%q) exitCode = %d, хочу 0", arg, exitCode)
 		}
-		if !strings.Contains(stdout.String(), "memoryd init") || !strings.Contains(stdout.String(), "memoryd doctor") {
+		if !strings.Contains(stdout.String(), "memo init") || !strings.Contains(stdout.String(), "memo doctor") {
 			t.Errorf("Execute(%q) stdout не похож на writeUsage(): %s", arg, stdout.String())
 		}
 	}
@@ -104,7 +104,7 @@ func TestCobraHook_ErrorYieldsEmptyStdoutAndZeroExit(t *testing.T) {
 
 // TestCobraRecall_EmptyQueryExitsOneStdoutClean проверяет контракт recall:
 // ошибка (пустой запрос) -> exitCode 1, stdout остаётся чистым (без usage
-// cobra), ошибка идёт в stderr с префиксом "memoryd recall:".
+// cobra), ошибка идёт в stderr с префиксом "memo recall:".
 func TestCobraRecall_EmptyQueryExitsOneStdoutClean(t *testing.T) {
 	exitCode := 0
 	var stdout, stderr bytes.Buffer
@@ -120,8 +120,8 @@ func TestCobraRecall_EmptyQueryExitsOneStdoutClean(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, хочу пусто (ошибка не должна попадать в stdout)", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "memoryd recall:") {
-		t.Errorf("stderr = %q, хочу префикс \"memoryd recall:\"", stderr.String())
+	if !strings.Contains(stderr.String(), "memo recall:") {
+		t.Errorf("stderr = %q, хочу префикс \"memo recall:\"", stderr.String())
 	}
 }
 
@@ -201,7 +201,7 @@ func TestCobraDoctor_ExitCodeMatchesReport(t *testing.T) {
 // TestCobraDoctor_ConfigErrorExitsOneViaErr проверяет вторую ветку doctor:
 // битый TOML-конфиг не даёт построить отчёт вовсе — runDoctor возвращает err,
 // exitCode=1 идёт через ветку ошибки, а не отчёта, и сообщение попадает в
-// stderr с префиксом "memoryd doctor:".
+// stderr с префиксом "memo doctor:".
 func TestCobraDoctor_ConfigErrorExitsOneViaErr(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "broken.toml")
@@ -220,7 +220,7 @@ func TestCobraDoctor_ConfigErrorExitsOneViaErr(t *testing.T) {
 	if exitCode != 1 {
 		t.Errorf("exitCode = %d, хочу 1", exitCode)
 	}
-	if !strings.Contains(stderr.String(), "memoryd doctor:") {
-		t.Errorf("stderr = %q, хочу префикс \"memoryd doctor:\"", stderr.String())
+	if !strings.Contains(stderr.String(), "memo doctor:") {
+		t.Errorf("stderr = %q, хочу префикс \"memo doctor:\"", stderr.String())
 	}
 }

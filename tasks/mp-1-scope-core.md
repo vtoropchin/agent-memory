@@ -55,7 +55,7 @@
 
 ## Границы
 
-Не трогать: `recall`, `mcp`, `cmd/memoryd`, `write`, `embed`, `reason`, `maint`.
+Не трогать: `recall`, `mcp`, `cmd/memo`, `write`, `embed`, `reason`, `maint`.
 Дефолтную подстановку scope в вызовах инструментов делает MP-2, не эта задача.
 
 ## Критерий приёмки

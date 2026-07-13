@@ -11,8 +11,8 @@ import (
 )
 
 // TestDoInit_WritesAllFiles проверяет, что init в чистый временный каталог
-// пишет все артефакты: .mcp.json — валидный JSON с сервером agentmemory,
-// оба SKILL.md под claude (memoryd и memoryd-bootstrap), agentmemory.toml —
+// пишет все артефакты: .mcp.json — валидный JSON с сервером memo,
+// оба SKILL.md под claude (memo и memo-bootstrap), agentmemory.toml —
 // конфиг, из которого config.Load восстанавливает нужный scope.project и
 // провайдеров (round-trip сгенерированного конфига). Дефолт без явных
 // провайдеров — ollama/deepseek.
@@ -33,22 +33,22 @@ func TestDoInit_WritesAllFiles(t *testing.T) {
 	if err := json.Unmarshal(mcpRaw, &mcpCfg); err != nil {
 		t.Fatalf(".mcp.json невалиден: %v\n%s", err, mcpRaw)
 	}
-	srv, ok := mcpCfg.MCPServers["agentmemory"]
+	srv, ok := mcpCfg.MCPServers["memo"]
 	if !ok {
-		t.Fatalf(".mcp.json не содержит сервер agentmemory: %s", mcpRaw)
+		t.Fatalf(".mcp.json не содержит сервер memo: %s", mcpRaw)
 	}
 	if srv.Command == "" {
-		t.Errorf("mcpServers.agentmemory.command пуст")
+		t.Errorf("mcpServers.memo.command пуст")
 	}
 	wantArgs := []string{"-config", "${CLAUDE_PROJECT_DIR:-.}/agentmemory.toml"}
 	if len(srv.Args) != len(wantArgs) || srv.Args[0] != wantArgs[0] || srv.Args[1] != wantArgs[1] {
-		t.Errorf("mcpServers.agentmemory.args = %v, хочу %v", srv.Args, wantArgs)
+		t.Errorf("mcpServers.memo.args = %v, хочу %v", srv.Args, wantArgs)
 	}
 	if srv.Env["DEEPSEEK_API_KEY"] != "${DEEPSEEK_API_KEY:-}" {
-		t.Errorf("mcpServers.agentmemory.env.DEEPSEEK_API_KEY = %q", srv.Env["DEEPSEEK_API_KEY"])
+		t.Errorf("mcpServers.memo.env.DEEPSEEK_API_KEY = %q", srv.Env["DEEPSEEK_API_KEY"])
 	}
 	if _, ok := srv.Env["OPENAI_API_KEY"]; ok {
-		t.Errorf("mcpServers.agentmemory.env содержит OPENAI_API_KEY при embedder=ollama: %v", srv.Env)
+		t.Errorf("mcpServers.memo.env содержит OPENAI_API_KEY при embedder=ollama: %v", srv.Env)
 	}
 
 	tomlPath := filepath.Join(dir, "agentmemory.toml")
@@ -78,13 +78,13 @@ func TestDoInit_WritesAllFiles(t *testing.T) {
 		t.Errorf("Store.Path = %q, хочу %q", cfg.Store.Path, defaultStorePath)
 	}
 
-	skillPath := filepath.Join(dir, ".claude", "skills", "memoryd", "SKILL.md")
+	skillPath := filepath.Join(dir, ".claude", "skills", "memo", "SKILL.md")
 	skillRaw, err := os.ReadFile(skillPath)
 	if err != nil {
 		t.Fatalf("чтение %s: %v", skillPath, err)
 	}
 	skill := string(skillRaw)
-	if !strings.HasPrefix(skill, "---\nname: memoryd\ndescription:") {
+	if !strings.HasPrefix(skill, "---\nname: memo\ndescription:") {
 		t.Errorf("SKILL.md не начинается с валидного фронтматтера name/description")
 	}
 	if strings.Count(skill, "---\n") < 2 {
@@ -97,13 +97,13 @@ func TestDoInit_WritesAllFiles(t *testing.T) {
 		t.Errorf("SKILL.md не описывает memory_recall/memory_save: %s", skill)
 	}
 
-	bootstrapPath := filepath.Join(dir, ".claude", "skills", "memoryd-bootstrap", "SKILL.md")
+	bootstrapPath := filepath.Join(dir, ".claude", "skills", "memo-bootstrap", "SKILL.md")
 	bootstrapRaw, err := os.ReadFile(bootstrapPath)
 	if err != nil {
 		t.Fatalf("чтение %s: %v", bootstrapPath, err)
 	}
 	bootstrap := string(bootstrapRaw)
-	if !strings.HasPrefix(bootstrap, "---\nname: memoryd-bootstrap\ndescription:") {
+	if !strings.HasPrefix(bootstrap, "---\nname: memo-bootstrap\ndescription:") {
 		t.Errorf("SKILL.md bootstrap не начинается с валидного фронтматтера name/description")
 	}
 	if strings.Count(bootstrap, "---\n") < 2 {
@@ -211,7 +211,7 @@ func TestDoInit_ProviderCombinations(t *testing.T) {
 			if err := json.Unmarshal(mcpRaw, &mcpCfg); err != nil {
 				t.Fatalf(".mcp.json невалиден: %v", err)
 			}
-			env := mcpCfg.MCPServers["agentmemory"].Env
+			env := mcpCfg.MCPServers["memo"].Env
 			_, hasDeepseek := env["DEEPSEEK_API_KEY"]
 			_, hasOpenAI := env["OPENAI_API_KEY"]
 			wantDeepseek := tt.reasonerProvider == "deepseek"
@@ -317,9 +317,9 @@ func TestDoInit_UnknownAgent(t *testing.T) {
 }
 
 // TestDoInit_OpencodeTarget проверяет, что при Agent="opencode" doInit пишет
-// opencode.json (local MCP-сервер agentmemory, форма которого отличается от
+// opencode.json (local MCP-сервер memo, форма которого отличается от
 // .mcp.json Claude Code — единый массив command, environment вместо env) и
-// оба SKILL.md по opencode-specific пути .opencode/skills/{memoryd,memoryd-bootstrap}/SKILL.md.
+// оба SKILL.md по opencode-specific пути .opencode/skills/{memo,memo-bootstrap}/SKILL.md.
 func TestDoInit_OpencodeTarget(t *testing.T) {
 	dir := t.TempDir()
 	var out strings.Builder
@@ -342,19 +342,19 @@ func TestDoInit_OpencodeTarget(t *testing.T) {
 	if !ok {
 		t.Fatalf("opencode.json.mcp отсутствует или не объект: %s", ocRaw)
 	}
-	srv, ok := mcp["agentmemory"].(map[string]any)
+	srv, ok := mcp["memo"].(map[string]any)
 	if !ok {
-		t.Fatalf("opencode.json.mcp.agentmemory отсутствует или не объект: %s", ocRaw)
+		t.Fatalf("opencode.json.mcp.memo отсутствует или не объект: %s", ocRaw)
 	}
 	if srv["type"] != "local" {
-		t.Errorf("mcp.agentmemory.type = %v, хочу local", srv["type"])
+		t.Errorf("mcp.memo.type = %v, хочу local", srv["type"])
 	}
 	cmd, ok := srv["command"].([]any)
 	if !ok {
-		t.Fatalf("mcp.agentmemory.command не массив: %v", srv["command"])
+		t.Fatalf("mcp.memo.command не массив: %v", srv["command"])
 	}
 	if len(cmd) == 0 || cmd[0] == "" {
-		t.Errorf("mcp.agentmemory.command[0] пуст: %v", cmd)
+		t.Errorf("mcp.memo.command[0] пуст: %v", cmd)
 	}
 	var cmdStrs []string
 	for _, c := range cmd {
@@ -363,26 +363,26 @@ func TestDoInit_OpencodeTarget(t *testing.T) {
 	}
 	joined := strings.Join(cmdStrs, " ")
 	if !strings.Contains(joined, "-config") || !strings.Contains(joined, "agentmemory.toml") {
-		t.Errorf("mcp.agentmemory.command не содержит -config agentmemory.toml: %v", cmd)
+		t.Errorf("mcp.memo.command не содержит -config agentmemory.toml: %v", cmd)
 	}
 	if srv["enabled"] != true {
-		t.Errorf("mcp.agentmemory.enabled = %v, хочу true", srv["enabled"])
+		t.Errorf("mcp.memo.enabled = %v, хочу true", srv["enabled"])
 	}
 	env, ok := srv["environment"].(map[string]any)
 	if !ok {
-		t.Fatalf("mcp.agentmemory.environment не объект: %v", srv["environment"])
+		t.Fatalf("mcp.memo.environment не объект: %v", srv["environment"])
 	}
 	if env["DEEPSEEK_API_KEY"] != "{env:DEEPSEEK_API_KEY}" {
-		t.Errorf("mcp.agentmemory.environment.DEEPSEEK_API_KEY = %v, хочу {env:DEEPSEEK_API_KEY}", env["DEEPSEEK_API_KEY"])
+		t.Errorf("mcp.memo.environment.DEEPSEEK_API_KEY = %v, хочу {env:DEEPSEEK_API_KEY}", env["DEEPSEEK_API_KEY"])
 	}
 
-	skillPath := filepath.Join(dir, ".opencode", "skills", "memoryd", "SKILL.md")
+	skillPath := filepath.Join(dir, ".opencode", "skills", "memo", "SKILL.md")
 	skillRaw, err := os.ReadFile(skillPath)
 	if err != nil {
 		t.Fatalf("чтение %s: %v", skillPath, err)
 	}
 	skill := string(skillRaw)
-	if !strings.HasPrefix(skill, "---\nname: memoryd\ndescription:") {
+	if !strings.HasPrefix(skill, "---\nname: memo\ndescription:") {
 		t.Errorf("SKILL.md не начинается с валидного фронтматтера name/description")
 	}
 	if !strings.Contains(skill, "myproj") {
@@ -392,13 +392,13 @@ func TestDoInit_OpencodeTarget(t *testing.T) {
 		t.Errorf("SKILL.md не упоминает memory_recall: %s", skill)
 	}
 
-	bootstrapPath := filepath.Join(dir, ".opencode", "skills", "memoryd-bootstrap", "SKILL.md")
+	bootstrapPath := filepath.Join(dir, ".opencode", "skills", "memo-bootstrap", "SKILL.md")
 	bootstrapRaw, err := os.ReadFile(bootstrapPath)
 	if err != nil {
 		t.Fatalf("чтение %s: %v", bootstrapPath, err)
 	}
 	bootstrap := string(bootstrapRaw)
-	if !strings.HasPrefix(bootstrap, "---\nname: memoryd-bootstrap\ndescription:") {
+	if !strings.HasPrefix(bootstrap, "---\nname: memo-bootstrap\ndescription:") {
 		t.Errorf("SKILL.md bootstrap не начинается с валидного фронтматтера name/description")
 	}
 	if !strings.Contains(bootstrap, "myproj") {
@@ -643,7 +643,7 @@ func TestApplyInitDefaults_ClearsUnselectedProviderKeys(t *testing.T) {
 
 // TestDoInit_HooksSessionStartWritesSettingsJSON проверяет, что при
 // Hooks="session-start" doInit пишет секцию hooks в .claude/settings.json с
-// командой memoryd hook -event session-start (задача 7.2), и что повторный
+// командой memo hook -event session-start (задача 7.2), и что повторный
 // init не дублирует запись (идемпотентность).
 func TestDoInit_HooksSessionStartWritesSettingsJSON(t *testing.T) {
 	dir := t.TempDir()
@@ -835,7 +835,7 @@ func TestDoInit_HooksMergePreservesExistingSettings(t *testing.T) {
 		t.Errorf("чужая matcher-запись SessionStart[compact] потеряна: %v", sessionStart)
 	}
 	if !foundOurs {
-		t.Errorf("новая matcher-запись memoryd hook не добавлена: %v", sessionStart)
+		t.Errorf("новая matcher-запись memo hook не добавлена: %v", sessionStart)
 	}
 }
 

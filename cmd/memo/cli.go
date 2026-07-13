@@ -1,6 +1,6 @@
-// Подкоманды `memoryd recall` / `memoryd save` — одноразовые CLI-обёртки над
+// Подкоманды `memo recall` / `memo save` — одноразовые CLI-обёртки над
 // read/write path памяти (DESIGN.md §12, задача 7.1). В отличие от MCP-режима
-// (стартует раз на сессию агента и живёт демоном) и `memoryd web` (read-only
+// (стартует раз на сессию агента и живёт демоном) и `memo web` (read-only
 // HTTP), это one-shot вызовы из терминала/скрипта — прежде всего для хуков
 // агентского харнесса (SessionStart/UserPromptSubmit, задача 7.2), которым
 // нужно дёрнуть память одной командой без поднятия MCP-транспорта. Один
@@ -34,7 +34,7 @@ func runRecall(args []string, out io.Writer) error {
 	fs.SetOutput(out)
 	fs.Usage = func() {
 		fmt.Fprintln(out, "разовый поиск по памяти: печатает готовый Markdown-бриф в stdout.")
-		fmt.Fprintln(out, "Использование: memoryd recall [флаги] \"<запрос>\"")
+		fmt.Fprintln(out, "Использование: memo recall [флаги] \"<запрос>\"")
 		fs.PrintDefaults()
 	}
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
@@ -49,7 +49,7 @@ func runRecall(args []string, out io.Writer) error {
 
 	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if query == "" {
-		return fmt.Errorf("recall: запрос не задан — memoryd recall \"<запрос>\"")
+		return fmt.Errorf("recall: запрос не задан — memo recall \"<запрос>\"")
 	}
 
 	cfg, err := config.Load(*configPath)
@@ -59,7 +59,7 @@ func runRecall(args []string, out io.Writer) error {
 	if *dbPath != "" {
 		cfg.Store.Path = *dbPath
 	}
-	loadDotEnvForConfig(*configPath, "memoryd recall")
+	loadDotEnvForConfig(*configPath, "memo recall")
 
 	ctx := context.Background()
 
@@ -73,7 +73,7 @@ func runRecall(args []string, out io.Writer) error {
 		scopes = cfg.Scope.RecallScopes()
 	}
 
-	brief, err := doRecall(ctx, cfg, "memoryd recall", memory.Query{
+	brief, err := doRecall(ctx, cfg, "memo recall", memory.Query{
 		Text:        query,
 		Scopes:      scopes,
 		Kinds:       splitCSV(*kindsFlag),
@@ -104,7 +104,7 @@ func runRecall(args []string, out io.Writer) error {
 // деградация до Noop, что у серверного режима — предупреждения только в
 // stderr), выполняет q и закрывает хранилище перед возвратом. logPrefix —
 // префикс сообщения в лог о закрытии хранилища (у recall/hook он разный).
-// Общий приватный хелпер для `memoryd recall` (runRecall выше) и `memoryd
+// Общий приватный хелпер для `memo recall` (runRecall выше) и `memo
 // hook` (runHook, задача 7.2, hook.go) — единственная точка, открывающая
 // store+reasoner+embedder для recall-пути в CLI-режиме; caller сам решает,
 // что делать с cfg.Store.Path (напр. runRecall применяет поверх него -db) и с
@@ -143,7 +143,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 	fs.SetOutput(out)
 	fs.Usage = func() {
 		fmt.Fprintln(out, "разовое сохранение факта в память.")
-		fmt.Fprintln(out, "Использование: memoryd save -kind <kind> -content <текст|-> [флаги]")
+		fmt.Fprintln(out, "Использование: memo save -kind <kind> -content <текст|-> [флаги]")
 		fs.PrintDefaults()
 	}
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
@@ -178,7 +178,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 	if *dbPath != "" {
 		cfg.Store.Path = *dbPath
 	}
-	loadDotEnvForConfig(*configPath, "memoryd save")
+	loadDotEnvForConfig(*configPath, "memo save")
 
 	s, err := store.Open(cfg.Store.Path)
 	if err != nil {
@@ -186,7 +186,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
-			log.Printf("memoryd save: закрытие хранилища: %v", err)
+			log.Printf("memo save: закрытие хранилища: %v", err)
 		}
 	}()
 

@@ -1,7 +1,7 @@
-# Конфиг догфудинга AgentMemory (DESIGN.md §14 Этап 5, задача 5.2).
+# Конфиг догфудинга Agent Memo (DESIGN.md §14 Этап 5, задача 5.2).
 #
-# Проект AgentMemory ведёт свою собственную память в memoryd. Claude Code
-# поднимает сервер `agentmemory` из .mcp.json в корне репо и передаёт ему этот
+# Проект Agent Memo ведёт свою собственную память в memo. Claude Code
+# поднимает сервер `memo` из .mcp.json в корне репо и передаёт ему этот
 # файл флагом -config. Схема полей — см. config.example.toml и DESIGN.md §13.
 
 [store]
@@ -12,7 +12,7 @@ path = "~/.agentmemory/memory.db"
 
 [embedder]
 # Локальный ollama + bge-m3 (dim определяется автоматически пробным эмбеддингом).
-# Если ollama недоступен — memoryd стартует, recall падает на чистый FTS5 (§15).
+# Если ollama недоступен — memo стартует, recall падает на чистый FTS5 (§15).
 provider = "ollama"
 base_url = "http://localhost:11434"
 model    = "bge-m3"

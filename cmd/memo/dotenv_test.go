@@ -79,7 +79,7 @@ func TestLoadDotEnv_ShellEnvTakesPriority(t *testing.T) {
 
 // TestLoadDotEnv_EmptyEnvOverriddenByDotEnv — регресс-тест на боевой путь
 // через Claude Code: сгенерированный .mcp.json инжектит переменную вида
-// ${DEEPSEEK_API_KEY:-}, из-за чего memoryd получает переменную окружения,
+// ${DEEPSEEK_API_KEY:-}, из-за чего memo получает переменную окружения,
 // которая ЗАДАНА, но пуста (os.LookupEnv вернёт exists=true). Такое пустое
 // значение не должно считаться приоритетнее .env — иначе валидный ключ из
 // .env игнорируется и Reasoner деградирует в Noop.

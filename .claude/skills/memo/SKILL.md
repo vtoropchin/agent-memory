@@ -1,25 +1,25 @@
 ---
-name: memoryd
-description: Протокол работы с долговременной памятью проекта AgentMemory через MCP-сервер agentmemory (memory_recall/memory_save/memory_update/memory_forget). Используй в начале задачи для recall и по ходу/в конце задачи для сохранения новых фактов и решений в проекте AgentMemory.
+name: memo
+description: Протокол работы с долговременной памятью проекта Agent Memo через MCP-сервер memo (memory_recall/memory_save/memory_update/memory_forget). Используй в начале задачи для recall и по ходу/в конце задачи для сохранения новых фактов и решений в проекте Agent Memo.
 ---
 
-# Протокол работы с памятью — AgentMemory
+# Протокол работы с памятью — Agent Memo
 
-Проект **AgentMemory** хранит долговременную память в MCP-сервере `agentmemory`
+Проект **Agent Memo** хранит долговременную память в MCP-сервере `memo`
 (инструменты `memory_recall`/`memory_save`/`memory_update`/`memory_forget`,
 конфиг — `agentmemory.toml` в корне репозитория).
 
 ## Когда вызывать
 
 - **В начале любой задачи** — `memory_recall` с описанием задачи. `scope`/`scopes`
-  не указывай: инстанс сам подставит домашнее пространство `project:AgentMemory`
+  не указывай: инстанс сам подставит домашнее пространство `project:agentmemory`
   плюс общий слой `user:*` (см. `agentmemory.toml [scope]`). Так
   подтягиваются решения, договорённости и прогресс прошлых сессий.
 - **По ходу и в конце задачи** — фиксируй новое через `memory_save`: один
   атомарный факт (1–3 предложения) за вызов. `scope` в схеме инструмента
   обязателен (без `omitempty`) — передавай пустую строку `scope:""`,
-  если хочешь дефолт `project:AgentMemory`, а не опускай ключ. Явно
-  `scope:"project:AgentMemory"` — для проектных фактов/решений/граблей; явно
+  если хочешь дефолт `project:agentmemory`, а не опускай ключ. Явно
+  `scope:"project:agentmemory"` — для проектных фактов/решений/граблей; явно
   `scope:"user:*"` — для общих привычек и предпочтений пользователя, не
   привязанных к этому проекту.
 - **Факт изменился** — `memory_update` (id записи + только изменённые поля).
@@ -28,16 +28,16 @@ description: Протокол работы с долговременной па�
 
 ## Правила scope
 
-- `memory_save` без явного scope пишет в `project:AgentMemory` — домашнее
+- `memory_save` без явного scope пишет в `project:agentmemory` — домашнее
   пространство этого инстанса.
-- `memory_recall` без scope/scopes ищет в `project:AgentMemory` + `user:*`.
+- `memory_recall` без scope/scopes ищет в `project:agentmemory` + `user:*`.
 - Явный scope/scopes в вызове всегда перекрывает дефолт инстанса.
 
 ## Если сервер недоступен
 
 Если инструменты `memory_*` не видны в сессии — агентское приложение не
-подняло MCP-сервер `agentmemory` (воркспейс не одобрен, бинарь `memoryd`
+подняло MCP-сервер `memo` (воркспейс не одобрен, бинарь `memo`
 недоступен) или reasoner/embedder работают в деградированном режиме (пустой
-`DEEPSEEK_API_KEY` — проверь `.env` рядом с `agentmemory.toml`, memoryd
+`DEEPSEEK_API_KEY` — проверь `.env` рядом с `agentmemory.toml`, memo
 подхватывает его сам при старте). Продолжай задачу без долговременной памяти,
 предупредив об этом.

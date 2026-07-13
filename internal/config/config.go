@@ -119,7 +119,7 @@ func Default() Config {
 		},
 		Embedder: EmbedderConfig{
 			Provider: "noop", // Этап 1: без эмбеддингов
-			BaseURL:  "",     // дефолт base_url провайдер-специфичен (ollama vs openai) — подставляется в cmd/memoryd.newEmbedder, не здесь
+			BaseURL:  "",     // дефолт base_url провайдер-специфичен (ollama vs openai) — подставляется в cmd/memo.newEmbedder, не здесь
 			Model:    "bge-m3",
 		},
 		Reasoner: ReasonerConfig{

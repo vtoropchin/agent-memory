@@ -1,4 +1,4 @@
-// cobra.go — дерево команд memoryd на github.com/spf13/cobra (задача 11.1).
+// cobra.go — дерево команд memo на github.com/spf13/cobra (задача 11.1).
 //
 // Единственная роль cobra здесь — маршрутизация по имени подкоманды; разбор
 // ФЛАГОВ каждой подкоманды остаётся полностью на стороне уже существующих
@@ -41,12 +41,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newRootCmd строит дерево команд memoryd. root без подкоманды — серверный
+// newRootCmd строит дерево команд memo. root без подкоманды — серверный
 // путь run() (обратная совместимость с уже установленными .mcp.json,
-// вызывающими `memoryd -config <path>` без подкоманды).
+// вызывающими `memo -config <path>` без подкоманды).
 func newRootCmd(stdin io.Reader, stdout, stderr io.Writer, exitCode *int) *cobra.Command {
 	root := &cobra.Command{
-		Use:                "memoryd",
+		Use:                "memo",
 		Short:              "сервер долговременной памяти для ИИ-агентов (MCP поверх SQLite)",
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
@@ -61,22 +61,22 @@ func newRootCmd(stdin io.Reader, stdout, stderr io.Writer, exitCode *int) *cobra
 				return nil
 			}
 			if err := run(args); err != nil {
-				fmt.Fprintf(stderr, "memoryd: %v\n", err)
+				fmt.Fprintf(stderr, "memo: %v\n", err)
 				*exitCode = 1
 			}
 			return nil
 		},
 	}
 	// Подкоманда `completion` (авто-генерация shell-автодополнения) — не часть
-	// документированного набора подкоманд memoryd (DESIGN.md §5/§13); отключаем,
-	// чтобы `memoryd -h` не показывал незадокументированную возможность.
+	// документированного набора подкоманд memo (DESIGN.md §5/§13); отключаем,
+	// чтобы `memo -h` не показывал незадокументированную возможность.
 	root.CompletionOptions.DisableDefaultCmd = true
 
 	// cobra авто-регистрирует свою собственную подкоманду "help", которая иначе
 	// перехватывала бы литерал "help" ДО того, как он попал бы в root.RunE
 	// (Find матчит её по имени, разбор флагов тут ни при чём) — и печатала бы
 	// сгенерированную cobra справку вместо writeUsage(). Заменяем её, чтобы
-	// "memoryd help" вело себя как "memoryd -h" (isHelpArg, см. root.RunE) —
+	// "memo help" вело себя как "memo -h" (isHelpArg, см. root.RunE) —
 	// то же самое, что было в диспетчере main() до задачи 11.1.
 	root.SetHelpCommand(&cobra.Command{
 		Use:    "help",
@@ -87,19 +87,19 @@ func newRootCmd(stdin io.Reader, stdout, stderr io.Writer, exitCode *int) *cobra
 	})
 
 	root.AddCommand(
-		newForwardingCmd("init", "установить память в проект (MCP-конфиг, скил, agentmemory.toml)", exitCode, stderr, "memoryd init",
+		newForwardingCmd("init", "установить память в проект (MCP-конфиг, скил, agentmemory.toml)", exitCode, stderr, "memo init",
 			func(args []string) error { return runInit(args, stdout) }),
-		newForwardingCmd("web", "HTTP-морда для просмотра и поиска памяти", exitCode, stderr, "memoryd web",
+		newForwardingCmd("web", "HTTP-морда для просмотра и поиска памяти", exitCode, stderr, "memo web",
 			func(args []string) error { return runWeb(args, stdout) }),
-		newForwardingCmd("recall", "одноразовый recall из shell/скрипта/хука агента", exitCode, stderr, "memoryd recall",
+		newForwardingCmd("recall", "одноразовый recall из shell/скрипта/хука агента", exitCode, stderr, "memo recall",
 			func(args []string) error { return runRecall(args, stdout) }),
-		newForwardingCmd("save", "одноразовое сохранение факта в память", exitCode, stderr, "memoryd save",
+		newForwardingCmd("save", "одноразовое сохранение факта в память", exitCode, stderr, "memo save",
 			func(args []string) error { return runSave(args, stdin, stdout) }),
 		newHookCmd(stdin, stdout),
 		newDoctorCmd(stdout, stderr, exitCode),
-		newForwardingCmd("export", "бэкап/перенос памяти в переносимый JSONL", exitCode, stderr, "memoryd export",
+		newForwardingCmd("export", "бэкап/перенос памяти в переносимый JSONL", exitCode, stderr, "memo export",
 			func(args []string) error { return runExport(args, stdout) }),
-		newForwardingCmd("import", "восстановление памяти из JSONL-бэкапа", exitCode, stderr, "memoryd import",
+		newForwardingCmd("import", "восстановление памяти из JSONL-бэкапа", exitCode, stderr, "memo import",
 			func(args []string) error { return runImport(args, stdout) }),
 	)
 	return root
@@ -142,7 +142,7 @@ func newHookCmd(stdin io.Reader, stdout io.Writer) *cobra.Command {
 		Args:               cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := runHook(args, stdin, stdout); err != nil {
-				log.Printf("memoryd hook: %v", err)
+				log.Printf("memo hook: %v", err)
 			}
 			return nil
 		},
@@ -164,7 +164,7 @@ func newDoctorCmd(stdout, stderr io.Writer, exitCode *int) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			code, err := runDoctor(args, stdout)
 			if err != nil {
-				fmt.Fprintf(stderr, "memoryd doctor: %v\n", err)
+				fmt.Fprintf(stderr, "memo doctor: %v\n", err)
 				*exitCode = 1
 				return nil
 			}

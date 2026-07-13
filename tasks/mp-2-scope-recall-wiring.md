@@ -1,15 +1,15 @@
-# Задача MP-2 — Разрешение scope в recall/save и связка в memoryd
+# Задача MP-2 — Разрешение scope в recall/save и связка в memo
 
 **Статус:** ✅ выполнено 2026-07-11. `mcp.NewServer` теперь принимает `config.ScopeConfig`;
 `handleSave` подставляет `SaveScope()` при пустом входном scope (Writer.Save сам
 возвращает `ErrEmptyScope`, если и дефолт пуст); `handleRecall` разрешает набор scope
 через `resolveRecallScopes` (приоритет: `in.Scopes` > `in.Scope` > `cfg.RecallScopes()`);
 схема `memory_recall` получила поле `scopes` (back-compat с одиночным `scope`);
-`cmd/memoryd` пробрасывает `cfg.Scope`; `config.example.toml` дополнен секцией `[scope]`.
+`cmd/memo` пробрасывает `cfg.Scope`; `config.example.toml` дополнен секцией `[scope]`.
 Новые тесты `internal/mcp/server_test.go`: `TestResolveRecallScopes` (5 подслучаев),
 `TestSaveDefaultScopeFromInstance` (3 подслучая). Билд и `go test -tags sqlite_fts5
 -count=1 ./...` зелёные целиком (все пакеты PASS).
-**Область:** `internal/mcp`, `cmd/memoryd`, `internal/memory/recall` (только проброс)
+**Область:** `internal/mcp`, `cmd/memo`, `internal/memory/recall` (только проброс)
 **Зависимости:** MP-1 (Query.Scopes, ScopeConfig, хелперы)
 
 ## Контекст
@@ -24,7 +24,7 @@ MP-1 добавил `Query.Scopes`, предикат набора scope в store
 
 1. **Проброс конфига scope в mcp.** `mcp.NewServer` (или его зависимости) получает
    `config.ScopeConfig` (или уже готовые `SaveScope()`/`RecallScopes()`), чтобы хендлеры
-   могли разрешать дефолты. `cmd/memoryd` передаёт `cfg.Scope`.
+   могли разрешать дефолты. `cmd/memo` передаёт `cfg.Scope`.
 2. **handleSave** (`internal/mcp/save.go`): если во входе scope пуст — подставить
    `cfg.SaveScope()`. Если и он пуст (project не задан) — вернуть доменную ошибку
    `ErrEmptyScope` как сейчас (мультипроектность требует настроенного project). Явный scope
@@ -64,5 +64,5 @@ scope уже разрешён здесь; конфликта нет. Если 3.
 ## Критерий приёмки
 
 - Билд чист; `CGO_ENABLED=1 go test -tags sqlite_fts5 -count=1 ./...` зелёный целиком.
-- e2e (оркестратор): два инстанса memoryd с разными `project` над одним файлом БД — recall
+- e2e (оркестратор): два инстанса memo с разными `project` над одним файлом БД — recall
   каждого видит свой проект и `user:*`, но не чужой `project:*`.

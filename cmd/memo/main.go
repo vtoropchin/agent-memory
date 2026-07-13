@@ -1,4 +1,4 @@
-// Command memoryd — точка входа AgentMemory: MCP-сервер долговременной памяти
+// Command memo — точка входа AgentMemory: MCP-сервер долговременной памяти
 // поверх SQLite, обслуживающий инструменты save/recall/update/forget по stdio
 // (DESIGN.md §3, §12).
 package main
@@ -66,7 +66,7 @@ const (
 // решает, что считать подкомандой, через свою эвристику stripFlags, которая
 // при "-db recall" отбрасывает САМ токен "-db" (посчитав, что это флаг с
 // значением) и трактует следующий токен "recall" как имя подкоманды — в
-// результате `memoryd -db recall` уходил в подкоманду recall, чей отдельный
+// результате `memo -db recall` уходил в подкоманду recall, чей отдельный
 // flag.ExitOnError-FlagSet видел "-db" без значения и завершал процесс.
 // decideRoute вызывается ДО того, как args вообще попадают в cobra — поэтому
 // для аргументов, похожих на флаг (routeServer), Find/stripFlags уже не
@@ -99,7 +99,7 @@ func runMain(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 		return 0
 	case routeServer:
 		if err := run(args); err != nil {
-			fmt.Fprintf(stderr, "memoryd: %v\n", err)
+			fmt.Fprintf(stderr, "memo: %v\n", err)
 			return 1
 		}
 		return 0
@@ -129,7 +129,7 @@ func runMain(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 	}
 }
 
-// main — точка входа memoryd. Вся логика — в runMain, main() лишь подключает
+// main — точка входа memo. Вся логика — в runMain, main() лишь подключает
 // реальные os.Std*/os.Args и транслирует код выхода в os.Exit (без этого
 // runMain нельзя было бы тестировать без завершения процесса теста).
 func main() {
@@ -137,9 +137,9 @@ func main() {
 }
 
 // run — серверный режим (MCP поверх stdio), вызывается корневой командой без
-// подкоманды (в т.ч. `memoryd -config <path>`, как зовёт уже установленный
+// подкоманды (в т.ч. `memo -config <path>`, как зовёт уже установленный
 // .mcp.json — обратная совместимость, задача 11.1). args — то, что осталось
-// после имени команды (пусто для голого `memoryd`); разбираются собственным
+// после имени команды (пусто для голого `memo`); разбираются собственным
 // FlagSet, а не глобальным flag.CommandLine — тот же приём, что у остальных
 // подкоманд (cli.go и др.), нужен, чтобы cobra могла передавать args явно, не
 // трогая os.Args.
@@ -149,15 +149,15 @@ func run(args []string) error {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags)
 
-	fs := flag.NewFlagSet("memoryd", flag.ExitOnError)
+	fs := flag.NewFlagSet("memo", flag.ExitOnError)
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
 
 	// .env рядом с конфигом (или в текущем каталоге, если -config не задан) —
-	// раскладывается `memoryd init` (задача 5.4). Загрузить ДО newReasoner,
+	// раскладывается `memo init` (задача 5.4). Загрузить ДО newReasoner,
 	// иначе DEEPSEEK_API_KEY туда не долетит. Значение ключа в лог не попадает.
-	loadDotEnvForConfig(*configPath, "memoryd")
+	loadDotEnvForConfig(*configPath, "memo")
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -173,7 +173,7 @@ func run(args []string) error {
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
-			log.Printf("memoryd: закрытие хранилища: %v", err)
+			log.Printf("memo: закрытие хранилища: %v", err)
 		}
 	}()
 
@@ -215,7 +215,7 @@ func run(args []string) error {
 	)
 	go scheduler.Run(ctx)
 
-	log.Printf("memoryd: запуск MCP-сервера (stdio), store=%s", cfg.Store.Path)
+	log.Printf("memo: запуск MCP-сервера (stdio), store=%s", cfg.Store.Path)
 	if err := srv.Run(ctx); err != nil {
 		return fmt.Errorf("работа сервера: %w", err)
 	}
@@ -235,11 +235,11 @@ func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 	case "deepseek":
 		key := os.Getenv(deepseekAPIKeyEnv)
 		if key == "" {
-			log.Printf("memoryd: reasoner.provider=deepseek, но %s пуст — суммаризация отключена", deepseekAPIKeyEnv)
+			log.Printf("memo: reasoner.provider=deepseek, но %s пуст — суммаризация отключена", deepseekAPIKeyEnv)
 			return reason.NewNoop(), nil
 		}
 		if cfg.Model == "" {
-			log.Printf("memoryd: reasoner.provider=deepseek, но reasoner.model пуст — суммаризация отключена")
+			log.Printf("memo: reasoner.provider=deepseek, но reasoner.model пуст — суммаризация отключена")
 			return reason.NewNoop(), nil
 		}
 		return reason.NewDeepSeek(key, cfg.Model)
@@ -274,14 +274,14 @@ func newEmbedder(ctx context.Context, cfg config.EmbedderConfig) (embed.Embedder
 		}
 		e, err := embed.NewOllama(ctx, baseURL, cfg.Model)
 		if err != nil {
-			log.Printf("memoryd: embedder.provider=ollama, но ollama недоступна или модель не загружена (%v) — векторный поиск отключён, recall на полнотекстовом", err)
+			log.Printf("memo: embedder.provider=ollama, но ollama недоступна или модель не загружена (%v) — векторный поиск отключён, recall на полнотекстовом", err)
 			return embed.NewNoop(), nil
 		}
 		return e, nil
 	case "openai":
 		key := os.Getenv(openaiAPIKeyEnv)
 		if key == "" {
-			log.Printf("memoryd: embedder.provider=openai, но %s пуст — векторный поиск отключён, recall на полнотекстовом", openaiAPIKeyEnv)
+			log.Printf("memo: embedder.provider=openai, но %s пуст — векторный поиск отключён, recall на полнотекстовом", openaiAPIKeyEnv)
 			return embed.NewNoop(), nil
 		}
 		baseURL := cfg.BaseURL
@@ -290,7 +290,7 @@ func newEmbedder(ctx context.Context, cfg config.EmbedderConfig) (embed.Embedder
 		}
 		e, err := embed.NewOpenAI(ctx, baseURL, cfg.Model, key)
 		if err != nil {
-			log.Printf("memoryd: embedder.provider=openai, но сервер недоступен или ключ/модель невалидны (%v) — векторный поиск отключён, recall на полнотекстовом", err)
+			log.Printf("memo: embedder.provider=openai, но сервер недоступен или ключ/модель невалидны (%v) — векторный поиск отключён, recall на полнотекстовом", err)
 			return embed.NewNoop(), nil
 		}
 		return e, nil
@@ -310,24 +310,24 @@ func isHelpArg(arg string) bool {
 	}
 }
 
-// writeUsage печатает справку верхнего уровня memoryd: что это, три формы
+// writeUsage печатает справку верхнего уровня memo: что это, три формы
 // запуска, флаги серверного режима и подкоманды. Вынесена из main для
 // тестируемости.
 func writeUsage(w io.Writer) {
-	fmt.Fprintln(w, "memoryd — сервер долговременной памяти для ИИ-агентов (MCP поверх SQLite).")
+	fmt.Fprintln(w, "memo — сервер долговременной памяти для ИИ-агентов (MCP поверх SQLite).")
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "Использование:")
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "  memoryd [-config <path>] [-db <path>]\tзапуск MCP-сервера (режим по умолчанию, транспорт stdio)")
-	fmt.Fprintln(tw, "  memoryd init [флаги]\tустановить память в проект (генерирует MCP-конфиг и скил)")
-	fmt.Fprintln(tw, "  memoryd web [флаги]\tHTTP-морда для просмотра памяти в браузере")
-	fmt.Fprintln(tw, "  memoryd recall [флаги] \"<запрос>\"\tразовый поиск по памяти (Markdown-бриф в stdout)")
-	fmt.Fprintln(tw, "  memoryd save [флаги]\tразовое сохранение факта в память")
-	fmt.Fprintln(tw, "  memoryd hook -event <name> [флаги]\tхук Claude Code (session-start|prompt-submit), JSON события на stdin")
-	fmt.Fprintln(tw, "  memoryd doctor [флаги]\tread-only диагностика: в каком режиме реально работает память")
-	fmt.Fprintln(tw, "  memoryd export [флаги]\tэкспорт памяти в переносимый JSONL-бэкап (без векторов)")
-	fmt.Fprintln(tw, "  memoryd import [флаги] file.jsonl\tимпорт JSONL-бэкапа с сохранением id и таймстампов")
+	fmt.Fprintln(tw, "  memo [-config <path>] [-db <path>]\tзапуск MCP-сервера (режим по умолчанию, транспорт stdio)")
+	fmt.Fprintln(tw, "  memo init [флаги]\tустановить память в проект (генерирует MCP-конфиг и скил)")
+	fmt.Fprintln(tw, "  memo web [флаги]\tHTTP-морда для просмотра памяти в браузере")
+	fmt.Fprintln(tw, "  memo recall [флаги] \"<запрос>\"\tразовый поиск по памяти (Markdown-бриф в stdout)")
+	fmt.Fprintln(tw, "  memo save [флаги]\tразовое сохранение факта в память")
+	fmt.Fprintln(tw, "  memo hook -event <name> [флаги]\tхук Claude Code (session-start|prompt-submit), JSON события на stdin")
+	fmt.Fprintln(tw, "  memo doctor [флаги]\tread-only диагностика: в каком режиме реально работает память")
+	fmt.Fprintln(tw, "  memo export [флаги]\tэкспорт памяти в переносимый JSONL-бэкап (без векторов)")
+	fmt.Fprintln(tw, "  memo import [флаги] file.jsonl\tимпорт JSONL-бэкапа с сохранением id и таймстампов")
 	tw.Flush()
 	fmt.Fprintln(w)
 
@@ -347,10 +347,10 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  web\tHTTP-морда для просмотра и поиска памяти")
 	fmt.Fprintln(tw, "  recall\tодноразовый recall из shell/скрипта/хука агента (флаг -quiet — для хуков)")
 	fmt.Fprintln(tw, "  save\tодноразовый save из shell/скрипта; -content - читает факт из stdin")
-	fmt.Fprintln(tw, "  hook\tхук-режим для .claude/settings.json (см. `memoryd init`): любая ошибка → пустой stdout, exit 0")
+	fmt.Fprintln(tw, "  hook\tхук-режим для .claude/settings.json (см. `memo init`): любая ошибка → пустой stdout, exit 0")
 	fmt.Fprintln(tw, "  doctor\tдиагностика: конфиг/БД/записи/вектор/embedder/reasoner одной командой, ничего не пишет")
 	fmt.Fprintln(tw, "  export\tбэкап/перенос памяти: вся БД или -scopes в переносимый JSONL (векторы не экспортируются)")
 	fmt.Fprintln(tw, "  import\tвосстановление из JSONL: сохраняет id/таймстампы; -dry-run/-overwrite/-rescope")
 	tw.Flush()
-	fmt.Fprintln(w, "  memoryd init -h, memoryd web -h, memoryd recall -h, memoryd save -h, memoryd hook -h, memoryd doctor -h, memoryd export -h, memoryd import -h — подробности по флагам каждой.")
+	fmt.Fprintln(w, "  memo init -h, memo web -h, memo recall -h, memo save -h, memo hook -h, memo doctor -h, memo export -h, memo import -h — подробности по флагам каждой.")
 }

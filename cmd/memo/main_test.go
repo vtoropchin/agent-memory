@@ -20,8 +20,8 @@ func TestWriteUsage(t *testing.T) {
 	out := buf.String()
 
 	wantSubstrings := []string{
-		"memoryd init",
-		"memoryd web",
+		"memo init",
+		"memo web",
 		"-config",
 		"-db",
 		"DEEPSEEK_API_KEY",

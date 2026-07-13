@@ -1,13 +1,13 @@
-# Задача MCP-INSTRUCTIONS — Серверные MCP `instructions` в memoryd
+# Задача MCP-INSTRUCTIONS — Серверные MCP `instructions` в memo
 
 **Статус:** ✅ выполнена (2026-07-11). Добавлены `internal/mcp/instructions.go`
 (`buildInstructions`), правка `internal/mcp/mcp.go` (второй аргумент `NewServer` теперь
 `&sdkmcp.ServerOptions{Instructions: buildInstructions(scope)}`), тесты
 `internal/mcp/instructions_test.go`, абзац в `DESIGN.md §12`. `CGO_ENABLED=1 go build/vet/test
--tags sqlite_fts5 -count=1 ./...` — зелёное. E2e проверено живым бинарём `cmd/memoryd` по MCP
+-tags sqlite_fts5 -count=1 ./...` — зелёное. E2e проверено живым бинарём `cmd/memo` по MCP
 stdio: ответ `initialize` содержит непустое `instructions` с `project:agentmemory`.
 **Область:** `internal/mcp` (+ `DESIGN.md §12` синхронизация). `internal/*` логику
-(`write`/`recall`/`store`/`maint`/`config`) и `cmd/memoryd` **не трогать**.
+(`write`/`recall`/`store`/`maint`/`config`) и `cmd/memo` **не трогать**.
 **Зависимости:** MP-1/MP-2 (`ScopeConfig`, `SaveScope()`/`RecallScopes()` — уже готовы;
 `NewServer` уже принимает `config.ScopeConfig`).
 
@@ -19,8 +19,8 @@ stdio: ответ `initialize` содержит непустое `instructions` 
 Из-за этого в MCP-рукопожатии клиент видит только 4 инструмента с однострочными описаниями
 и ноль протокола: когда звать recall, что такое «атомарный факт», какие дефолты scope.
 
-Протокол работы с памятью сегодня живёт **только** в Claude-специфичном скиле `/memoryd`
-(`.claude/skills/memoryd/SKILL.md`). Это нормально для Claude Code, но:
+Протокол работы с памятью сегодня живёт **только** в Claude-специфичном скиле `/memo`
+(`.claude/skills/memo/SKILL.md`). Это нормально для Claude Code, но:
 - другой MCP-клиент (opencode, codex, Cursor) скил прочитать не умеет — получит голые
   инструменты без протокола;
 - даже в Claude Code, если скил не подгружен/не сработал, протокола нет.
@@ -31,7 +31,7 @@ stdio: ответ `initialize` содержит непустое `instructions` 
 `project:<name>` инстанса в текст.
 
 **Дублирование ядра со скилом осознанное:** сервер публикует переносимый минимум, богатый
-проектный протокол остаётся в скиле `/memoryd` (его НЕ трогаем).
+проектный протокол остаётся в скиле `/memo` (его НЕ трогаем).
 
 ## Что сделать
 
@@ -76,7 +76,7 @@ stdio: ответ `initialize` содержит непустое `instructions` 
 
 - **Только** `internal/mcp/*` + абзац в `DESIGN.md §12`.
 - НЕ трогать: `internal/memory/{write,recall,store,maint,embed,reason}`, `internal/config`,
-  `cmd/memoryd`, скил `.claude/skills/memoryd/SKILL.md`.
+  `cmd/memo`, скил `.claude/skills/memo/SKILL.md`.
 - Не менять описания/схемы 4 инструментов — только добавить server-level `instructions`.
 - За рамки задачи не выходить.
 
