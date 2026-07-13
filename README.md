@@ -238,24 +238,29 @@ MVP: только SQLite+FTS5, без вектора и без LLM).
 ## Как это устроено
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Архитектура AgentMemory: агент вызывает MCP-инструменты memory_save/recall/update/forget; роутер internal/mcp направляет их в Writer (запись), Recall (поиск) и Maint (фоновые джобы); все три работают поверх Store — единого файла SQLite; Embedder (ollama) и Reasoner (DeepSeek) подключены пунктиром как опциональные слои" width="900">
+  <img src="docs/architecture.svg" alt="Архитектура AgentMemory: три поверхности доступа к одному бинарю memoryd — MCP over stdio для агентов (save/recall/update/forget), CLI и хуки харнесса для терминала (recall/save/hook/doctor/export/import) и web-морда для человека (поиск, PATCH метаданных); все три вызывают общую доменную логику internal/memory — Writer (запись), Recall (поиск) и Maint (фоновые джобы); она работает поверх Store — единого файла SQLite; Embedder (ollama или openai) и Reasoner (DeepSeek) подключены пунктиром как опциональные слои, деградирующие вместо падения" width="900">
 </p>
 
 <p align="center"><sub>Исходник для правок — <a href="docs/architecture.drawio">docs/architecture.drawio</a> (открывается в <a href="https://app.diagrams.net">draw.io</a>)</sub></p>
 
-- **Store** — единый SQLite-файл: таблица `memories`, FTS5-индекс, опциональная
-  vec-таблица (`sqlite-vec`), всё за интерфейсом `Store`.
+- **Три поверхности доступа** — один бинарь `memoryd`, одна доменная логика: MCP over
+  stdio для агентов (`memory_save`/`recall`/`update`/`forget`), CLI и ambient-хуки
+  харнесса для терминала (`recall`/`save`/`hook`/`doctor`/`export`/`import`) и web-морда
+  для человека (`memoryd web` — поиск, карточка, правка метаданных).
+- **Store** — единый SQLite-файл: таблица `memories` (+`expires_at`, TTL), FTS5-индекс
+  (со стемминг-колонкой для русской морфологии), опциональная vec-таблица (`sqlite-vec`),
+  миграции через `PRAGMA user_version`; всё за интерфейсом `Store`.
 - **Writer** (`internal/memory/write`) — приём факта: дедуп по scope, обновление или
-  пометка `superseded_by` вместо DELETE, проставление связей.
+  пометка `superseded_by` вместо DELETE, типизированные связи (`rel`), TTL.
 - **Recall** (`internal/memory/recall`) — гибридный поиск (FTS5 + вектор) → слияние через
   Reciprocal Rank Fusion → ранжирование по relevance/importance/свежести/частоте обращения
-  → сборка Markdown-брифа под токен-бюджет.
-- **Maint** (`internal/memory/maint`) — фоновые джобы: decay episodic-записей,
-  консолидация episodic→semantic через Reasoner, dedup-sweep, reindex при смене
-  Embedder-модели.
+  → сборка Markdown-брифа под токен-бюджет; фильтры по scope/kind/тегам/датам, explain-трасса.
+- **Maint** (`internal/memory/maint`) — фоновые джобы по расписанию: expire-sweep (TTL),
+  decay episodic-записей, консолидация episodic→semantic через Reasoner, dedup-sweep,
+  reindex при смене Embedder-модели.
 - **Embedder / Reasoner** — за интерфейсами, оба опциональны и деградируют вместо падения:
-  без ollama recall работает на чистом FTS5, без DeepSeek — без суммаризации и
-  консолидации.
+  Embedder (ollama или openai-совместимый) недоступен → recall работает на чистом FTS5,
+  без DeepSeek — без суммаризации и консолидации.
 
 Подробности — модель данных, интерфейсы, write/read path, roadmap — в `DESIGN.md`.
 
