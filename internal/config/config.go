@@ -4,15 +4,82 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
 	"github.com/BurntSushi/toml"
 )
 
-// StoreConfig — настройки хранилища.
+// StoreConfig — настройки хранилища. Driver выбирает бэкенд (DESIGN.md §13):
+// "" и "sqlite" (дефолт) — файл SQLite по Path; "postgres" — PostgreSQL+pgvector
+// по Host/Port/User/DBName/SSLMode. Password для postgres в TOML никогда не
+// пишется (toml:"-") — подхватывается из env MEMO_POSTGRES_PASSWORD (или .env
+// рядом с конфигом), тем же способом, что DEEPSEEK_API_KEY/OPENAI_API_KEY
+// (см. cmd/memo).
 type StoreConfig struct {
-	Path string `toml:"path"`
+	Driver   string `toml:"driver"`  // "" | "sqlite" (дефолт) | "postgres"
+	Path     string `toml:"path"`    // sqlite: путь к файлу БД (~ раскрывается)
+	Host     string `toml:"host"`    // postgres: адрес сервера
+	Port     int    `toml:"port"`    // postgres: порт, дефолт 5432
+	User     string `toml:"user"`    // postgres: роль
+	DBName   string `toml:"dbname"`  // postgres: имя базы
+	SSLMode  string `toml:"sslmode"` // postgres: режим TLS ("disable", "require", ...), дефолт "disable"
+	Password string `toml:"-"`       // НИКОГДА из TOML — только из env MEMO_POSTGRES_PASSWORD
+}
+
+// Validate проверяет StoreConfig на уровне конфигурации (не сети): Driver —
+// одно из известных значений, а для postgres — что поля, необходимые для
+// установления соединения (host/user/dbname), заданы. Password намеренно НЕ
+// проверяется здесь: пустой пароль для postgres — не ошибка конфигурации
+// (сервер может использовать trust-аутентификацию) — попытка подключения всё
+// равно делается, а неудача — дело store.Open, а не Load (деградация, а не
+// падение на этапе загрузки конфига, DESIGN.md §15).
+func (c StoreConfig) Validate() error {
+	switch c.Driver {
+	case "", "sqlite":
+		return nil
+	case "postgres":
+		if c.Host == "" || c.User == "" || c.DBName == "" {
+			return fmt.Errorf("store.driver=postgres требует непустых store.host, store.user и store.dbname")
+		}
+		return nil
+	default:
+		return fmt.Errorf("store.driver %q неизвестен (допустимо: \"sqlite\", \"postgres\")", c.Driver)
+	}
+}
+
+// DSN собирает connection string PostgreSQL в формате, который понимают
+// pgx/lib-pq: postgres://user:pass@host:port/dbname?sslmode=... Пользователь и
+// пароль URL-экранируются (net/url.Userinfo) — спецсимволы в пароле (@, :, /,
+// пробелы и т.п.) не ломают разбор DSN драйвером. Пустой Password даёт DSN без
+// пароля (userinfo без ":"), а не "user:" — это то, чего ожидают драйверы при
+// trust-аутентификации. Имеет смысл только при Driver == "postgres".
+func (c StoreConfig) DSN() string {
+	userinfo := url.User(c.User)
+	if c.Password != "" {
+		userinfo = url.UserPassword(c.User, c.Password)
+	}
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     userinfo,
+		Host:     fmt.Sprintf("%s:%d", c.Host, c.Port),
+		Path:     "/" + c.DBName,
+		RawQuery: url.Values{"sslmode": {c.SSLMode}}.Encode(),
+	}
+	return u.String()
+}
+
+// Target возвращает короткое человекочитаемое описание хранилища для
+// логов/сообщений об ошибках (без пароля): путь к файлу для sqlite,
+// host:port/dbname для postgres.
+func (c StoreConfig) Target() string {
+	switch c.Driver {
+	case "postgres":
+		return fmt.Sprintf("postgres://%s:%d/%s", c.Host, c.Port, c.DBName)
+	default: // "", "sqlite"
+		return c.Path
+	}
 }
 
 // EmbedderConfig — настройки Embedder. provider="noop" отключает векторный слой (Этап 1).
@@ -115,7 +182,10 @@ type Config struct {
 func Default() Config {
 	return Config{
 		Store: StoreConfig{
-			Path: "~/.agentmemory/memory.db",
+			Driver:  "sqlite",
+			Path:    "~/.agentmemory/memory.db",
+			Port:    5432,      // дефолт postgres-порта; неприменим при driver=sqlite
+			SSLMode: "disable", // дефолт postgres-sslmode; неприменим при driver=sqlite
 		},
 		Embedder: EmbedderConfig{
 			Provider: "noop", // Этап 1: без эмбеддингов
@@ -164,6 +234,10 @@ func Load(path string) (Config, error) {
 	}
 
 	if _, _, err := cfg.Maint.Durations(); err != nil {
+		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
+	}
+
+	if err := cfg.Store.Validate(); err != nil {
 		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
 	}
 

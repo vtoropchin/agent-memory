@@ -251,7 +251,7 @@ func TestMigrateExpiresAtPreservesExistingData(t *testing.T) {
 	}
 
 	// Open — тот же путь реального кода: baseSchema (idempotent) -> migrate (1->2) -> ftsTriggers.
-	s, err := Open(path)
+	s, err := OpenSQLite(path)
 	if err != nil {
 		t.Fatalf("Open (миграция 1->2): %v", err)
 	}

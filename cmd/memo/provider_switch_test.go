@@ -66,7 +66,7 @@ func TestProviderSwitchOllamaToOpenAITriggersReindex(t *testing.T) {
 	}))
 	defer openaiSrv.Close()
 
-	s, err := store.Open(filepath.Join(t.TempDir(), "memory.db"))
+	s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

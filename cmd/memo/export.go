@@ -22,7 +22,6 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
-	"agentmemory/internal/memory/store"
 )
 
 // exportFormat/exportVersion — идентификатор и текущая версия формата экспорта
@@ -41,6 +40,23 @@ type exportHeader struct {
 	Version    int    `json:"version"`
 	ExportedAt int64  `json:"exported_at"`
 	DB         string `json:"db"`
+}
+
+// exportHeaderFor строит заголовок экспорта для хранилища cfg. DB — короткое
+// человекочитаемое описание хранилища через cfg.Target() (путь к файлу для
+// sqlite, host:port/dbname для postgres, без пароля) — не cfg.Path напрямую:
+// Path заполняется только для sqlite, а при driver=postgres пуст, и поле "db"
+// в заголовке JSONL-бэкапа молча становилось бы пустой строкой (та же
+// абстракция уже применяется по всему cmd/memo — web.go, migrate.go).
+// Вынесена из runExport отдельной функцией, чтобы её можно было проверить
+// юнит-тестом без сетевого открытия postgres-хранилища.
+func exportHeaderFor(cfg config.StoreConfig) exportHeader {
+	return exportHeader{
+		Format:     exportFormat,
+		Version:    exportVersion,
+		ExportedAt: time.Now().Unix(),
+		DB:         cfg.Target(),
+	}
 }
 
 // exportLink — сериализуемая форма memory.Link.
@@ -134,9 +150,9 @@ func runExport(args []string, out io.Writer) error {
 		cfg.Store.Path = *dbPath
 	}
 
-	s, err := store.Open(cfg.Store.Path)
+	s, err := openStore(cfg.Store)
 	if err != nil {
-		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Target(), err)
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
@@ -166,12 +182,7 @@ func runExport(args []string, out io.Writer) error {
 	enc := json.NewEncoder(dest)
 	enc.SetEscapeHTML(false)
 
-	header := exportHeader{
-		Format:     exportFormat,
-		Version:    exportVersion,
-		ExportedAt: time.Now().Unix(),
-		DB:         cfg.Store.Path,
-	}
+	header := exportHeaderFor(cfg.Store)
 	if err := enc.Encode(header); err != nil {
 		return fmt.Errorf("export: запись заголовка: %w", err)
 	}

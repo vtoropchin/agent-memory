@@ -11,6 +11,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
 	"agentmemory/internal/memory/store"
 )
@@ -21,7 +22,7 @@ import (
 func newExportTestStore(t *testing.T) (path string, st store.Store) {
 	t.Helper()
 	path = filepath.Join(t.TempDir(), "memory.db")
-	s, err := store.Open(path)
+	s, err := store.OpenSQLite(path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -174,6 +175,34 @@ func TestRunExport_ScopesFilter(t *testing.T) {
 	}
 	if rec.Id != idAlpha {
 		t.Errorf("экспортированная запись id=%s, want %s (beta не должен попасть)", rec.Id, idAlpha)
+	}
+}
+
+// TestExportHeaderFor_PostgresUsesTarget проверяет регресс код-ревью:
+// заголовок экспорта для driver=postgres берёт "db" из cfg.Target()
+// (host:port/dbname), а не из cfg.Path — Path для postgres всегда пуст, и до
+// этой правки поле "db" в заголовке JSONL-бэкапа молча становилось пустой
+// строкой.
+func TestExportHeaderFor_PostgresUsesTarget(t *testing.T) {
+	cfg := config.StoreConfig{Driver: "postgres", Host: "postgres.lan", Port: 5432, DBName: "memo", SSLMode: "disable"}
+	header := exportHeaderFor(cfg)
+	want := "postgres://postgres.lan:5432/memo"
+	if header.DB != want {
+		t.Errorf("header.DB = %q, want %q", header.DB, want)
+	}
+	if header.Format != exportFormat || header.Version != exportVersion {
+		t.Errorf("header = %+v, want format=%q version=%d", header, exportFormat, exportVersion)
+	}
+}
+
+// TestExportHeaderFor_SQLiteUsesPath проверяет, что для sqlite (driver="" —
+// дефолт) "db" остаётся путём к файлу, как и раньше (cfg.Target() для sqlite
+// возвращает cfg.Path — см. config.StoreConfig.Target).
+func TestExportHeaderFor_SQLiteUsesPath(t *testing.T) {
+	cfg := config.StoreConfig{Path: "/tmp/memory.db"}
+	header := exportHeaderFor(cfg)
+	if header.DB != "/tmp/memory.db" {
+		t.Errorf("header.DB = %q, want %q", header.DB, "/tmp/memory.db")
 	}
 }
 

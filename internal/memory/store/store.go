@@ -1,6 +1,9 @@
-// Package store определяет интерфейс Store (DESIGN.md §6) и его реализацию поверх
-// SQLite: метаданные + FTS5 (лексический индекс). Векторный индекс (sqlite-vec)
-// подключается на Этапе 3 — до тех пор SearchVector/PutVector остаются заглушками.
+// Package store определяет интерфейс Store (DESIGN.md §6) и его реализации:
+// SQLite (метаданные + FTS5 лексический индекс + sqlite-vec векторный индекс,
+// sqlite.go) и PostgreSQL+pgvector (postgres.go, DESIGN.md §13). Open — фабрика,
+// выбирающая реализацию по config.StoreConfig.Driver (factory.go); для прямого
+// открытия SQLite в обход конфига (напр. memimport, работающий с произвольным
+// файлом) есть OpenSQLite.
 package store
 
 import (
@@ -51,6 +54,9 @@ type HealthInfo struct {
 // Store — единая точка доступа к хранилищу памяти: метаданные, лексический и
 // (в будущем) векторный индексы, граф связей.
 type Store interface {
+	// Close закрывает соединение с хранилищем. Вызывающая сторона (server-режим,
+	// CLI-подкоманды, doctor) держит Store под defer Close() на весь свой прогон.
+	Close() error
 	Put(ctx context.Context, m memory.Memory) error
 	Get(ctx context.Context, id string) (memory.Memory, error)
 	SearchLexical(ctx context.Context, q memory.Query) ([]memory.Candidate, error)

@@ -11,7 +11,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -76,7 +75,7 @@ func parseExportFile(r io.Reader) (exportHeader, []lineRecord, error) {
 // recordToMemory переводит разобранную строку экспорта в доменную Memory
 // (обратное к memoryToExportRecord). Links сюда сознательно не попадают —
 // importRecords заполняет их отдельным вторым проходом: FK на links.dst
-// (DESIGN.md §4, `_foreign_keys=on` в DSN store.Open) требует, чтобы запись-
+// (DESIGN.md §4, `_foreign_keys=on` в DSN store.OpenSQLite) требует, чтобы запись-
 // цель уже существовала в memories, а при прямом (форвардном) порядке ссылок
 // в файле цель может идти позже источника.
 func recordToMemory(rec exportRecord) memory.Memory {
@@ -116,64 +115,39 @@ type importSummary struct {
 // пересчитывает created_at/updated_at/accessed_at/access_count — см. отчёт
 // задачи 9.2) — восстановление бэкапа получается точным.
 //
-// Links проставляются вторым проходом и только для записей, реально
-// записанных в этом прогоне (imported или overwritten, не skipped): у
-// пропущенной записи уже есть собственное состояние в хранилище, трогать его
-// не нужно. dst, отсутствующий в хранилище (ни в этом файле, ни ранее в БД) —
-// предупреждение и пропуск ребра (DESIGN.md §15 — деградация, а не падение).
+// Двухпроходная запись (Links вторым проходом, только для реально записанных
+// строк) вынесена в общий с `memo migrate` хелпер fkSafeWrite (fkwrite.go, см.
+// его комментарий про FK на links.dst) — здесь остаётся только конвертация
+// lineRecord -> memory.Memory (recordToMemory сознательно не заполняет Links —
+// их достраиваем явно ниже, тем же приёмом, что mustPut в import_test.go) и
+// line-специфичный текст предупреждения о повисшей ссылке (нумерация строк
+// файла есть только у import, поэтому не часть общей механики).
 func importRecords(ctx context.Context, s store.Store, records []lineRecord, overwrite bool) (importSummary, error) {
-	var sum importSummary
-	written := make([]lineRecord, 0, len(records))
-
-	for _, lr := range records {
+	mems := make([]memory.Memory, len(records))
+	lineOf := make(map[string]int, len(records))
+	for i, lr := range records {
 		m := recordToMemory(lr.rec)
-
-		_, err := s.Get(ctx, m.Id)
-		exists := err == nil
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return sum, fmt.Errorf("строка %d: проверка id %q: %w", lr.line, m.Id, err)
-		}
-
-		if exists && !overwrite {
-			sum.Skipped++
-			continue
-		}
-
-		if err := s.Put(ctx, m); err != nil {
-			return sum, fmt.Errorf("строка %d: запись %q: %w", lr.line, m.Id, err)
-		}
-		sum.Imported++
-		written = append(written, lr)
-	}
-
-	for _, lr := range written {
-		if len(lr.rec.Links) == 0 {
-			continue
-		}
-		var resolved []memory.Link
 		for _, l := range lr.rec.Links {
-			if _, err := s.Get(ctx, l.Dst); err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					sum.Warnings = append(sum.Warnings, fmt.Sprintf("строка %d: %s: ссылка на отсутствующий id %s пропущена", lr.line, lr.rec.Id, l.Dst))
-					sum.LinksDropped++
-					continue
-				}
-				return sum, fmt.Errorf("строка %d: проверка ссылки %s -> %s: %w", lr.line, lr.rec.Id, l.Dst, err)
-			}
-			resolved = append(resolved, memory.Link{Dst: l.Dst, Rel: l.Rel})
+			m.Links = append(m.Links, memory.Link{Dst: l.Dst, Rel: l.Rel})
 		}
-		if len(resolved) == 0 {
-			continue
-		}
-		m := recordToMemory(lr.rec)
-		m.Links = resolved
-		if err := s.Put(ctx, m); err != nil {
-			return sum, fmt.Errorf("строка %d: запись ссылок %q: %w", lr.line, m.Id, err)
-		}
-		sum.LinksOK += len(resolved)
+		mems[i] = m
+		lineOf[lr.rec.Id] = lr.line
 	}
 
-	return sum, nil
+	res, err := fkSafeWrite(ctx, s, mems, overwrite, func(srcID, missingDst string) string {
+		return fmt.Sprintf("строка %d: %s: ссылка на отсутствующий id %s пропущена", lineOf[srcID], srcID, missingDst)
+	}, nil)
+	if err != nil {
+		return importSummary{}, err
+	}
+
+	return importSummary{
+		Imported:     res.Written,
+		Skipped:      res.Skipped,
+		LinksOK:      res.LinksOK,
+		LinksDropped: res.LinksDropped,
+		Warnings:     res.Warnings,
+	}, nil
 }
 
 // dryRunSummary считает ту же сводку, что importRecords, но БЕЗ обращения к
@@ -299,9 +273,9 @@ func runImport(args []string, out io.Writer) error {
 		cfg.Store.Path = *dbPath
 	}
 
-	s, err := store.Open(cfg.Store.Path)
+	s, err := openStore(cfg.Store)
 	if err != nil {
-		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Target(), err)
 	}
 	defer func() {
 		if err := s.Close(); err != nil {

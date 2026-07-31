@@ -43,7 +43,7 @@ func newTestServerWithScope(t *testing.T, scope config.ScopeConfig) *Server {
 // несколько инстансов над одним файлом (проверка изоляции проектов, DESIGN.md §2.1).
 func newServerOnDB(t *testing.T, dbPath string, scope config.ScopeConfig) *Server {
 	t.Helper()
-	s, err := store.Open(dbPath)
+	s, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

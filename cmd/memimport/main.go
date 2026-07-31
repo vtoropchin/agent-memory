@@ -59,7 +59,7 @@ func run(args []string, out io.Writer) error {
 		dbPath = cfg.Store.Path
 	}
 
-	s, err := store.Open(dbPath)
+	s, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		return fmt.Errorf("открытие хранилища %q: %w", dbPath, err)
 	}

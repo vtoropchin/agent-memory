@@ -20,7 +20,6 @@ import (
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
 	"agentmemory/internal/memory/recall"
-	"agentmemory/internal/memory/store"
 	"agentmemory/internal/memory/write"
 )
 
@@ -111,9 +110,9 @@ func runRecall(args []string, out io.Writer) error {
 // Query.Scopes (recall — флаг -scopes, hook — дефолт инстанса напрямую).
 // maint-планировщик здесь не запускается — это не демон.
 func doRecall(ctx context.Context, cfg config.Config, logPrefix string, q memory.Query) (memory.Brief, error) {
-	s, err := store.Open(cfg.Store.Path)
+	s, err := openStore(cfg.Store)
 	if err != nil {
-		return memory.Brief{}, fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+		return memory.Brief{}, fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Target(), err)
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
@@ -180,9 +179,9 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 	}
 	loadDotEnvForConfig(*configPath, "memo save")
 
-	s, err := store.Open(cfg.Store.Path)
+	s, err := openStore(cfg.Store)
 	if err != nil {
-		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Target(), err)
 	}
 	defer func() {
 		if err := s.Close(); err != nil {

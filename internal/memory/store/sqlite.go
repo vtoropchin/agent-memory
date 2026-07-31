@@ -384,10 +384,13 @@ func defaultNow() int64 {
 	return time.Now().Unix()
 }
 
-// Open открывает (или создаёт) файл SQLite по указанному пути, применяет схему и
-// возвращает готовый Store. Путь может начинаться с `~` — раскрывается в домашний
-// каталог пользователя. Родительские директории создаются при необходимости.
-func Open(path string) (*sqliteStore, error) {
+// OpenSQLite открывает (или создаёт) файл SQLite по указанному пути, применяет
+// схему и возвращает готовый Store. Путь может начинаться с `~` — раскрывается в
+// домашний каталог пользователя. Родительские директории создаются при
+// необходимости. Для выбора бэкенда по конфигу (sqlite/postgres) используйте
+// фабрику Open(config.StoreConfig) в factory.go — она вызывает OpenSQLite для
+// driver="sqlite"/"".
+func OpenSQLite(path string) (*sqliteStore, error) {
 	expanded, err := expandHome(path)
 	if err != nil {
 		return nil, fmt.Errorf("раскрытие пути %q: %w", path, err)
@@ -1211,52 +1214,11 @@ func (s *sqliteStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory
 
 // Stats возвращает сводные счётчики памяти (DESIGN.md §12): всего живых и архивных
 // записей, разбивки живых записей по scope и kind. Пустые карты инициализируются, а
-// не остаются nil — потребителю (морде) не нужно проверять nil перед обходом.
+// не остаются nil — потребителю (морде) не нужно проверять nil перед обходом. Сам
+// запрос — statsFromDB (common.go): текст SQL здесь не содержит ни одного диалектного
+// плейсхолдера и побайтово совпадает с pgStore.Stats.
 func (s *sqliteStore) Stats(ctx context.Context) (Stats, error) {
-	stats := Stats{ByScope: map[string]int{}, ByKind: map[string]int{}}
-
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL`).Scan(&stats.Total); err != nil {
-		return Stats{}, fmt.Errorf("подсчёт живых записей: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE superseded_by IS NOT NULL`).Scan(&stats.Superseded); err != nil {
-		return Stats{}, fmt.Errorf("подсчёт архивных записей: %w", err)
-	}
-
-	scopeRows, err := s.db.QueryContext(ctx, `SELECT scope, COUNT(*) FROM memories WHERE superseded_by IS NULL GROUP BY scope`)
-	if err != nil {
-		return Stats{}, fmt.Errorf("разбивка по scope: %w", err)
-	}
-	defer scopeRows.Close()
-	for scopeRows.Next() {
-		var scope string
-		var n int
-		if err := scopeRows.Scan(&scope, &n); err != nil {
-			return Stats{}, fmt.Errorf("сканирование разбивки по scope: %w", err)
-		}
-		stats.ByScope[scope] = n
-	}
-	if err := scopeRows.Err(); err != nil {
-		return Stats{}, fmt.Errorf("чтение разбивки по scope: %w", err)
-	}
-
-	kindRows, err := s.db.QueryContext(ctx, `SELECT kind, COUNT(*) FROM memories WHERE superseded_by IS NULL GROUP BY kind`)
-	if err != nil {
-		return Stats{}, fmt.Errorf("разбивка по kind: %w", err)
-	}
-	defer kindRows.Close()
-	for kindRows.Next() {
-		var kind string
-		var n int
-		if err := kindRows.Scan(&kind, &n); err != nil {
-			return Stats{}, fmt.Errorf("сканирование разбивки по kind: %w", err)
-		}
-		stats.ByKind[kind] = n
-	}
-	if err := kindRows.Err(); err != nil {
-		return Stats{}, fmt.Errorf("чтение разбивки по kind: %w", err)
-	}
-
-	return stats, nil
+	return statsFromDB(ctx, s.db)
 }
 
 // Health возвращает быстрый read-only снимок целостности БД (DESIGN.md §15,
@@ -1279,18 +1241,10 @@ func (s *sqliteStore) Health(ctx context.Context) (HealthInfo, error) {
 }
 
 // EmbedMeta возвращает модель и размерность вектора, зафиксированные последним
-// reindex. Если reindex ещё не запускался, возвращает ("", 0, nil).
+// reindex. Если reindex ещё не запускался, возвращает ("", 0, nil). Сам запрос —
+// embedMetaFromDB (common.go): побайтово совпадает с pgStore.EmbedMeta.
 func (s *sqliteStore) EmbedMeta(ctx context.Context) (string, int, error) {
-	var model string
-	var dim int
-	err := s.db.QueryRowContext(ctx, `SELECT model, dim FROM embed_meta WHERE id = 1`).Scan(&model, &dim)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", 0, nil
-	}
-	if err != nil {
-		return "", 0, fmt.Errorf("чтение embed_meta: %w", err)
-	}
-	return model, dim, nil
+	return embedMetaFromDB(ctx, s.db)
 }
 
 // VectorStatus возвращает состояние вектора записи id (DESIGN.md §12, задача 6.4).
@@ -1404,32 +1358,24 @@ func (s *sqliteStore) AllForExport(ctx context.Context, scopes []string) ([]memo
 // AllForReindex возвращает все не устаревшие (superseded_by IS NULL) записи вместе с
 // tags/links — источник для фонового reindex-джоба при смене модели Embedder
 // (DESIGN.md §9). Устаревшие записи не нужны новому вектору: они уже вне recall.
+// Базовый SELECT (без Tags/Links) — liveMemoriesFromDB (common.go), побайтово
+// совпадает с pgStore.AllForReindex; Tags/Links здесь по-прежнему грузятся построчно
+// (дёшево для локального файла — в отличие от postgres, где то же самое стало бы
+// N+1 сетевых round-trip'ов, см. postgres_crud.go).
 func (s *sqliteStore) AllForReindex(ctx context.Context) ([]memory.Memory, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at
-		FROM memories
-		WHERE superseded_by IS NULL
-	`)
+	all, err := liveMemoriesFromDB(ctx, s.db)
 	if err != nil {
-		return nil, fmt.Errorf("чтение записей для reindex: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-
-	var all []memory.Memory
-	for rows.Next() {
-		m, err := scanMemory(rows)
-		if err != nil {
-			return nil, fmt.Errorf("сканирование записи для reindex: %w", err)
-		}
-		if m.Tags, err = s.loadTags(ctx, m.Id); err != nil {
+	for i := range all {
+		if all[i].Tags, err = s.loadTags(ctx, all[i].Id); err != nil {
 			return nil, err
 		}
-		if m.Links, err = s.loadLinks(ctx, m.Id); err != nil {
+		if all[i].Links, err = s.loadLinks(ctx, all[i].Id); err != nil {
 			return nil, err
 		}
-		all = append(all, m)
 	}
-	return all, rows.Err()
+	return all, nil
 }
 
 // PutVector сохраняет (или заменяет) вектор записи id в memories_vec. Требует, чтобы

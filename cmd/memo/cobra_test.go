@@ -48,7 +48,7 @@ func TestRootCmd_SubcommandsRouteByName(t *testing.T) {
 	exitCode := 0
 	root := newRootCmd(strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, &exitCode)
 
-	for _, name := range []string{"init", "web", "recall", "save", "hook", "doctor", "export", "import"} {
+	for _, name := range []string{"init", "web", "recall", "save", "hook", "doctor", "export", "import", "migrate"} {
 		cmd, _, err := root.Find([]string{name, "-config", "x"})
 		if err != nil {
 			t.Fatalf("root.Find([%s ...]): %v", name, err)

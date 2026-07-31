@@ -37,6 +37,11 @@ const deepseekAPIKeyEnv = "DEEPSEEK_API_KEY"
 // читается из конфиг-файла и не логируется.
 const openaiAPIKeyEnv = "OPENAI_API_KEY"
 
+// memoPostgresPasswordEnv — переменная окружения с паролем PostgreSQL-хранилища
+// (DESIGN.md §13, то же правило, что для DEEPSEEK_API_KEY/OPENAI_API_KEY). Пароль
+// никогда не читается из конфиг-файла и не логируется.
+const memoPostgresPasswordEnv = "MEMO_POSTGRES_PASSWORD"
+
 // Дефолтные base URL эмбеддера (defaultOllamaBaseURL/defaultOpenAIBaseURL) —
 // единый источник истины в init.go: там же, где их пишет `memo init`, чтобы
 // init-дефолт и рантайм-дефолт newEmbedder не разъехались.
@@ -163,9 +168,9 @@ func run(args []string) error {
 		cfg.Store.Path = *dbPath
 	}
 
-	s, err := store.Open(cfg.Store.Path)
+	s, err := openStore(cfg.Store)
 	if err != nil {
-		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Target(), err)
 	}
 	defer func() {
 		if err := s.Close(); err != nil {
@@ -211,11 +216,41 @@ func run(args []string) error {
 	)
 	go scheduler.Run(ctx)
 
-	log.Printf("memo: запуск MCP-сервера (stdio), store=%s", cfg.Store.Path)
+	log.Printf("memo: запуск MCP-сервера (stdio), store=%s", cfg.Store.Target())
 	if err := srv.Run(ctx); err != nil {
 		return fmt.Errorf("работа сервера: %w", err)
 	}
 	return nil
+}
+
+// resolvePostgresPassword заполняет cfg.Password из env MEMO_POSTGRES_PASSWORD, если
+// store.driver=postgres и пароль ещё не задан явно. Пустой пароль для postgres — НЕ
+// фатальная ошибка на этом этапе: сервер может использовать trust-аутентификацию
+// (DESIGN.md §15, деградация вместо падения) — только предупреждение в stderr,
+// попытка подключения делается всё равно; если пароль всё же был нужен, дальнейшее
+// открытие (store.Open или store.OpenPostgresReadOnly) вернёт содержательную ошибку
+// аутентификации. Вынесена из openStore в отдельную функцию, чтобы этим же путём мог
+// воспользоваться read-only путь диагностики (doctor.go postgresDatabaseSection),
+// который открывает Store не через общую фабрику store.Open, а напрямую через
+// store.OpenPostgresReadOnly (см. её комментарий, зачем).
+func resolvePostgresPassword(cfg config.StoreConfig) config.StoreConfig {
+	if cfg.Driver == "postgres" && cfg.Password == "" {
+		if pw := os.Getenv(memoPostgresPasswordEnv); pw != "" {
+			cfg.Password = pw
+		} else {
+			log.Printf("memo: store.driver=postgres, но %s пуст (env/.env) — подключение будет попытано без пароля", memoPostgresPasswordEnv)
+		}
+	}
+	return cfg
+}
+
+// openStore — общая точка входа для всех мест cmd/memo, открывающих Store через
+// схему приложения целиком (server-режим, recall/save/web/export/import) —
+// симметрично newReasoner/newEmbedder. НЕ используется doctor'ом для postgres
+// (см. store.OpenPostgresReadOnly и её вызов в doctor.go): store.Open накатывает
+// схему как часть открытия, что для read-only диагностики недопустимо.
+func openStore(cfg config.StoreConfig) (store.Store, error) {
+	return store.Open(resolvePostgresPassword(cfg))
 }
 
 // newReasoner создаёт Reasoner по конфигу. "" и "noop" отключают LLM-слой.
@@ -311,7 +346,7 @@ func isHelpArg(arg string) bool {
 // запуска, флаги серверного режима и подкоманды. Вынесена из main для
 // тестируемости.
 func writeUsage(w io.Writer) {
-	fmt.Fprintln(w, "memo — сервер долговременной памяти для ИИ-агентов (MCP поверх SQLite).")
+	fmt.Fprintln(w, "memo — сервер долговременной памяти для ИИ-агентов (MCP поверх SQLite или PostgreSQL).")
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "Использование:")
@@ -325,6 +360,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  memo doctor [флаги]\tread-only диагностика: в каком режиме реально работает память")
 	fmt.Fprintln(tw, "  memo export [флаги]\tэкспорт памяти в переносимый JSONL-бэкап (без векторов)")
 	fmt.Fprintln(tw, "  memo import [флаги] file.jsonl\tимпорт JSONL-бэкапа с сохранением id и таймстампов")
+	fmt.Fprintln(tw, "  memo migrate [флаги] <источник> <приёмник>\tперенос памяти между бэкендами (sqlite <-> postgres)")
 	tw.Flush()
 	fmt.Fprintln(w)
 
@@ -348,6 +384,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  doctor\tдиагностика: конфиг/БД/записи/вектор/embedder/reasoner одной командой, ничего не пишет")
 	fmt.Fprintln(tw, "  export\tбэкап/перенос памяти: вся БД или -scopes в переносимый JSONL (векторы не экспортируются)")
 	fmt.Fprintln(tw, "  import\tвосстановление из JSONL: сохраняет id/таймстампы; -dry-run/-overwrite/-rescope")
+	fmt.Fprintln(tw, "  migrate\tперенос между бэкендами: sqlite:<путь> <-> postgres://user@host:port/dbname; -dry-run/-overwrite/-scopes")
 	tw.Flush()
-	fmt.Fprintln(w, "  memo init -h, memo web -h, memo recall -h, memo save -h, memo hook -h, memo doctor -h, memo export -h, memo import -h — подробности по флагам каждой.")
+	fmt.Fprintln(w, "  memo init -h, memo web -h, memo recall -h, memo save -h, memo hook -h, memo doctor -h, memo export -h, memo import -h, memo migrate -h — подробности по флагам каждой.")
 }

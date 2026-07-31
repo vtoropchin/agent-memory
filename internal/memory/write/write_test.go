@@ -53,7 +53,7 @@ func newTestWriter(t *testing.T) (*Writer, store.Store) {
 
 func newTestWriterWithEmbedder(t *testing.T, e embed.Embedder) (*Writer, store.Store) {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "memory.db"))
+	s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

@@ -195,7 +195,7 @@ func TestMigrateStemmedFTSPreservesExistingData(t *testing.T) {
 	}
 
 	// Open — тот же путь реального кода: baseSchema (idempotent) -> migrate -> ftsTriggers.
-	s, err := Open(path)
+	s, err := OpenSQLite(path)
 	if err != nil {
 		t.Fatalf("Open (миграция): %v", err)
 	}

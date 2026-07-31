@@ -87,7 +87,7 @@ func TestRunImport_ConflictSkipByDefault(t *testing.T) {
 		t.Errorf("второй import вывод = %q, want imported 0, skipped 1 (конфликт id)", out2.String())
 	}
 
-	s, err := store.Open(dbPath)
+	s, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestRunImport_Overwrite(t *testing.T) {
 		t.Errorf("import -overwrite вывод = %q, want imported 1, skipped 0", out2.String())
 	}
 
-	s, err := store.Open(dbPath)
+	s, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestRunImport_Rescope(t *testing.T) {
 		t.Fatalf("import -rescope: %v", err)
 	}
 
-	s, err := store.Open(dbPath)
+	s, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestRunImport_DanglingLinkWarning(t *testing.T) {
 		t.Errorf("вывод не содержит предупреждение про отсутствующий id %s:\n%s", missingID, out.String())
 	}
 
-	s, err := store.Open(dbPath)
+	s, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/oklog/ulid/v2"
@@ -24,7 +26,7 @@ import (
 func newDoctorTestStore(t *testing.T) (path string, st store.Store) {
 	t.Helper()
 	path = filepath.Join(t.TempDir(), "memory.db")
-	s, err := store.Open(path)
+	s, err := store.OpenSQLite(path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -288,7 +290,7 @@ func TestDoctorReadOnly_DBUnchanged(t *testing.T) {
 	// Прогрев: гоняем WAL до устоявшегося (прочекпоинченного) состояния перед
 	// снятием копий, чтобы обе копии ниже стартовали с идентичного, чистого
 	// baseline (без хвоста WAL-фреймов от Put выше).
-	primer, err := store.Open(dbPath)
+	primer, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("прогревающий store.Open: %v", err)
 	}
@@ -307,7 +309,7 @@ func TestDoctorReadOnly_DBUnchanged(t *testing.T) {
 		t.Fatalf("runDoctor: %v", err)
 	}
 
-	baselineStore, err := store.Open(baselineCopy)
+	baselineStore, err := store.OpenSQLite(baselineCopy)
 	if err != nil {
 		t.Fatalf("baseline store.Open: %v", err)
 	}
@@ -356,5 +358,78 @@ func TestHumanSize(t *testing.T) {
 		if got := humanSize(tt.bytes); got != tt.want {
 			t.Errorf("humanSize(%d) = %q, хочу %q", tt.bytes, got, tt.want)
 		}
+	}
+}
+
+// TestPostgresDoctorReadOnly_SchemaUnchanged — postgres-аналог
+// TestDoctorReadOnly_DBUnchanged: `memo doctor` против свежей, полностью пустой
+// (без единой таблицы) схемы PostgreSQL не должен эту схему инициализировать. До
+// фикса postgresDatabaseSection открывала Store через общую фабрику openStore/
+// store.Open, которая накатывает всю схему памяти как побочный эффект открытия
+// (CREATE TABLE/INDEX, триггеры search_vec) — на свежей БД doctor молча создавал бы
+// прод-схему прямо во время диагностики, вопреки собственному комментарию "ничего не
+// чинит и не пишет в БД" (см. пакетный комментарий doctor.go).
+//
+// Схема — своя, временная (см. комментарий newTestPgStoreSchema в internal/memory/
+// store/postgres_test.go про ту же изоляцию и её мотивацию: база postgres.lan/memo
+// общая на команду, TRUNCATE/DROP по public запрещены) и без единой таблицы: если бы
+// тест использовал уже проинициализированную схему, "doctor не создаёт таблицы" было
+// бы неотличимо от "таблицы уже были".
+//
+// Гейтится MEMO_TEST_POSTGRES_DSN — не задана, тест пропускается (make test без
+// живого сервера остаётся зелёным).
+func TestPostgresDoctorReadOnly_SchemaUnchanged(t *testing.T) {
+	dsn := os.Getenv("MEMO_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("MEMO_TEST_POSTGRES_DSN не задана — пропуск интеграционного теста doctor с живым PostgreSQL")
+	}
+	pgCfg, password, err := parseTestPostgresDSN(dsn)
+	if err != nil {
+		t.Fatalf("разбор MEMO_TEST_POSTGRES_DSN: %v", err)
+	}
+	pgCfg.Password = password
+
+	schema := "memo_test_doctor_" + strings.ToLower(ulid.Make().String())
+	bootstrap, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("bootstrap-соединение: %v", err)
+	}
+	// Регистрируется ДО cleanup'а с DROP SCHEMA (LIFO: последний зарегистрированный
+	// cleanup выполняется первым) — иначе bootstrap.Close() отработал бы раньше, и
+	// DROP SCHEMA/финальная проверка таблиц ниже упали бы на "database is closed".
+	t.Cleanup(func() { bootstrap.Close() })
+	if _, err := bootstrap.ExecContext(context.Background(), `CREATE SCHEMA `+schema); err != nil {
+		t.Fatalf("создание тестовой схемы %s: %v", schema, err)
+	}
+	t.Cleanup(func() {
+		if _, err := bootstrap.ExecContext(context.Background(), `DROP SCHEMA `+schema+` CASCADE`); err != nil {
+			t.Errorf("удаление тестовой схемы %s (общая база memo не должна копить мусор): %v", schema, err)
+		}
+	})
+
+	// PGOPTIONS -> "options" (runtime-параметр startup-пакета) — стандартная env-
+	// переменная libpq, которую jackc/pgx/v5/pgconn.ParseConfig подмешивает к
+	// параметрам, отсутствующим в самой строке соединения (mergeSettings(defaults,
+	// env, connString)). config.StoreConfig.DSN() понятия "схема" не имеет и не
+	// должен — это единственный способ направить doctor (который строит DSN только
+	// из неё, см. postgresDatabaseSection) в изолированную тестовую схему, не
+	// вводя search_path в production-конфиг ради теста.
+	t.Setenv("PGOPTIONS", "-c search_path="+schema)
+
+	report := buildDoctorReport(context.Background(), config.Config{Store: pgCfg}, "", false)
+
+	dbSec := sectionByName(t, report.Sections, "БД")
+	if dbSec.Status != statusOK {
+		t.Fatalf("секция БД = %s (%s), хочу ok (соединение с пустой, но существующей схемой само по себе валидно)", dbSec.Status, dbSec.Detail)
+	}
+
+	var tableCount int
+	if err := bootstrap.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1`, schema,
+	).Scan(&tableCount); err != nil {
+		t.Fatalf("проверка таблиц схемы %s: %v", schema, err)
+	}
+	if tableCount != 0 {
+		t.Errorf("после memo doctor в схеме %s появилось %d таблиц, хочу 0 (doctor не должен инициализировать схему памяти)", schema, tableCount)
 	}
 }

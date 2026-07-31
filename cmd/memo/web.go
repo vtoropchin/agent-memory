@@ -91,9 +91,9 @@ func runWeb(args []string, stdout io.Writer) error {
 		cfg.Store.Path = *dbPath
 	}
 
-	s, err := store.Open(cfg.Store.Path)
+	s, err := openStore(cfg.Store)
 	if err != nil {
-		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Path, err)
+		return fmt.Errorf("открытие хранилища %q: %w", cfg.Store.Target(), err)
 	}
 	defer func() {
 		if err := s.Close(); err != nil {

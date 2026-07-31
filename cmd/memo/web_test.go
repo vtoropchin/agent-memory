@@ -24,7 +24,7 @@ import (
 func newTestWebStore(t *testing.T) store.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "memory.db")
-	s, err := store.Open(path)
+	s, err := store.OpenSQLite(path)
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}

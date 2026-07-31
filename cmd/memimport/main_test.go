@@ -161,7 +161,7 @@ func TestListMemoryFilesSkipsReadmeAndMemoryIndex(t *testing.T) {
 
 func newTestWriter(t *testing.T) *write.Writer {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "memory.db"))
+	s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestRunSkipsSelfLink(t *testing.T) {
 	// Запись ссылается на собственный slug — ребро self->self писать не нужно.
 	writeFile(t, dir, "solo.md", "---\nname: solo\n---\n\nЗапись про саму себя ссылается на [[solo]].\n")
 
-	s, err := store.Open(filepath.Join(t.TempDir(), "memory.db"))
+	s, err := store.OpenSQLite(filepath.Join(t.TempDir(), "memory.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestCLIRealRunThenRerunDoesNotDuplicate(t *testing.T) {
 		t.Errorf("stdout (2) = %q, want imported 0, ..., skipped-as-duplicate 1 (дедуп)", out2.String())
 	}
 
-	s, err := store.Open(dbPath)
+	s, err := store.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatalf("store.Open для проверки: %v", err)
 	}

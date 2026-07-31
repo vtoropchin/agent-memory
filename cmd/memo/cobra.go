@@ -2,8 +2,8 @@
 //
 // Единственная роль cobra здесь — маршрутизация по имени подкоманды; разбор
 // ФЛАГОВ каждой подкоманды остаётся полностью на стороне уже существующих
-// runInit/runWeb/runRecall/runSave/runHook/runDoctor/runExport/runImport и
-// серверного run() (main.go) — все они и до этой задачи разбирали свои флаги
+// runInit/runWeb/runRecall/runSave/runHook/runDoctor/runExport/runImport/
+// runMigrate и серверного run() (main.go) — все они и до этой задачи разбирали свои флаги
 // собственным stdlib flag.FlagSet(name, flag.ExitOnError). Поэтому на КАЖДОЙ
 // команде здесь стоит DisableFlagParsing=true: если бы cobra/pflag сами
 // парсили флаги, поведение неминуемо разошлось бы с уже протестированным
@@ -23,7 +23,7 @@
 //
 // exitCode — единственный канал, которым RunE сообщает наружу желаемый код
 // выхода процесса: у подкоманд разные контракты (hook — всегда 0 несмотря на
-// ошибку; doctor — код из отчёта; recall/save/init/export/import/web — 0/1 по
+// ошибку; doctor — код из отчёта; recall/save/init/export/import/migrate/web — 0/1 по
 // наличию ошибки), которые нельзя выразить одним правилом cobra "ошибка ->
 // os.Exit(1)". RunE поэтому всегда возвращает nil cobra (SilenceUsage/
 // SilenceErrors подавляют её собственную печать usage/ошибки — они уже
@@ -47,7 +47,7 @@ import (
 func newRootCmd(stdin io.Reader, stdout, stderr io.Writer, exitCode *int) *cobra.Command {
 	root := &cobra.Command{
 		Use:                "memo",
-		Short:              "сервер долговременной памяти для ИИ-агентов (MCP поверх SQLite)",
+		Short:              "сервер долговременной памяти для ИИ-агентов (MCP поверх SQLite или PostgreSQL)",
 		DisableFlagParsing: true,
 		SilenceUsage:       true,
 		SilenceErrors:      true,
@@ -101,15 +101,18 @@ func newRootCmd(stdin io.Reader, stdout, stderr io.Writer, exitCode *int) *cobra
 			func(args []string) error { return runExport(args, stdout) }),
 		newForwardingCmd("import", "восстановление памяти из JSONL-бэкапа", exitCode, stderr, "memo import",
 			func(args []string) error { return runImport(args, stdout) }),
+		newForwardingCmd("migrate", "перенос памяти между бэкендами хранилища (sqlite <-> postgres)", exitCode, stderr, "memo migrate",
+			func(args []string) error { return runMigrate(args, stdout) }),
 	)
 	return root
 }
 
 // newForwardingCmd строит подкоманду, чей контракт — "0 при успехе, 1 при
 // ошибке, ошибка печатается в stderr с префиксом logPrefix" (recall, save,
-// init, web, export, import): общий для шести из восьми подкоманд, поэтому
-// вынесен один раз, а не повторён в каждой команде отдельно. hook и doctor —
-// единственные с другим контрактом выхода, у них свои конструкторы ниже.
+// init, web, export, import, migrate): общий для семи из девяти подкоманд,
+// поэтому вынесен один раз, а не повторён в каждой команде отдельно. hook и
+// doctor — единственные с другим контрактом выхода, у них свои конструкторы
+// ниже.
 func newForwardingCmd(use, short string, exitCode *int, stderr io.Writer, logPrefix string, runX func(args []string) error) *cobra.Command {
 	return &cobra.Command{
 		Use:                use,

@@ -33,16 +33,6 @@ import (
 // быстрый прогон) таймаута не имеет.
 const probeTimeout = 5 * time.Second
 
-// closableStore — store.Store, дополненный Close(): store.Open возвращает
-// неэкспортированный конкретный тип, поэтому его нельзя назвать напрямую вне
-// пакета store, но он реализует Close() error помимо интерфейса Store.
-// databaseSection нужно и то, и другое — передать Store дальше в секции 3/4 и
-// закрыть его в конце buildDoctorReport.
-type closableStore interface {
-	store.Store
-	Close() error
-}
-
 // status — состояние одной секции отчёта doctor.
 type status int
 
@@ -175,15 +165,23 @@ func runDoctor(args []string, out io.Writer) (exitCode int, err error) {
 }
 
 // buildDoctorReport выполняет все 7 секций диагностики по порядку задачи 9.1 и
-// сводит их в общий вердикт. Строго read-only: секция «БД» проверяет
-// существование файла ДО store.Open (Open создал бы файл и применил схему —
-// это было бы записью), остальные секции читают только через Store.
+// сводит их в общий вердикт. Read-only-гарантия у секции «БД» НЕ симметрична
+// между бэкендами: для sqlite databaseSection проверяет существование файла ДО
+// store.OpenSQLite и не даёт создать отсутствующий файл — но store.OpenSQLite
+// при открытии СУЩЕСТВУЮЩЕГО файла всё равно применяет baseSchema+migrate
+// (идемпотентные, но настоящие DDL/запись), поэтому для sqlite read-only здесь
+// означает только «не создаём отсутствующую БД», а не «вообще не пишем». Для
+// postgres такого локального файла нет вовсе, зато read-only получается
+// настоящим: postgresDatabaseSection открывает соединение через
+// store.OpenPostgresReadOnly, а не через общую фабрику store.Open (см. её
+// комментарий) — там нет CREATE/ALTER, только Ping и current_schema().
+// Остальные секции читают только через Store.
 func buildDoctorReport(ctx context.Context, cfg config.Config, configPath string, live bool) doctorReport {
 	var sections []section
 
 	sections = append(sections, configSection(cfg, configPath))
 
-	dbSec, st := databaseSection(cfg.Store.Path)
+	dbSec, st := storeSection(cfg.Store)
 	sections = append(sections, dbSec)
 	if st != nil {
 		defer st.Close()
@@ -267,15 +265,32 @@ func configSection(cfg config.Config, configPath string) section {
 	return section{Name: "Конфиг", Status: st, Detail: detail.String()}
 }
 
-// databaseSection — секция 2: существование и размер файла БД, открытие
-// хранилища, quick_check и journal_mode (через store.Health). Проверка
-// существования файла ЛОКАЛЬНАЯ (os.Stat, до store.Open) — store.Open создаёт
+// storeSection — секция 2, диспетчер по store.driver: "" и "sqlite" уходят в
+// databaseSection (файл на диске, историческая read-only проверка через
+// os.Stat до открытия), "postgres" — в postgresDatabaseSection (нет
+// локального файла, чьё существование можно проверить заранее). Неизвестный
+// driver сюда дойти не должен (config.Load уже отклоняет такой конфиг через
+// StoreConfig.Validate), но секция остаётся defensive, а не паникует.
+func storeSection(cfg config.StoreConfig) (section, store.Store) {
+	switch cfg.Driver {
+	case "", "sqlite":
+		return databaseSection(cfg.Path)
+	case "postgres":
+		return postgresDatabaseSection(cfg)
+	default:
+		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("неизвестный store.driver %q", cfg.Driver)}, nil
+	}
+}
+
+// databaseSection — секция 2 для sqlite: существование и размер файла БД,
+// открытие хранилища, quick_check и journal_mode (через store.Health). Проверка
+// существования файла ЛОКАЛЬНАЯ (os.Stat, до store.OpenSQLite) — Open создаёт
 // отсутствующий файл и накатывает схему, что было бы записью и противоречило
-// бы read-only инварианту doctor; поэтому при отсутствующем файле store.Open
-// вовсе не вызывается, а секция сразу помечается ❌. Возвращает открытый Store
-// (nil, если файл отсутствует или Open не удался) — вызывающая сторона
-// закрывает его и передаёт дальше в секции 3/4.
-func databaseSection(path string) (section, closableStore) {
+// бы read-only инварианту doctor; поэтому при отсутствующем файле
+// store.OpenSQLite вовсе не вызывается, а секция сразу помечается ❌.
+// Возвращает открытый Store (nil, если файл отсутствует или Open не удался) —
+// вызывающая сторона закрывает его и передаёт дальше в секции 3/4.
+func databaseSection(path string) (section, store.Store) {
 	expanded, err := expandHomeLocal(path)
 	if err != nil {
 		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("раскрытие пути %q: %v", path, err)}, nil
@@ -289,7 +304,7 @@ func databaseSection(path string) (section, closableStore) {
 		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("проверка файла %s: %v", expanded, statErr)}, nil
 	}
 
-	st, err := store.Open(path)
+	st, err := store.OpenSQLite(path)
 	if err != nil {
 		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("файл %s (%s); открытие: %v", expanded, humanSize(info.Size()), err)}, nil
 	}
@@ -308,6 +323,40 @@ func databaseSection(path string) (section, closableStore) {
 		return section{Name: "БД", Status: statusWarn, Detail: detail + " (ожидался wal)"}, st
 	}
 	return section{Name: "БД", Status: statusOK, Detail: detail}, st
+}
+
+// postgresDatabaseSection — секция 2 для store.driver=postgres: локального файла,
+// чьё существование можно проверить заранее (как для sqlite выше), у postgres нет —
+// поэтому вместо os.Stat-проверки ДО открытия здесь read-only инвариант doctor
+// обеспечивается тем, КАКИМ путём открывается соединение: store.OpenPostgresReadOnly
+// (а не общая фабрика openStore/store.Open, которую использует весь остальной
+// cmd/memo) не применяет схему — только Ping и чтение current_schema(). Обычный
+// store.Open делает это как часть init() при КАЖДОМ открытии (CREATE TABLE/INDEX IF
+// NOT EXISTS, DROP+CREATE TRIGGER, CREATE OR REPLACE FUNCTION) — то есть на свежей БД
+// молча накатил бы всю прод-схему памяти в рамках диагностики, а на существующей —
+// как минимум переприменил бы триггеры; см. store.OpenPostgresReadOnly для деталей.
+// resolvePostgresPassword — то же подхватывание MEMO_POSTGRES_PASSWORD, что у
+// остального cmd/memo (openStore). journal_mode в детали не идёт — это
+// sqlite-специфичное поле HealthInfo, для postgres оно неприменимо (реализация
+// openPostgres/Health решает, чем его заполнять).
+func postgresDatabaseSection(cfg config.StoreConfig) (section, store.Store) {
+	target := cfg.Target()
+
+	st, err := store.OpenPostgresReadOnly(resolvePostgresPassword(cfg))
+	if err != nil {
+		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("%s: открытие: %v", target, err)}, nil
+	}
+
+	health, err := st.Health(context.Background())
+	if err != nil {
+		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("%s; проверка целостности: %v", target, err)}, st
+	}
+
+	if health.QuickCheck != "ok" {
+		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("%s; quick_check сообщает о проблеме: %s", target, health.QuickCheck)}, st
+	}
+
+	return section{Name: "БД", Status: statusOK, Detail: fmt.Sprintf("%s; quick_check: ok", target)}, st
 }
 
 // recordsSection — секция 3: сводные счётчики памяти (Store.Stats). st==nil
@@ -479,7 +528,7 @@ func reasonerSection(ctx context.Context, cfg config.ReasonerConfig, live bool) 
 // заводить ради одной строки экспорт из store (или общий util-пакет) избыточно
 // (граница задачи — не трогать internal-пакеты, кроме одобренного
 // store.Health), а doctor'у нужно посмотреть на файл БД (os.Stat) РАНЬШЕ
-// store.Open — тем же путём, что применит сам store.Open.
+// store.OpenSQLite — тем же путём, что применит сам store.OpenSQLite.
 func expandHomeLocal(path string) (string, error) {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
