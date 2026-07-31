@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -220,7 +220,7 @@ func TestDatabaseSection_MissingFile(t *testing.T) {
 
 func TestRunDoctor_MissingDBFileExitsNonZero(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such.db")
-	tomlPath := writeMinimalConfig(t, missing)
+	tomlPath := writeMinimalConfig(t, t.TempDir(), missing)
 
 	var buf bytes.Buffer
 	code, err := runDoctor([]string{"-config", tomlPath}, &buf)
@@ -235,7 +235,7 @@ func TestRunDoctor_MissingDBFileExitsNonZero(t *testing.T) {
 func TestRunDoctor_JSONOutputValid(t *testing.T) {
 	dbPath, st := newDoctorTestStore(t)
 	putDoctorMemory(t, st, nil)
-	tomlPath := writeMinimalConfig(t, dbPath)
+	tomlPath := writeMinimalConfig(t, t.TempDir(), dbPath)
 
 	var buf bytes.Buffer
 	if _, err := runDoctor([]string{"-config", tomlPath, "-json"}, &buf); err != nil {
@@ -256,12 +256,16 @@ func TestRunDoctor_JSONOutputValid(t *testing.T) {
 	}
 }
 
-// writeMinimalConfig пишет минимальный TOML-конфиг с указанным store.path и
-// возвращает путь к нему.
-func writeMinimalConfig(t *testing.T, dbPath string) string {
+// writeMinimalConfig пишет в dir минимальный TOML-конфиг с указанным
+// store.path (единственная секция — [embedder]/[reasoner] уже "noop" в
+// config.Default(), лишние секции с тем же значением ничего не меняют) и
+// возвращает путь к нему. dir — параметр, а не всегда свой t.TempDir():
+// вызывающим (напр. findExistingSqliteMemory в init_migrate_hint_test.go)
+// нужен конкретный каталог, где также лежит проверяемый sqlite-файл.
+func writeMinimalConfig(t *testing.T, dir, dbPath string) string {
 	t.Helper()
-	tomlPath := filepath.Join(t.TempDir(), "agentmemory.toml")
-	content := "[store]\npath = " + `"` + dbPath + `"` + "\n"
+	tomlPath := filepath.Join(dir, "agentmemory.toml")
+	content := fmt.Sprintf("[store]\npath = %q\n", dbPath)
 	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("запись конфига: %v", err)
 	}
@@ -303,7 +307,7 @@ func TestDoctorReadOnly_DBUnchanged(t *testing.T) {
 	copyFile(t, dbPath, doctorCopy)
 	copyFile(t, dbPath, baselineCopy)
 
-	tomlPath := writeMinimalConfig(t, doctorCopy)
+	tomlPath := writeMinimalConfig(t, t.TempDir(), doctorCopy)
 	var buf bytes.Buffer
 	if _, err := runDoctor([]string{"-config", tomlPath}, &buf); err != nil {
 		t.Fatalf("runDoctor: %v", err)
@@ -370,11 +374,34 @@ func TestHumanSize(t *testing.T) {
 // прод-схему прямо во время диагностики, вопреки собственному комментарию "ничего не
 // чинит и не пишет в БД" (см. пакетный комментарий doctor.go).
 //
-// Схема — своя, временная (см. комментарий newTestPgStoreSchema в internal/memory/
-// store/postgres_test.go про ту же изоляцию и её мотивацию: база postgres.lan/memo
-// общая на команду, TRUNCATE/DROP по public запрещены) и без единой таблицы: если бы
-// тест использовал уже проинициализированную схему, "doctor не создаёт таблицы" было
-// бы неотличимо от "таблицы уже были".
+// Заодно проверяет положительный путь диагностики готовности (pgvector/право
+// CREATE, storeReadinessWarningsFor, задача 12.1, доработка симплификации —
+// раньше это был отдельный TestPostgresDoctorReadOnly_ReadinessDiagnostics,
+// поднимавший идентичный стенд второй раз ради одной дополнительной
+// проверки): на только что созданной этим же соединением схеме роль владеет
+// ею (право CREATE есть), а pgvector уже установлен на тестовом сервере в
+// public (см. newTestPgSchema/withPublic=true) — секция «БД» обязана
+// остаться statusOK, содержать позитивный маркер "готовность: ok" (доказывает,
+// что storeReadinessWarningsFor реально вызвана и ничего не нашла, а не что
+// блок диагностики вырезан из postgresDatabaseSection целиком — в обоих
+// случаях warnings был бы пуст, а без маркера они неотличимы) и не
+// упоминать pgvector/CREATE/vector.
+//
+// Схема — своя, временная (newTestPgSchema, migrate_test.go — та же изоляция,
+// что у store.newTestPgStoreWithVector в internal/memory/store/postgres_test.go:
+// база postgres.lan/memo общая на команду, TRUNCATE/DROP по public запрещены)
+// и без единой таблицы: если бы тест использовал уже проинициализированную
+// схему, "doctor не создаёт таблицы" было бы неотличимо от "таблицы уже были".
+//
+// Отрицательный путь диагностики готовности (нет pgvector / нет CREATE)
+// намеренно не воспроизводится здесь тем же способом, что и в
+// internal/memory/store/postgres_test.go (TestPgCheckPostgresReadiness):
+// пришлось бы либо снимать привилегии/удалять расширение на ОБЩЕЙ командной
+// базе (запрещено заданием — "общая база не чистится, только read-only"),
+// либо заводить отдельную роль/БД, которых MEMO_TEST_POSTGRES_DSN не
+// гарантирует. Само форматирование предупреждений по каждому false-случаю и
+// то, что они не валят пробу, уже покрыто без сети (TestStoreReadinessWarnings,
+// init_readiness_test.go, на fakeReadinessChecker).
 //
 // Гейтится MEMO_TEST_POSTGRES_DSN — не задана, тест пропускается (make test без
 // живого сервера остаётся зелёным).
@@ -389,38 +416,28 @@ func TestPostgresDoctorReadOnly_SchemaUnchanged(t *testing.T) {
 	}
 	pgCfg.Password = password
 
-	schema := "memo_test_doctor_" + strings.ToLower(ulid.Make().String())
-	bootstrap, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("bootstrap-соединение: %v", err)
-	}
-	// Регистрируется ДО cleanup'а с DROP SCHEMA (LIFO: последний зарегистрированный
-	// cleanup выполняется первым) — иначе bootstrap.Close() отработал бы раньше, и
-	// DROP SCHEMA/финальная проверка таблиц ниже упали бы на "database is closed".
-	t.Cleanup(func() { bootstrap.Close() })
-	if _, err := bootstrap.ExecContext(context.Background(), `CREATE SCHEMA `+schema); err != nil {
-		t.Fatalf("создание тестовой схемы %s: %v", schema, err)
-	}
-	t.Cleanup(func() {
-		if _, err := bootstrap.ExecContext(context.Background(), `DROP SCHEMA `+schema+` CASCADE`); err != nil {
-			t.Errorf("удаление тестовой схемы %s (общая база memo не должна копить мусор): %v", schema, err)
-		}
-	})
-
-	// PGOPTIONS -> "options" (runtime-параметр startup-пакета) — стандартная env-
-	// переменная libpq, которую jackc/pgx/v5/pgconn.ParseConfig подмешивает к
-	// параметрам, отсутствующим в самой строке соединения (mergeSettings(defaults,
-	// env, connString)). config.StoreConfig.DSN() понятия "схема" не имеет и не
-	// должен — это единственный способ направить doctor (который строит DSN только
-	// из неё, см. postgresDatabaseSection) в изолированную тестовую схему, не
-	// вводя search_path в production-конфиг ради теста.
-	t.Setenv("PGOPTIONS", "-c search_path="+schema)
+	// withPublic=true: pgvector установлен глобально в public на тестовом
+	// сервере, а диагностика готовности резолвит тип vector через
+	// to_regtype('vector') строго по search_path ЭТОГО соединения — без
+	// public в search_path тип не резолвился бы вовсе, и секция «БД» ложно
+	// обросла бы предупреждением про отсутствующий pgvector на сервере, где
+	// он на самом деле есть (см. postgres_readiness.go: комментарий у
+	// PostgresReadiness.VectorExtension).
+	schema, bootstrap := newTestPgSchema(t, dsn, "memo_test_doctor_", true)
 
 	report := buildDoctorReport(context.Background(), config.Config{Store: pgCfg}, "", false)
 
 	dbSec := sectionByName(t, report.Sections, "БД")
 	if dbSec.Status != statusOK {
-		t.Fatalf("секция БД = %s (%s), хочу ok (соединение с пустой, но существующей схемой само по себе валидно)", dbSec.Status, dbSec.Detail)
+		t.Fatalf("секция БД = %s (%s), хочу ok (соединение с пустой, но существующей схемой само по себе валидно, CREATE есть, pgvector установлен глобально)", dbSec.Status, dbSec.Detail)
+	}
+	if !strings.Contains(dbSec.Detail, "готовность: ok") {
+		t.Errorf("секция БД не содержит маркер \"готовность: ok\" — похоже, диагностика готовности (pgvector/CREATE) не вызывалась: %s", dbSec.Detail)
+	}
+	for _, unwanted := range []string{"pgvector", "CREATE", "vector"} {
+		if strings.Contains(dbSec.Detail, unwanted) {
+			t.Errorf("секция БД содержит %q — готовая база не должна давать предупреждений о готовности: %s", unwanted, dbSec.Detail)
+		}
 	}
 
 	var tableCount int

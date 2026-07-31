@@ -108,6 +108,24 @@ func parseMigrateEndpoint(s string) (config.StoreConfig, error) {
 	}
 }
 
+// formatMigrateEndpoint — обратная к parseMigrateEndpoint: отдаёт строку в
+// том же формате, который она разбирает ("sqlite:<путь>" | беспарольный
+// "postgres://user@host:port/dbname?sslmode=..."). Единый источник синтаксиса
+// для подсказки `memo init` про `memo migrate` (doInit, init.go), которая
+// иначе собирала бы те же строки третьим, независимым от парсера способом
+// (риск разъехаться с тем, что parseMigrateEndpoint реально принимает).
+// Пароль не пишется никогда, даже если cfg.Password непуст (cfg передаётся по
+// значению — обнуление поля не затрагивает вызывающего): та же причина, что у
+// parseMigrateEndpoint — секреты не должны попадать в строку, которую видно в
+// выводе команды и которую копируют в шелл.
+func formatMigrateEndpoint(cfg config.StoreConfig) string {
+	if cfg.Driver == "postgres" {
+		cfg.Password = ""
+		return cfg.DSN()
+	}
+	return "sqlite:" + cfg.Path
+}
+
 // recordCounts — сводные счётчики снимка памяти (для отчёта "прочитано"/
 // "сверка" runMigrate). Тумстоуны считаются отдельно от memories, а не вместо
 // них — memories включает и живые записи, и тумстоуны (см. AllForExport).
@@ -284,13 +302,26 @@ func runMigrate(args []string, out io.Writer) error {
 		fmt.Fprintln(out, "перенос памяти между бэкендами хранилища (sqlite <-> postgres): записи, тумстоуны, теги и связи; векторы не переносятся.")
 		fmt.Fprintln(out, "Использование: memo migrate [флаги] <источник> <приёмник>")
 		fmt.Fprintln(out, "источник/приёмник: sqlite:<путь> | postgres://user@host:port/dbname?sslmode=disable")
-		fmt.Fprintf(out, "  пароль postgres — только из переменной окружения %s (никогда не в самой строке)\n", memoPostgresPasswordEnv)
+		fmt.Fprintf(out, "  пароль postgres — только из переменной окружения %s (никогда не в самой строке) или из .env в текущем каталоге\n", memoPostgresPasswordEnv)
 		fs.PrintDefaults()
 	}
 	dryRun := fs.Bool("dry-run", false, "посчитать и показать, что будет перенесено, ничего не записывая (приёмник не открывается вовсе)")
 	overwrite := fs.Bool("overwrite", false, "заменять в приёмнике записи с конфликтующим id (по умолчанию — пропуск, как у `memo import`)")
 	scopesFlag := fs.String("scopes", "", "пространства через запятую для частичного переноса (пусто — вся БД)")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
+
+	// .env — тем же способом, что у остальных подкоманд (recall/save/doctor/hook/
+	// сервер, см. dotenv.go), но, в отличие от них, у migrate нет флага -config, от
+	// которого обычно резолвится каталог .env: loadDotEnvForConfig с пустым
+	// configPath берёт "." — .env ищется в ТЕКУЩЕМ каталоге процесса (см. её
+	// комментарий). До этой правки migrate был единственной подкомандой, не
+	// подхватывающей .env вовсе — пароль, который `memo init` кладёт в <dir>/.env
+	// (напечатанная им же подсказка `memo migrate ...`, см. doInit), без этого
+	// вызова был бы виден только через MEMO_POSTGRES_PASSWORD в самом окружении
+	// шелла, а не из файла проекта, и напечатанная подсказка падала бы на
+	// "password authentication failed" при запуске не из каталога проекта или без
+	// ручного export.
+	loadDotEnvForConfig("", "memo migrate")
 
 	if fs.NArg() != 2 {
 		return fmt.Errorf("migrate: нужно ровно два позиционных аргумента — memo migrate [флаги] <источник> <приёмник>")

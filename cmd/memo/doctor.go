@@ -339,6 +339,21 @@ func databaseSection(path string) (section, store.Store) {
 // остального cmd/memo (openStore). journal_mode в детали не идёт — это
 // sqlite-специфичное поле HealthInfo, для postgres оно неприменимо (реализация
 // openPostgres/Health решает, чем его заполнять).
+//
+// После Health — та же диагностика ГОТОВНОСТИ, что печатает `memo init`
+// (pgvector/право CREATE, задача 12.1, storeReadinessWarnings/
+// storeReadinessWarningsFor в init.go): доступность и готовность — разные
+// вещи (см. комментарий у probeStoreConnectionLive), и дрейф между ними может
+// случиться уже ПОСЛЕ первого удачного `memo init` — администратор отозвал
+// GRANT CREATE, снёс расширение vector — а `memo init` с этого момента больше
+// не запускается на готовой базе. doctor — единственное место, которое
+// перепроверяет это на уже работающей базе. storeReadinessWarningsFor
+// переиспользуется как есть (не копия форматирования): init.go и doctor.go —
+// один пакет main, второй набор текстов предупреждений означал бы, что их
+// пришлось бы держать синхронизированными вручную. Неготовность — statusWarn
+// (не statusFail): тот же принцип деградации, что у `memo init` (DESIGN.md
+// §15) — база вполне доступна и рабочая, просто не всё готово к тому, чего
+// memo попробует добиться при следующем старте/reindex.
 func postgresDatabaseSection(cfg config.StoreConfig) (section, store.Store) {
 	target := cfg.Target()
 
@@ -356,7 +371,25 @@ func postgresDatabaseSection(cfg config.StoreConfig) (section, store.Store) {
 		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("%s; quick_check сообщает о проблеме: %s", target, health.QuickCheck)}, st
 	}
 
-	return section{Name: "БД", Status: statusOK, Detail: fmt.Sprintf("%s; quick_check: ok", target)}, st
+	detail := fmt.Sprintf("%s; quick_check: ok", target)
+
+	// Отдельный дедлайн (probeTimeout — та же константа, что у прочих сетевых
+	// проб doctor'а: embedderLivenessSection/reasonerSection), а не
+	// context.Background() без срока: без него зависший диагностический запрос
+	// повесил бы весь прогон `memo doctor` бесконечно.
+	readinessCtx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
+	// "готовность: ..." печатается ВСЕГДА, когда диагностика реально вызвана —
+	// и в чистом случае тоже (не только при warnings) — иначе тест на этот
+	// путь (TestPostgresDoctorReadOnly_SchemaUnchanged) не отличил бы
+	// "диагностика вызвана и ничего не нашла" от "блок диагностики вырезан из
+	// кода целиком": в обоих случаях warnings был бы пуст, а detail —
+	// неотличим от прежнего вида без этой строки.
+	if warnings := storeReadinessWarningsFor(readinessCtx, st); len(warnings) > 0 {
+		return section{Name: "БД", Status: statusWarn, Detail: detail + "; готовность: " + strings.Join(warnings, "; ")}, st
+	}
+	return section{Name: "БД", Status: statusOK, Detail: detail + "; готовность: ok"}, st
 }
 
 // recordsSection — секция 3: сводные счётчики памяти (Store.Stats). st==nil

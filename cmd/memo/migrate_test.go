@@ -88,6 +88,37 @@ func TestParseMigrateEndpoint_UnknownFormat(t *testing.T) {
 	}
 }
 
+// TestFormatMigrateEndpoint_RoundTripsThroughParse — formatMigrateEndpoint
+// (обратная к parseMigrateEndpoint, используется подсказкой `memo init` про
+// `memo migrate`, см. doInit в init.go) обязана отдавать строку, которую
+// parseMigrateEndpoint разбирает обратно в эквивалентный config.StoreConfig —
+// это и есть страховка от расхождения между парсером и его обратной функцией.
+func TestFormatMigrateEndpoint_RoundTripsThroughParse(t *testing.T) {
+	cases := []config.StoreConfig{
+		{Driver: "sqlite", Path: "/home/u/memory.db"},
+		{Driver: "postgres", Host: "postgres.lan", Port: 5432, User: "memo", DBName: "memo", SSLMode: "disable"},
+		// Пароль в cfg — formatMigrateEndpoint обязана его отбросить: строка
+		// не должна содержать секрет, а parseMigrateEndpoint и вовсе отвергает
+		// пароль в URL как ошибку (см. TestParseMigrateEndpoint_PostgresPasswordRejected).
+		{Driver: "postgres", Host: "postgres.lan", Port: 6432, User: "alice", DBName: "team", SSLMode: "require", Password: "s3cret"},
+	}
+	for _, cfg := range cases {
+		endpoint := formatMigrateEndpoint(cfg)
+		if strings.Contains(endpoint, "s3cret") {
+			t.Errorf("formatMigrateEndpoint(%+v) = %q содержит пароль", cfg, endpoint)
+		}
+		got, err := parseMigrateEndpoint(endpoint)
+		if err != nil {
+			t.Fatalf("parseMigrateEndpoint(%q): %v", endpoint, err)
+		}
+		want := cfg
+		want.Password = ""
+		if got != want {
+			t.Errorf("round-trip formatMigrateEndpoint -> parseMigrateEndpoint = %+v, хочу %+v", got, want)
+		}
+	}
+}
+
 // --- runMigrate: разбор флагов/аргументов -------------------------------
 
 func TestRunMigrate_WrongArgCount(t *testing.T) {
@@ -450,6 +481,54 @@ func parseTestPostgresDSN(dsn string) (cfg config.StoreConfig, password string, 
 		return config.StoreConfig{}, "", err
 	}
 	return cfg, password, nil
+}
+
+// newTestPgSchema создаёт на живом тестовом сервере (dsn) изолированную
+// временную схему PostgreSQL и направляет туда ЛЮБОЕ новое pgx-соединение
+// процесса через PGOPTIONS (-c search_path=...) — общий bootstrap для
+// интеграционных тестов cmd/memo (doctor_test.go, init_store_test.go),
+// которым нужна пустая/предсказуемая схема, а не общая командная база
+// (postgres.lan/memo, которую нельзя TRUNCATE/DROP — только read-only
+// запросы, см. cleanupPostgresTestRows выше для сравнения с точечной
+// уборкой). Уборка регистрируется в порядке: закрытие bootstrap-соединения
+// первым cleanup'ом, DROP SCHEMA вторым — t.Cleanup вызывает их в порядке
+// LIFO, поэтому DROP SCHEMA реально отрабатывает раньше bootstrap.Close, а
+// не наоборот (иначе DROP упал бы на уже закрытом соединении) — общая база
+// memo не должна копить мусор от тестовых прогонов.
+//
+// withPublic добавляет ",public" в search_path — нужен тестам, которым важна
+// видимость типа vector (pgvector установлен глобально в public на тестовом
+// сервере, см. newTestPgStoreWithVector в internal/memory/store/postgres_test.go);
+// тестам отрицательного случая (vector НЕ должен резолвиться) он не нужен.
+// prefix — префикс имени схемы, для различимости по имени вызывающего теста
+// при отладке по логам сервера. Возвращает имя схемы и открытое
+// bootstrap-соединение (для вызывающих, которым после диагностики нужно
+// что-то в схеме проверить напрямую — например, что doctor не создал в ней
+// таблиц) — оно закрывается тем же t.Cleanup, что и DROP SCHEMA, не раньше.
+func newTestPgSchema(t *testing.T, dsn, prefix string, withPublic bool) (schema string, bootstrap *sql.DB) {
+	t.Helper()
+	bootstrap, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("bootstrap-соединение: %v", err)
+	}
+	t.Cleanup(func() { bootstrap.Close() })
+
+	schema = prefix + strings.ToLower(ulid.Make().String())
+	if _, err := bootstrap.ExecContext(context.Background(), `CREATE SCHEMA `+schema); err != nil {
+		t.Fatalf("создание тестовой схемы %s: %v", schema, err)
+	}
+	t.Cleanup(func() {
+		if _, err := bootstrap.ExecContext(context.Background(), `DROP SCHEMA `+schema+` CASCADE`); err != nil {
+			t.Errorf("удаление тестовой схемы %s (общая база memo не должна копить мусор): %v", schema, err)
+		}
+	})
+
+	searchPath := schema
+	if withPublic {
+		searchPath += ",public"
+	}
+	t.Setenv("PGOPTIONS", "-c search_path="+searchPath)
+	return schema, bootstrap
 }
 
 // cleanupPostgresTestRows удаляет ТОЛЬКО перечисленные id (точечно, не

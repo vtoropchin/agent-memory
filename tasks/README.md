@@ -125,13 +125,14 @@ API из 6.2.
 
 ## Этап 12 — Общая память команды (PostgreSQL + pgvector)
 
-Второй бэкенд хранилища и его настройка из `memo init` уже сделаны (выбор `[store] driver`,
-флаги `-store-driver`/`-postgres-*`, read-only проба подключения перед записью конфига).
-Ниже — то, что осознанно оставлено на потом.
+Второй бэкенд хранилища и его настройка из `memo init` сделаны (выбор `[store] driver`,
+флаги `-store-driver`/`-postgres-*`, read-only проба подключения перед записью конфига,
+диагностика готовности базы и подсказка `memo migrate` — задача 12.1).
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| 12.1 `init` + postgres: проверка готовности базы и подсказка про `memo migrate` | [12.1-init-postgres-followups.md](12.1-init-postgres-followups.md) | ⬜ ожидает |
+| 12.1 `init` + postgres: проверка готовности базы и подсказка про `memo migrate` | [12.1-init-postgres-followups.md](12.1-init-postgres-followups.md) | ✅ выполнена |
+| 12.2 Единое экранирование пути в `file:`-URI для SQLite (`OpenSQLite` vs `escapeSQLiteURIPath`) | [12.2-sqlite-uri-escaping.md](12.2-sqlite-uri-escaping.md) | ⬜ ожидает |
 
 ### Отклонённые идеи (чтобы не возвращаться)
 

@@ -1766,6 +1766,65 @@ func TestPgHealth(t *testing.T) {
 	}
 }
 
+// TestPgCheckPostgresReadiness — задача 12.1 (доработки по итогам ревью):
+// на готовой тестовой БД оба признака готовности должны быть true, без
+// открытия второго соединения — только read-only SELECT поверх уже открытого
+// s.db. Обязательно newTestPgStoreWithVector (а не newTestPgStore): проверка
+// VectorExtension теперь резолвит имя типа vector через to_regtype по
+// search_path СОЕДИНЕНИЯ (см. доккомментарий у PostgresReadiness.VectorExtension
+// и CheckPostgresReadiness — фикс пункта C ревью: pg_extension врал "готово"
+// для схемы без public в search_path, хотя CREATE TABLE ... vector(N) там же
+// падает); newTestPgStore, в отличие от newTestPgStoreWithVector, держит
+// search_path БЕЗ ",public" именно для того, чтобы unqualified-запросы не
+// задевали public — тип vector (установленный в public, см. её комментарий)
+// там принципиально не резолвится, и это ПРАВИЛЬНОЕ поведение проверки, а не
+// повод её обходить. CanCreate — тестовая схема только что создана самим
+// тестом, поэтому его роль ей владеет и имеет CREATE.
+//
+// Отсутствующие pgvector/право CREATE здесь намеренно НЕ проверяются:
+// воспроизвести их пришлось бы либо снятием привилегий/удалением расширения
+// на ОБЩЕЙ командной базе (нарушает "общая база не чистится" — задача прямо
+// это запрещает), либо через отдельную роль/БД, которых MEMO_TEST_POSTGRES_DSN
+// не гарантирует; форматирование предупреждений по каждому false-случаю
+// проверяется юнит-тестами cmd/memo (storeReadinessWarnings,
+// init_readiness_test.go) на фейковом PostgresReadinessChecker — без сети
+// вовсе.
+func TestPgCheckPostgresReadiness(t *testing.T) {
+	s := newTestPgStoreWithVector(t)
+	readiness, err := s.CheckPostgresReadiness(context.Background())
+	if err != nil {
+		t.Fatalf("CheckPostgresReadiness: %v", err)
+	}
+	if !readiness.VectorExtension {
+		t.Error("VectorExtension = false, want true — pgvector установлен в public, а search_path (newTestPgStoreWithVector) его видит")
+	}
+	if !readiness.CanCreate {
+		t.Error("CanCreate = false, want true — тестовая роль владеет только что созданной ею схемой")
+	}
+}
+
+// TestPgCheckPostgresReadiness_VectorNotInSearchPath — прямая регрессия
+// пункта C ревью задачи 12.1: pgvector установлен на сервере (в public), но
+// search_path этого соединения его не видит (newTestPgStore, в отличие от
+// newTestPgStoreWithVector, держит search_path из ОДНОЙ тестовой схемы, без
+// ",public" — см. её комментарий). Старая проверка (pg_extension, каталог
+// уровня БД) сказала бы здесь "готово", хотя ResetVectorIndex/CREATE TABLE ...
+// vector(N) в этой же схеме упали бы с "type vector does not exist" —
+// to_regtype обязана честно вернуть VectorExtension=false в этом случае.
+func TestPgCheckPostgresReadiness_VectorNotInSearchPath(t *testing.T) {
+	s := newTestPgStore(t)
+	readiness, err := s.CheckPostgresReadiness(context.Background())
+	if err != nil {
+		t.Fatalf("CheckPostgresReadiness: %v", err)
+	}
+	if readiness.VectorExtension {
+		t.Error("VectorExtension = true, want false — search_path этого соединения не включает public, тип vector там не резолвится, хотя pg_extension сказал бы обратное")
+	}
+	if !readiness.CanCreate {
+		t.Error("CanCreate = false, want true — тестовая роль владеет только что созданной ею схемой")
+	}
+}
+
 func TestPgClose(t *testing.T) {
 	s := newTestPgStore(t)
 	if err := s.Close(); err != nil {

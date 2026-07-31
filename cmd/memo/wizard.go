@@ -292,6 +292,14 @@ func promptOllamaEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) (
 // (сбрасывает postgres-поля, следующая итерация спросит их с нуля) и "Выбрать
 // другую настройку" — возврат (true, nil), по которому promptInitTUI вернётся к
 // select бэкенда (в том числе на sqlite).
+//
+// Предупреждения о готовности БД (первый элемент возврата probeStoreConnection
+// — pgvector/право CREATE, задача 12.1), в отличие от ошибки доступности,
+// здесь намеренно не печатаются: doInit (init.go), вызываемый после визарда с
+// теми же параметрами, пробует подключение заново и печатает их сам — это
+// единственная точка их печати что в интерактивном, что в -no-input прогоне,
+// что и защищает от дублирования одного и того же предупреждения дважды в
+// рамках одного интерактивного прогона.
 func promptPostgresStore(out io.Writer, cfg *initConfig) (reselect bool, err error) {
 	reask := false
 	for {
@@ -300,7 +308,7 @@ func promptPostgresStore(out io.Writer, cfg *initConfig) (reselect bool, err err
 		}
 
 		storeCfg := storeConfigFromInit(*cfg)
-		probeErr := probeStoreConnection(storeCfg)
+		_, probeErr := probeStoreConnection(storeCfg)
 		if probeErr == nil {
 			fmt.Fprintf(out, "подключение к %s проверено\n", storeCfg.Target())
 			return false, nil

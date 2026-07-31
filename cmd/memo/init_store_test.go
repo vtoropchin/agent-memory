@@ -19,18 +19,47 @@ import (
 	"agentmemory/internal/config"
 )
 
+// isolateHomeForTest перенаправляет $HOME в свежий временный каталог теста —
+// обязательная изоляция для любого теста, зовущего doInit со
+// StoreDriver=postgres (доработка задачи 12.1 по итогам ревью): при
+// отсутствующем <dir>/agentmemory.toml findExistingSqliteMemory проверяет
+// дефолтный путь ~/.agentmemory/memory.db (defaultStorePath) — без этой
+// изоляции тест читал бы РЕАЛЬНУЮ память разработчика/CI-раннера из его
+// домашнего каталога (найден живой файл на несколько МиБ при ревью). Общий
+// хелпер вместо дублирования t.Setenv("HOME", t.TempDir()) в каждом тесте;
+// возвращает изолированный каталог — нужен тестам, которым помимо самой
+// изоляции требуется сам путь (например, чтобы положить туда дефолтный
+// ~/.agentmemory/memory.db).
+func isolateHomeForTest(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	return home
+}
+
 // stubStoreProbe подменяет пакетную пробу подключения (probeStoreConnection,
-// init.go) на стаб, возвращающий probeErr, и восстанавливает оригинал через
-// t.Cleanup. Возвращает указатель на config.StoreConfig, с которым пробу
-// позвали (нулевой, если не звали вовсе) — так тест проверяет и то, что init
-// пробует именно введённые параметры.
+// init.go) на стаб, возвращающий (nil, probeErr) — без предупреждений о
+// готовности БД, см. stubStoreProbeWithWarnings для тестов этой части задачи
+// 12.1 — и восстанавливает оригинал через t.Cleanup. Возвращает указатель на
+// config.StoreConfig, с которым пробу позвали (нулевой, если не звали вовсе)
+// — так тест проверяет и то, что init пробует именно введённые параметры.
 func stubStoreProbe(t *testing.T, probeErr error) *config.StoreConfig {
+	t.Helper()
+	return stubStoreProbeWithWarnings(t, nil, probeErr)
+}
+
+// stubStoreProbeWithWarnings — как stubStoreProbe, но стаб возвращает ещё и
+// warnings (диагностика готовности БД: pgvector/право CREATE, задача 12.1).
+func stubStoreProbeWithWarnings(t *testing.T, warnings []string, probeErr error) *config.StoreConfig {
 	t.Helper()
 	var got config.StoreConfig
 	orig := probeStoreConnection
-	probeStoreConnection = func(cfg config.StoreConfig) error {
+	probeStoreConnection = func(cfg config.StoreConfig) ([]string, error) {
 		got = cfg
-		return probeErr
+		if probeErr != nil {
+			return nil, probeErr
+		}
+		return warnings, nil
 	}
 	t.Cleanup(func() { probeStoreConnection = orig })
 	return &got
@@ -86,6 +115,7 @@ func TestRenderStoreTomlBlock_PostgresFieldsWithoutPassword(t *testing.T) {
 // файлом: чужой ключ сохраняется), в agentmemory.toml не попадает, а сам
 // конфиг читается config.Load обратно как валидный postgres-store.
 func TestDoInit_PostgresWritesPasswordToEnvNotToml(t *testing.T) {
+	isolateHomeForTest(t)
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
 	if err := os.WriteFile(envPath, []byte("# чужой файл\nFOREIGN_KEY=keep-me\nMEMO_POSTGRES_PASSWORD=old\n"), 0o600); err != nil {
@@ -154,6 +184,7 @@ func TestDoInit_PostgresWritesPasswordToEnvNotToml(t *testing.T) {
 // .env в .gitignore появляется всё равно: при postgres пользователю штатно
 // предлагают создать этот файл позже руками.
 func TestDoInit_PostgresEmptyPasswordSkipsEnv(t *testing.T) {
+	isolateHomeForTest(t)
 	dir := t.TempDir()
 	stubStoreProbe(t, nil)
 
@@ -189,9 +220,9 @@ func TestDoInit_SQLiteIgnoresPostgresFlags(t *testing.T) {
 	dir := t.TempDir()
 	probeCalled := false
 	orig := probeStoreConnection
-	probeStoreConnection = func(config.StoreConfig) error {
+	probeStoreConnection = func(config.StoreConfig) ([]string, error) {
 		probeCalled = true
-		return nil
+		return nil, nil
 	}
 	t.Cleanup(func() { probeStoreConnection = orig })
 
@@ -228,6 +259,7 @@ func TestDoInit_SQLiteIgnoresPostgresFlags(t *testing.T) {
 // прошлого прогона — он должен попасть в пробу (иначе она падает на
 // аутентификации) и при этом .env не должен быть перезаписан.
 func TestDoInit_PostgresPasswordFromExistingDotEnv(t *testing.T) {
+	isolateHomeForTest(t)
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
 	envContent := "FOREIGN_KEY=keep-me\nMEMO_POSTGRES_PASSWORD=from-dotenv\n"
@@ -358,6 +390,7 @@ func TestDoInit_StoreValidationAndProbeErrors(t *testing.T) {
 // (разбор новых флагов -store-driver/-postgres-*), включая то, что -postgres-password
 // уходит в .env, а не в TOML.
 func TestRunInit_NoInputFlag_PostgresFlags(t *testing.T) {
+	isolateHomeForTest(t)
 	dir := t.TempDir()
 	probed := stubStoreProbe(t, nil)
 
@@ -441,9 +474,9 @@ func TestRunInit_DefaultStoreSectionUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	probeCalled := false
 	orig := probeStoreConnection
-	probeStoreConnection = func(config.StoreConfig) error {
+	probeStoreConnection = func(config.StoreConfig) ([]string, error) {
 		probeCalled = true
-		return nil
+		return nil, nil
 	}
 	t.Cleanup(func() { probeStoreConnection = orig })
 
@@ -487,42 +520,95 @@ func TestProbeStoreConnectionLive_RealServer(t *testing.T) {
 	if dsn == "" {
 		t.Skipf("%s не задан — интеграционная проба пропущена", pgProbeTestDSNEnv)
 	}
+	isolateHomeForTest(t)
 
 	cfg, err := storeConfigFromDSN(dsn)
 	if err != nil {
 		t.Fatalf("разбор %s: %v", pgProbeTestDSNEnv, err)
 	}
-	if err := probeStoreConnectionLive(cfg); err != nil {
-		t.Fatalf("проба %s: %v", cfg.Target(), err)
-	}
+
+	t.Run("готовая база — без предупреждений", func(t *testing.T) {
+		warnings, err := probeStoreConnectionLive(cfg)
+		if err != nil {
+			t.Fatalf("проба %s: %v", cfg.Target(), err)
+		}
+		// Сервер задачи 12.1 (см. её тестовый DSN в README/tasks) уже настроен
+		// прод-использованием memo: pgvector установлен, роль владеет своей базой
+		// — готовая база не должна давать предупреждений о готовности.
+		if len(warnings) != 0 {
+			t.Errorf("проба готовой БД %s вернула предупреждения: %v", cfg.Target(), warnings)
+		}
+	})
+
+	// Доработка по итогам ревью: "warnings пуст" выше — ложнозелёная проверка
+	// сама по себе. Она пройдёт одинаково и если диагностика готовности
+	// реально посчитала "всё ок", и если вызов CheckPostgresReadiness вырезать
+	// из probeStoreConnectionLive целиком (warnings тогда тоже nil) — на
+	// готовом сервере эти два случая неотличимы по одному только len==0. Этот
+	// подтест создаёт РЕАЛЬНОЕ негативное состояние на живом сервере (схема,
+	// в search_path которой нет public — тип vector физически не резолвится)
+	// тем же приёмом PGOPTIONS, что doctor_test.go/postgres_test.go, и требует,
+	// чтобы проба его нашла — только так можно доказать, что диагностика
+	// реально выполняется, а не просто ничего не возвращает.
+	t.Run("схема без public в search_path — диагностика реально находит нерезолвящийся vector", func(t *testing.T) {
+		// newTestPgSchema (migrate_test.go) — общий bootstrap изолированной
+		// схемы для интеграционных postgres-тестов cmd/memo (создание,
+		// t.Cleanup с DROP SCHEMA, PGOPTIONS): withPublic=false — та же
+		// изоляция, что у store.newTestPgStore (internal/memory/store/
+		// postgres_test.go), направляет ЛЮБОЕ новое соединение pgx
+		// (dialPostgres -> sql.Open("pgx", cfg.DSN()), который подхватывает
+		// PGOPTIONS так же, как явный DSN-параметр) в схему, где pgvector
+		// (установлен глобально в public) не резолвится.
+		newTestPgSchema(t, dsn, "memo_test_probe_", false)
+
+		warnings, err := probeStoreConnectionLive(cfg)
+		if err != nil {
+			t.Fatalf("проба %s: %v", cfg.Target(), err)
+		}
+		if len(warnings) != 1 {
+			t.Fatalf("проба изолированной схемы без public вернула %d предупреждений, хочу 1 (про vector): %v", len(warnings), warnings)
+		}
+		if !strings.Contains(warnings[0], "vector") {
+			t.Errorf("предупреждение = %q, хочу упоминание vector/pgvector", warnings[0])
+		}
+		// "GRANT", а не "CREATE": текст самого vector-предупреждения legitimно
+		// упоминает "CREATE EXTENSION" (см. storeReadinessWarnings) — "CREATE"
+		// не отличил бы "нет права CREATE" от этого; "GRANT" встречается
+		// только в CanCreate-предупреждении (см. init_readiness_test.go).
+		if strings.Contains(warnings[0], "GRANT") {
+			t.Errorf("предупреждение = %q не должно упоминать право CREATE (GRANT) — роль владеет только что созданной ею схемой", warnings[0])
+		}
+	})
 
 	// Тот же путь целиком: init с этими параметрами доходит до конца и
 	// генерирует конфиг, который config.Load принимает как валидный.
-	dir := t.TempDir()
-	var out strings.Builder
-	err = doInit(initConfig{
-		Project:          "probe-integration",
-		Dir:              dir,
-		ReasonerProvider: "noop",
-		EmbedderProvider: "noop",
-		StoreDriver:      storeDriverPostgres,
-		PostgresHost:     cfg.Host,
-		PostgresPort:     cfg.Port,
-		PostgresUser:     cfg.User,
-		PostgresDBName:   cfg.DBName,
-		PostgresSSLMode:  cfg.SSLMode,
-		PostgresPassword: cfg.Password,
-	}, &out)
-	if err != nil {
-		t.Fatalf("doInit с живой пробой: %v", err)
-	}
-	loaded, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
-	}
-	if loaded.Store.Target() != cfg.Target() {
-		t.Errorf("Target сгенерированного конфига = %q, хочу %q", loaded.Store.Target(), cfg.Target())
-	}
+	t.Run("doInit доходит до конца и генерирует валидный конфиг", func(t *testing.T) {
+		dir := t.TempDir()
+		var out strings.Builder
+		err := doInit(initConfig{
+			Project:          "probe-integration",
+			Dir:              dir,
+			ReasonerProvider: "noop",
+			EmbedderProvider: "noop",
+			StoreDriver:      storeDriverPostgres,
+			PostgresHost:     cfg.Host,
+			PostgresPort:     cfg.Port,
+			PostgresUser:     cfg.User,
+			PostgresDBName:   cfg.DBName,
+			PostgresSSLMode:  cfg.SSLMode,
+			PostgresPassword: cfg.Password,
+		}, &out)
+		if err != nil {
+			t.Fatalf("doInit с живой пробой: %v", err)
+		}
+		loaded, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
+		if err != nil {
+			t.Fatalf("config.Load: %v", err)
+		}
+		if loaded.Store.Target() != cfg.Target() {
+			t.Errorf("Target сгенерированного конфига = %q, хочу %q", loaded.Store.Target(), cfg.Target())
+		}
+	})
 }
 
 // storeConfigFromDSN разбирает postgres:// DSN тестового сервера в

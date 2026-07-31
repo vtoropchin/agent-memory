@@ -214,11 +214,24 @@ func (s *sqliteStore) migrate(ctx context.Context) error {
 	return nil
 }
 
-// ftsTableExists сообщает, создана ли уже виртуальная таблица memories_fts (в этой же
-// транзакции — видит незакоммиченные изменения самой миграции).
-func ftsTableExists(ctx context.Context, tx *sql.Tx) (bool, error) {
+// sqliteQueryRowContexter — узкий интерфейс, общий для *sql.DB и *sql.Tx
+// (единственные две реализации в пакете): нужен только sqliteTableExists
+// ниже, чтобы не писать один и тот же запрос к sqlite_master под оба типа
+// соединения по отдельности.
+type sqliteQueryRowContexter interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// sqliteTableExists сообщает, есть ли в базе, открытой через q, таблица table
+// (SELECT ... FROM sqlite_master) — общий хелпер для ftsTableExists и
+// sqliteStore.hasVecTable (обе ниже) и store.SQLiteHasMemoriesContext
+// (sqlite_readonly.go), которые раньше писали этот запрос трижды под разные
+// имена таблиц. table — константа, заданная кодом (не пользовательский ввод
+// из запроса), но передаётся bind-параметром, а не через Sprintf: это тот же
+// запрос без причин отступать от обычной практики параметризации.
+func sqliteTableExists(ctx context.Context, q sqliteQueryRowContexter, table string) (bool, error) {
 	var name string
-	err := tx.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'`).Scan(&name)
+	err := q.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -226,6 +239,12 @@ func ftsTableExists(ctx context.Context, tx *sql.Tx) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// ftsTableExists сообщает, создана ли уже виртуальная таблица memories_fts (в этой же
+// транзакции — видит незакоммиченные изменения самой миграции).
+func ftsTableExists(ctx context.Context, tx *sql.Tx) (bool, error) {
+	return sqliteTableExists(ctx, tx, "memories_fts")
 }
 
 // hasColumn сообщает, объявлена ли у таблицы table колонка column (PRAGMA
@@ -977,15 +996,11 @@ func (s *sqliteStore) SearchVector(ctx context.Context, vec []float32, q memory.
 // в статическую schema (dim неизвестен заранее) — появляется только после первого
 // ResetVectorIndex.
 func (s *sqliteStore) hasVecTable(ctx context.Context) (bool, error) {
-	var name string
-	err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memories_vec'`).Scan(&name)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	exists, err := sqliteTableExists(ctx, s.db, "memories_vec")
 	if err != nil {
 		return false, fmt.Errorf("чтение sqlite_master: %w", err)
 	}
-	return true, nil
+	return exists, nil
 }
 
 // SemanticNeighbors возвращает до k ближайших по cosine-дистанции живых записей к

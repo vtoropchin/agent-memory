@@ -97,6 +97,18 @@ const (
 	// дедлайна вовсе процесс висел бы до таймаута ОС на хосте, который дропает
 	// пакеты (закрытый firewall, опечатка в адресе).
 	probeStoreTimeout = 10 * time.Second
+
+	// sqliteMemoryCountTimeout — таймаут read-only подсчёта записей в
+	// локальном файле SQLite (findExistingSqliteMemory -> nonEmptySQLiteFile
+	// -> store.SQLiteMemoryCountContext, задача 12.1 доработок): тот же
+	// инвариант "установка не виснет", что у probeStoreTimeout, только для
+	// локального диска, а не сети. Отдельная, более короткая константа, а не
+	// переиспользование probeStoreTimeout: природа операции другая (файловый
+	// ввод-вывод обычно на порядки быстрее сетевого хендшейка) и не должна
+	// незаметно связывать два таймаута друг с другом при будущей правке
+	// одного из них; значения хватает с запасом на обычный локальный диск, но
+	// не даёт зависнуть, если путь ведёт на подвисший сетевой маунт (NFS/SMB).
+	sqliteMemoryCountTimeout = 3 * time.Second
 )
 
 // providerSpec описывает один провайдер эмбеддинга/reasoner: значение флага
@@ -540,10 +552,19 @@ func storeConfigFromInit(cfg initConfig) config.StoreConfig {
 // что у resolveOllamaEmbedState с параметром lookPath, только здесь точка
 // подмены пакетная: менять сигнатуру doInit(cfg, out) нельзя, на ней завязаны
 // все существующие тесты init.
+//
+// Возвращает не только error (доступность — см. probeStoreConnectionLive), но и
+// []string предупреждений о ГОТОВНОСТИ (задача 12.1: pgvector/право CREATE) —
+// они не валят пробу (деградация, а не отказ, DESIGN.md §15), поэтому не могут
+// быть частью error. wizard.go эти предупреждения игнорирует намеренно (см.
+// комментарий у promptPostgresStore) — единственная точка их печати doInit,
+// который в интерактивном прогоне вызывается ПОСЛЕ визарда с теми же
+// параметрами и печатает их ровно один раз.
 var probeStoreConnection = probeStoreConnectionLive
 
 // probeStoreConnectionLive — боевая проба: открывает соединение через
-// store.OpenPostgresReadOnly и дёргает Health.
+// store.OpenPostgresReadOnly, дёргает Health и, поверх того же соединения,
+// диагностику готовности (store.PostgresReadinessChecker).
 //
 // Почему read-only, а не общая фабрика store.Open: Open накатывает схему памяти
 // как побочный эффект открытия (CREATE TABLE/INDEX, триггеры — см. openPostgres),
@@ -555,25 +576,85 @@ var probeStoreConnection = probeStoreConnectionLive
 //
 // Отсутствие схемы памяти на сервере пробу НЕ валит: Health читает только
 // SELECT 1 / server_version / pg_is_in_recovery — «сервер доступен, база
-// открывается» и есть тот факт, который init проверяет.
-// Проба целиком (соединение + Health) ограничена probeStoreTimeout: висящая
-// установка недопустима ни интерактивно, ни под -no-input в CI, поэтому ctx
-// прокидывается и в открытие (store.OpenPostgresReadOnlyContext — ctx-форма
-// специально ради этого случая), и в сам Health.
-func probeStoreConnectionLive(cfg config.StoreConfig) error {
+// открывается» и есть тот факт, который init проверяет. Диагностика готовности
+// (pgvector, право CREATE) идёт тем же соединением ПОСЛЕ Health и тоже не может
+// её завалить — её собственная неудача (напр. нет доступа к pg_extension) тоже
+// превращается в предупреждение, а не в ошибку пробы (см. storeReadinessWarnings).
+//
+// Проба целиком (соединение + Health + диагностика готовности) ограничена
+// probeStoreTimeout: висящая установка недопустима ни интерактивно, ни под
+// -no-input в CI, поэтому один и тот же ctx прокидывается во все три шага
+// (store.OpenPostgresReadOnlyContext — ctx-форма специально ради этого случая).
+func probeStoreConnectionLive(cfg config.StoreConfig) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), probeStoreTimeout)
 	defer cancel()
 
 	st, err := store.OpenPostgresReadOnlyContext(ctx, cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer st.Close()
 
 	if _, err := st.Health(ctx); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return storeReadinessWarningsFor(ctx, st), nil
+}
+
+// storeReadinessWarningsFor делает type-assertion st в
+// store.PostgresReadinessChecker и, если удалось, зовёт storeReadinessWarnings
+// — общая точка для probeStoreConnectionLive (выше) и postgresDatabaseSection
+// (doctor.go), которые раньше независимо повторяли одинаковую проверку и
+// одинаковый комментарий про неё. Диагностика готовности умышленно не часть
+// интерфейса store.Store (см. её комментарий в postgres_readiness.go) — отсюда
+// type-assertion, а не прямой вызов метода: st, не реализующий
+// store.PostgresReadinessChecker, просто не диагностируется (nil, без
+// ошибки) — тот же принцип деградации, что и у самой диагностики внутри
+// storeReadinessWarnings. Store, открытый store.OpenPostgresReadOnly(Context),
+// всегда реализует этот интерфейс (это *pgStore); ok==false сюда дойти не
+// должно, но обе вызывающие стороны не паникуют на этот случай.
+func storeReadinessWarningsFor(ctx context.Context, st store.Store) []string {
+	checker, ok := st.(store.PostgresReadinessChecker)
+	if !ok {
+		return nil
+	}
+	return storeReadinessWarnings(ctx, checker)
+}
+
+// storeReadinessWarnings превращает store.PostgresReadiness (или неудачу самой
+// диагностики) в человекочитаемые предупреждения для вывода `memo init`.
+// Принимает узкий интерфейс store.PostgresReadinessChecker, а не store.Store
+// целиком — держит логику форматирования отделённой от типа-ассерции в
+// probeStoreConnectionLive и юнит-тестируемой без реализации всех ~20 методов
+// store.Store (см. init_readiness_test.go: fakeReadinessChecker).
+func storeReadinessWarnings(ctx context.Context, checker store.PostgresReadinessChecker) []string {
+	readiness, err := checker.CheckPostgresReadiness(ctx)
+	if err != nil {
+		// Таймаут/отмена самого диагностического запроса — отдельная
+		// формулировка, а не общее "не удалось проверить": Health (и, для
+		// probeStoreConnectionLive, сама проба доступности) к этому моменту
+		// уже прошли успешно (это ЕЩЁ один запрос поверх того же соединения),
+		// и текст "не удалось проверить готовность БД" уводит пользователя к
+		// правам/расширениям — хотя настоящая причина в том, что сервер не
+		// успел ответить именно на этот запрос за отведённое время. Без
+		// конкретного значения дедлайна в тексте намеренно: у вызывающих
+		// сторон он разный (probeStoreTimeout в probeStoreConnectionLive,
+		// probeTimeout в doctor.go), а из ctx.Err() узнать, какой именно
+		// сработал, нельзя — печатать здесь один из двух наугад означало бы
+		// иногда врать про длительность.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return []string{"сервер не ответил вовремя — диагностика готовности (pgvector/право CREATE) пропущена, сама проба подключения при этом успешна"}
+		}
+		return []string{fmt.Sprintf("не удалось проверить готовность БД к первому старту memo: %v", err)}
+	}
+	var warnings []string
+	if !readiness.VectorExtension {
+		warnings = append(warnings, "тип PostgreSQL 'vector' (pgvector) не резолвится по search_path целевой схемы — memo попробует создать расширение сам при первом ResetVectorIndex (CREATE EXTENSION IF NOT EXISTS vector); если у роли нет прав на это, векторный слой не поднимется и recall деградирует до чистого лексического поиска (DESIGN.md §15)")
+	}
+	if !readiness.CanCreate {
+		warnings = append(warnings, "у роли нет права CREATE в целевой схеме — первый штатный старт memo не сможет накатить схему памяти; попроси администратора выдать право (GRANT CREATE ON SCHEMA ... TO ...) или создать схему заранее")
+	}
+	return warnings
 }
 
 // dotEnvPostgresPassword достаёт MEMO_POSTGRES_PASSWORD из <dir>/.env — того
@@ -597,6 +678,121 @@ func dotEnvPostgresPassword(dir string) string {
 		return ""
 	}
 	return vars[memoPostgresPasswordEnv]
+}
+
+// resolveConfigRelativePath делает относительный path абсолютным относительно
+// configDir — каталога, где лежит agentmemory.toml, ЧЕЙ путь она читает
+// (findExistingSqliteMemory, кандидат 1). config.Load сам этого не делает
+// (её контракт этой правкой намеренно не трогается — см. границы задачи
+// 12.1 доработок): относительный store.path в TOML читается "как есть" и
+// резолвится позже, каждым потребителем по своим правилам (store.OpenSQLite
+// резолвит его от cwd процесса memo при старте). Для findExistingSqliteMemory
+// это не годится: она вызывается из `memo init`, чей cwd — это не обязательно
+// каталог проекта (-dir может быть любым, в т.ч. относительным к другому
+// cwd) — без этой правки "path = \"./memory.db\"\"" в чужом agentmemory.toml
+// резолвился бы от cwd init, а не от каталога, где сам этот TOML лежит, и
+// подсказка `memo migrate` либо не находила бы реальный файл, либо (что
+// хуже) указывала на случайный посторонний файл с тем же относительным
+// именем в текущем каталоге. path гарантированно непуст — единственный вызов
+// уже под охраной непустого oldCfg.Store.Path.
+//
+// "~/..." (и голый "~") раскрывается через expandHomeLocal, а не второй
+// копией её же предиката "начинается с ~": пробуем раскрыть path и смотрим,
+// получился ли абсолютный путь — раскрытый "~/..." всегда абсолютен, уже
+// абсолютный path тоже (expandHomeLocal его не трогает и возвращает как
+// есть), а обычный относительный — нет, ему и нужен Join с configDir.
+func resolveConfigRelativePath(configDir, path string) string {
+	if expanded, err := expandHomeLocal(path); err == nil && filepath.IsAbs(expanded) {
+		return expanded
+	}
+	return filepath.Join(configDir, path)
+}
+
+// findExistingSqliteMemory ищет непустой локальный файл SQLite с накопленной
+// памятью, перенос которой в PostgreSQL имеет смысл подсказать через `memo
+// migrate` (DESIGN.md §14 Этап 12, задача 12.1). Кандидаты, в порядке
+// проверки:
+//  1. путь, который записал в <dir>/agentmemory.toml предыдущий прогон `memo
+//     init` (если проект раньше был настроен на sqlite — самый прямой
+//     источник истины про то, каким файлом проект реально пользовался, точнее
+//     любого дефолта);
+//  2. штатный дефолт `~/.agentmemory/memory.db` (defaultStorePath) — общий
+//     файл на все проекты (DESIGN.md §2.1), которым можно было пользоваться и
+//     без собственного agentmemory.toml.
+//
+// Должна вызываться ДО overwriteFile(agentmemory.toml, ...) в doInit: после
+// перезаписи старый путь (кандидат 1) уже потерян — новый agentmemory.toml
+// содержит postgres, а renderStoreTomlBlock для postgres поле path не пишет.
+//
+// Возвращает "" (без подсказки) первым значением, если ни один кандидат не
+// найден или найденные — пустые/недоступные/битые; не создаёт отсутствующих
+// файлов и не накатывает схему ни при каких обстоятельствах (см.
+// store.SQLiteHasMemoriesContext). Второе значение — предупреждение, если хотя
+// бы одну из проверок кандидатов не удалось довести до конца (nonEmptySQLiteFile
+// вернула checkWarning) и при этом ни один более поздний кандидат не нашёлся:
+// симметрично тому, как диагностика готовности PostgreSQL в этой же задаче не
+// молчит при таймауте, а печатает "диагностика пропущена" — см. её комментарий.
+// Если хоть один кандидат найден, предыдущие неудачные проверки не репортятся:
+// подсказка про migrate напечатана, беспокоиться не о чем.
+func findExistingSqliteMemory(dir string) (path string, checkWarning string) {
+	var candidates []string
+	// config.Load("<dir>/agentmemory.toml") при отсутствующем файле тихо
+	// возвращает config.Default() без ошибки — Store.Path тогда равен
+	// defaultStorePath, то есть совпадёт со вторым кандидатом ниже и будет
+	// отфильтрован дедупом; ошибка возможна только на битом существующем
+	// файле — тогда просто не используем кандидата 1, до второго кандидата
+	// это не мешает дойти.
+	if oldCfg, err := config.Load(filepath.Join(dir, "agentmemory.toml")); err == nil {
+		if (oldCfg.Store.Driver == "" || oldCfg.Store.Driver == storeDriverSQLite) && oldCfg.Store.Path != "" {
+			candidates = append(candidates, resolveConfigRelativePath(dir, oldCfg.Store.Path))
+		}
+	}
+	candidates = append(candidates, defaultStorePath)
+
+	seen := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		expanded, err := expandHomeLocal(c)
+		if err != nil || seen[expanded] {
+			continue
+		}
+		seen[expanded] = true
+		found, warn := nonEmptySQLiteFile(expanded)
+		if found {
+			return expanded, ""
+		}
+		if warn != "" && checkWarning == "" {
+			checkWarning = warn
+		}
+	}
+	return "", checkWarning
+}
+
+// nonEmptySQLiteFile сообщает, есть ли в файле SQLite path хотя бы одна
+// запись памяти — точная read-only проверка (store.SQLiteHasMemoriesContext), а
+// не эвристика по размеру файла: прежняя версия судила "непустоту" по
+// суммарному размеру файла + WAL-журнала относительно калиброванного порога,
+// что было хрупко к любой будущей миграции схемы (новая таблица/индекс
+// поднимает базовый размер пустой БД и порог начинает ложно срабатывать).
+//
+// Ограничена sqliteMemoryCountTimeout — тот же инвариант "установка не
+// виснет", что у пробы postgres (probeStoreTimeout): findExistingSqliteMemory
+// проверяет до двух кандидатов, каждый этой функцией.
+//
+// Не создаёт отсутствующий файл и не накатывает схему (см. комментарий у
+// store.SQLiteHasMemoriesContext — та же логика, что у read-only пробы postgres
+// выше). Второй результат — непустая строка, если сама проверка не завершилась
+// (файл поврежён, недоступен, таймаут на подвисшем сетевом маунте) — в отличие
+// от "файла нет" (типичный случай, не ошибка), это стоит показать пользователю:
+// findExistingSqliteMemory пробрасывает её как предупреждение, чтобы не
+// молчать о том, что накопленная память могла остаться незамеченной.
+func nonEmptySQLiteFile(path string) (found bool, checkWarning string) {
+	ctx, cancel := context.WithTimeout(context.Background(), sqliteMemoryCountTimeout)
+	defer cancel()
+	has, err := store.SQLiteHasMemoriesContext(ctx, path)
+	if err != nil {
+		return false, fmt.Sprintf("не удалось проверить файл SQLite %s на накопленную память: %v — если там есть данные, подсказка про `memo migrate` может не появиться", path, err)
+	}
+	return has, ""
 }
 
 // validatePostgresPort — единственное место с правилом допустимого порта в
@@ -922,8 +1118,19 @@ func doInit(cfg initConfig, out io.Writer) error {
 			// cfg (и, значит, в перезапись .env ниже) он не возвращается.
 			storeCfg.Password = dotEnvPostgresPassword(cfg.Dir)
 		}
-		if err := probeStoreConnection(storeCfg); err != nil {
+		warnings, err := probeStoreConnection(storeCfg)
+		if err != nil {
 			return fmt.Errorf("хранилище %s недоступно: %w (проверь адрес, что база и роль созданы и что пароль передан -postgres-password или лежит в %s/.env)", storeCfg.Target(), err, cfg.Dir)
+		}
+		// Единственная точка печати предупреждений о ГОТОВНОСТИ (в отличие от
+		// ошибки доступности выше, они не мешают init продолжить, DESIGN.md
+		// §15) — интерактивный визард (wizard.go promptPostgresStore) делает
+		// свою пробу молча по этой части и печатает их не сам: он вызывается
+		// ДО doInit с теми же параметрами, doInit пробует снова (см.
+		// комментарий у него самого) и печатает warnings ровно один раз,
+		// независимо от того, интерактивный это прогон или -no-input.
+		for _, w := range warnings {
+			fmt.Fprintf(out, "warning: %s\n", w)
 		}
 	}
 
@@ -940,6 +1147,21 @@ func doInit(cfg initConfig, out io.Writer) error {
 
 	tomlContent := fmt.Sprintf(configTomlTemplate,
 		escapeTOMLString(project), renderStoreTomlBlock(cfg), renderEmbedderTomlBlock(cfg), renderReasonerTomlBlock(cfg))
+
+	// Подсказка про `memo migrate` (задача 12.1) ищет локальный SQLite СЕЙЧАС,
+	// до overwriteFile(agentmemory.toml, ...) ниже: тот перезапишет секцию
+	// [store] на postgres, и путь, которым проект пользовался раньше (если
+	// был настроен на sqlite), станет недоступен для findExistingSqliteMemory.
+	// Сам перенос init не делает (задача прямо это оговаривает) — только
+	// печатает готовую команду в конце (см. ниже).
+	var sqliteMigrationHint string
+	if cfg.StoreDriver == storeDriverPostgres {
+		var warn string
+		sqliteMigrationHint, warn = findExistingSqliteMemory(cfg.Dir)
+		if warn != "" {
+			fmt.Fprintf(out, "warning: %s\n", warn)
+		}
+	}
 
 	// .mcp.json/opencode.json — запись сервера memo мержится в существующий
 	// файл (mergeMCPConfig), а не перезаписывает его целиком: единственный
@@ -1027,6 +1249,33 @@ func doInit(cfg initConfig, out io.Writer) error {
 	// старта memo и секцией «БД» в `memo doctor`: путь к файлу для sqlite,
 	// postgres://host:port/dbname для postgres (без пароля).
 	fmt.Fprintf(out, "хранилище: %s\n", storeCfg.Target())
+	if sqliteMigrationHint != "" {
+		// formatMigrateEndpoint (migrate.go) — обратная к её же parseMigrateEndpoint:
+		// один источник синтаксиса "sqlite:<путь>"/"postgres://user@host:port/dbname?..."
+		// для парсера и для этой подсказки, вместо третьего независимого способа
+		// собрать ту же строку. Пароль в напечатанную команду не попадает никогда
+		// (DESIGN.md §13, то же правило, что у agentmemory.toml) — formatMigrateEndpoint
+		// обнуляет его сама, даже если в storeCfg к этому моменту лежит пароль для
+		// пробы выше (в т.ч. восстановленный из <dir>/.env).
+		srcCfg := config.StoreConfig{Driver: storeDriverSQLite, Path: sqliteMigrationHint}
+		fmt.Fprintf(out, "обнаружена локальная память %s — перенос в общую базу init не делает сам, команда для переноса:\n", sqliteMigrationHint)
+		// shellQuoteSingle, а не %q: %q — Go-синтаксис двойных кавычек, он не
+		// экранирует $, обратные кавычки и ! — путь вроде "/home/u/$PROJ/memory.db",
+		// напечатанный так и скопированный в sh/bash/zsh, подставил бы значение
+		// переменной $PROJ вместо буквального символа (см. её комментарий).
+		fmt.Fprintf(out, "  memo migrate %s %s\n", shellQuoteSingle(formatMigrateEndpoint(srcCfg)), shellQuoteSingle(formatMigrateEndpoint(storeCfg)))
+		// Пароль команда migrate возьмёт сама — из окружения (MEMO_POSTGRES_PASSWORD)
+		// или из .env, куда его положил этот же прогон init (или предыдущий,
+		// см. dotEnvPostgresPassword) — та же логика, что подхватывает пароль у
+		// остальных подкоманд memo (loadDotEnvForConfig, задача 12.1 доработок).
+		//
+		// Про «запусти из этого каталога» сказано не для красоты: у migrate нет
+		// -config, поэтому loadDotEnvForConfig ищет .env в ТЕКУЩЕМ каталоге
+		// процесса (см. runMigrate), а не рядом с конфигом проекта. Скопированная
+		// в другой каталог команда пароль из <dir>/.env не увидит и упадёт на
+		// аутентификации — проверено живым прогоном.
+		fmt.Fprintf(out, "  (запусти её из %s — пароль команда возьмёт сама из переменной окружения %s или из лежащего там .env)\n", cfg.Dir, memoPostgresPasswordEnv)
+	}
 	fmt.Fprintln(out, "дальше: перезапусти агентское приложение в этом каталоге и одобри сервер `memo`; убедись, что memo доступен — `go install` кладёт его на PATH (см. `make install`).")
 	return nil
 }
@@ -1059,6 +1308,28 @@ func escapeTOMLString(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
+}
+
+// shellQuoteSingle оборачивает s в одинарные кавычки — единственная
+// переносимая (POSIX sh/bash/zsh) форма, внутри которой ни один спецсимвол
+// шелла ($, обратная кавычка, !, обратный слэш, двойная кавычка и т.д.) не
+// интерполируется вовсе. Единственный символ, который сам по себе ломает
+// такую строку — одинарная кавычка; стандартный приём её экранирования:
+// закрыть строку, вставить экранированную кавычку снаружи неё, открыть строку
+// заново — код ниже отдельным блоком, чтобы форматтер doc-комментариев не
+// принял пример за обычную прозу и не переформатировал кавычки в нём:
+//
+//	вход:  foo'bar
+//	выход: 'foo'\''bar'
+//
+// Используется для печати аргументов подсказки `memo migrate` (doInit) — путь
+// к файлу или DSN пользователь копирует прямо в шелл, и он может содержать что
+// угодно, включая $ в имени переменной окружения ($HOME) или в самом пути.
+// Go-кавычки (%q) для этого не годятся: это синтаксис Go/C-строк, шелл видит в
+// них обычные двойные кавычки — $, обратная кавычка и ! внутри них по-прежнему
+// интерполируются шеллом (в bash/zsh ещё и history expansion на "!").
+func shellQuoteSingle(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // buildProviderEnv собирает карту env-плейсхолдеров ТОЛЬКО для выбранных
