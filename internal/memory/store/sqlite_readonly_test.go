@@ -12,8 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"agentmemory/internal/memory"
 )
 
 func fileExists(t *testing.T, path string) bool {
@@ -41,14 +39,7 @@ func TestSQLiteHasMemoriesContext_DoesNotLeaveWALFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
-	m := memory.Memory{
-		Id: newID(t), Kind: memory.KindSemantic, Scope: "project:x",
-		Content: "запись", Importance: 3, CreatedAt: 1, UpdatedAt: 1,
-	}
-	if err := s.Put(context.Background(), m); err != nil {
-		s.Close()
-		t.Fatalf("Put: %v", err)
-	}
+	putTestMemory(t, s, nil)
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -150,9 +141,8 @@ func TestSQLiteHasMemoriesContext_EscapesSpecialCharsInPath(t *testing.T) {
 	// Настоящий файл: имя содержит "?" и "%" — оба символа, ломающие
 	// неэкранированную подстановку в file:-URI. Создаётся напрямую через
 	// database/sql с тем же escapeSQLiteURIPath, который проверяем (а не
-	// через OpenSQLite — та же сырая подстановка пути есть и в OpenSQLite,
-	// см. отчёт по задаче: воспроизводится этим же trap-приёмом, но чинить
-	// её в рамках этой задачи не входит в объём работы).
+	// через OpenSQLite — та же проверка для OpenSQLite есть отдельно,
+	// TestOpenSQLite_EscapesSpecialCharsInPath в sqlite_test.go, задача 12.2).
 	real := filepath.Join(dir, "memory.db?1%2f")
 	realDB, err := sql.Open("sqlite3", "file:"+escapeSQLiteURIPath(real))
 	if err != nil {
@@ -176,6 +166,33 @@ func TestSQLiteHasMemoriesContext_EscapesSpecialCharsInPath(t *testing.T) {
 	}
 	if !has {
 		t.Errorf("has = false для %q, хочу true (запись настоящего файла, а не пустая ловушка %q)", real, trap)
+	}
+}
+
+// TestSQLiteLegacyURIPath — покрытие percent-декодирования (механика и её
+// обоснование — в доккомментарии SQLiteLegacyURIPath, sqlite_readonly.go):
+// валидный "%XX", "%25" (сам "%", закодированный), неполный "%4" в конце
+// строки и невалидный hex "%zz" остаются буквальными, путь без "%" не
+// трогается вовсе.
+func TestSQLiteLegacyURIPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"валидный %41 декодируется в A", "/x/profile%41.db", "/x/profileA.db"},
+		{"%25 декодируется в буквальный %", "/x/100%25.db", "/x/100%.db"},
+		{"неполный %4 в конце строки не трогается", "/x/memory%4.db", "/x/memory%4.db"},
+		{"невалидный hex %zz не трогается", "/x/memory%zz.db", "/x/memory%zz.db"},
+		{"путь без % не трогается", "/x/memory.db", "/x/memory.db"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SQLiteLegacyURIPath(tc.path)
+			if got != tc.want {
+				t.Errorf("SQLiteLegacyURIPath(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+		})
 	}
 }
 

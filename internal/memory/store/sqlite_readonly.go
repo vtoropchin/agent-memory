@@ -12,6 +12,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -113,7 +114,7 @@ func SQLiteHasMemoriesContext(ctx context.Context, path string) (bool, error) {
 		return false, fmt.Errorf("проверка файла %q: %w", expanded, err)
 	}
 
-	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1&_busy_timeout=5000", escapeSQLiteURIPath(expanded))
+	dsn := sqliteDSN(expanded, "mode=ro&immutable=1&_busy_timeout=5000")
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return false, fmt.Errorf("открытие sqlite %q (read-only): %w", expanded, err)
@@ -175,20 +176,62 @@ func walLikelyHasUncommittedData(dbPath string) bool {
 	return fi.Size() > sqliteWALHeaderSize
 }
 
-// escapeSQLiteURIPath экранирует path по правилам SQLite для превращения
-// файлового пути в "file:"-URI (https://www.sqlite.org/uri.html, раздел 3.1
-// "Converting A Filename Into A URI"): официальный минимальный рецепт SQLite
-// — заменить "?" на "%3f" и "#" на "%23" (иначе эти символы обрываются как
+// escapeSQLiteURIPath экранирует path по мотивам рецепта SQLite для
+// превращения файлового пути в "file:"-URI (https://www.sqlite.org/uri.html,
+// раздел 3.1 "Converting A Filename Into A URI"): минимальный рецепт SQLite —
+// заменить "?" на "%3f" и "#" на "%23" (иначе эти символы обрываются как
 // начало query-строки/фрагмента URI, а path утекает не туда, куда ожидалось,
 // без единой ошибки от драйвера). Экранирование "%" добавлено сверх рецепта
 // sqlite.org намеренно: без него буквальный "%" в имени файла (например,
 // "%2f") SQLite прочитал бы как уже готовую percent-encoded последовательность
 // и подставил бы декодированный байт в путь, снова открыв не тот файл.
 // Порядок важен: "%" экранируется ПЕРВЫМ, до "?" и "#" — иначе "%", только
-// что вставленный на месте "?"/"#", был бы экранирован повторно.
+// что вставленный на месте "?"/"#", был бы экранирован повторно. Функция НЕ
+// покрывает весь рецепт §3.1 целиком — путь, начинающийся с "//", SQLite
+// трактует как URI-authority и отказывается открывать ("invalid uri
+// authority"); эта функция такой путь не экранирует и не отклоняет (границы
+// задачи 12.2 это не требовали, см. tasks/12.2-sqlite-uri-escaping.md).
 func escapeSQLiteURIPath(path string) string {
 	path = strings.ReplaceAll(path, "%", "%25")
 	path = strings.ReplaceAll(path, "?", "%3f")
 	path = strings.ReplaceAll(path, "#", "%23")
 	return path
+}
+
+// SQLiteLegacyURIPath возвращает путь, который до задачи 12.2 получил бы
+// прежний, неэкранирующий код OpenSQLite (`fmt.Sprintf("file:%s?...",
+// expanded)`, path — уже раскрытый expandHome абсолютный/относительный путь,
+// тот же контракт входа, что у escapeSQLiteURIPath) — то есть путь ПОСЛЕ
+// percent-декодирования, которое сам SQLite применяет к сегменту пути
+// "file:"-URI. Нужна ревизией по итогам ревью 12.2 для memo doctor
+// (applyLegacyURIWarning в cmd/memo/doctor.go): путь на диске, содержащий
+// валидную последовательность "%XX" (например, файл назвали "profile%41.db"),
+// раньше открывался SQLite как декодированный "profileA.db" — другой,
+// физически отдельный файл. Правка 12.2 экранирует "%" сама, поэтому теперь
+// открывается буквально "profile%41.db"; старая база по декодированному пути
+// при этом не удаляется и не мигрируется — тихо становится сиротой. Если path
+// не содержит "%" вовсе (подавляющее большинство путей) или декодирование
+// ничего не меняет, возвращается сам path — вызывающая сторона сравнивает
+// результат со своим входом сама, второго возвращаемого значения для этого
+// не нужно.
+//
+// Реализована через net/url.PathUnescape — ту же percent-decoding семантику,
+// что и остальной стандартный Go-инструментарий URI/URL, вместо собственного
+// разбора hex-цифр. Невалидная percent-последовательность (одинокий "%" в
+// конце строки, "%" перед не-hex-символом, незавершённый "%4" перед концом
+// строки) — PathUnescape в этом случае возвращает ошибку, и path отдаётся без
+// изменений. Из этого следует одно расхождение с тем, что реально сделал бы
+// старый код OpenSQLite: если в пути ОДНА последовательность валидна, а
+// другая (дальше по той же строке) — нет (например, "a%41b%zz.db"),
+// PathUnescape отклоняет путь целиком, тогда как SQLite декодировал бы
+// валидную часть и оставил невалидную как есть. Это осознанно безопасное
+// направление для диагностики doctor: лучше не показать предупреждение о
+// переносе памяти там, где старый путь на самом деле декодировался бы иначе,
+// чем показать неверный "старый" путь.
+func SQLiteLegacyURIPath(path string) string {
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return path
+	}
+	return decoded
 }

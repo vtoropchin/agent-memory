@@ -403,6 +403,20 @@ func defaultNow() int64 {
 	return time.Now().Unix()
 }
 
+// sqliteDSN собирает "file:"-URI для sql.Open("sqlite3", ...) из уже
+// раскрытого (expandHome) пути и query-параметров params. Единственная точка
+// сборки sqlite-DSN в пакете — используется и OpenSQLite (рабочее открытие),
+// и SQLiteHasMemoriesContext (read-only диагностика, sqlite_readonly.go): до
+// задачи 12.2 эти два места собирали DSN независимо, и OpenSQLite подставляла
+// path сырым, без escapeSQLiteURIPath — путь с "%"/"?"/"#" (см. её
+// доккомментарий) обрывался или decode'ился не так, как ожидалось, при
+// каждом обычном старте memo, а не только в диагностике. Для путей без этих
+// символов (подавляющее большинство) escapeSQLiteURIPath — тождественная
+// операция, поэтому итоговый DSN не меняется.
+func sqliteDSN(path, params string) string {
+	return fmt.Sprintf("file:%s?%s", escapeSQLiteURIPath(path), params)
+}
+
 // OpenSQLite открывает (или создаёт) файл SQLite по указанному пути, применяет
 // схему и возвращает готовый Store. Путь может начинаться с `~` — раскрывается в
 // домашний каталог пользователя. Родительские директории создаются при
@@ -425,7 +439,7 @@ func OpenSQLite(path string) (*sqliteStore, error) {
 	// процесса. Должно быть вызвано до sql.Open. Идемпотентно.
 	sqlite_vec.Auto()
 
-	dsn := fmt.Sprintf("file:%s?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000", expanded)
+	dsn := sqliteDSN(expanded, "_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000")
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("открытие sqlite %q: %w", expanded, err)

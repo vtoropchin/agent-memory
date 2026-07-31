@@ -132,7 +132,8 @@ API из 6.2.
 | Задача | Файл | Статус |
 |--------|------|--------|
 | 12.1 `init` + postgres: проверка готовности базы и подсказка про `memo migrate` | [12.1-init-postgres-followups.md](12.1-init-postgres-followups.md) | ✅ выполнена |
-| 12.2 Единое экранирование пути в `file:`-URI для SQLite (`OpenSQLite` vs `escapeSQLiteURIPath`) | [12.2-sqlite-uri-escaping.md](12.2-sqlite-uri-escaping.md) | ⬜ ожидает |
+| 12.2 Единое экранирование пути в `file:`-URI для SQLite (`OpenSQLite` vs `escapeSQLiteURIPath`) | [12.2-sqlite-uri-escaping.md](12.2-sqlite-uri-escaping.md) | ✅ выполнена |
+| 12.3 Пустой `store.path` для sqlite молча открывает анонимную временную БД | [12.3-empty-sqlite-path.md](12.3-empty-sqlite-path.md) | ⬜ ожидает |
 
 ### Отклонённые идеи (чтобы не возвращаться)
 

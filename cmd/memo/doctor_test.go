@@ -218,6 +218,98 @@ func TestDatabaseSection_MissingFile(t *testing.T) {
 	}
 }
 
+// TestStoreSection_LegacyURIWarning — ревизия по итогам ревью задачи 12.2:
+// путь, содержащий валидный "%XX" (тут — "%41"), теперь открывается
+// OpenSQLite буквально ("profile%41.db"), а раньше (до экранирования "%" в
+// sqliteDSN) SQLite декодировал бы его в другой, физически отдельный файл
+// ("profileA.db", см. store.SQLiteLegacyURIPath). Табличная сводка всех
+// четырёх комбинаций "есть ли память по декодированному ('legacy') пути" x
+// "создан ли буквальный файл, который теперь реально откроет OpenSQLite" —
+// applyLegacyURIWarning (doctor.go) должен реагировать на первое условие и
+// не трогать статус, выставленный вторым, если он уже не statusOK.
+func TestStoreSection_LegacyURIWarning(t *testing.T) {
+	tests := []struct {
+		name          string
+		seedLegacy    bool // положить память в legacy-путь ("profileA.db")
+		createLiteral bool // создать (пустой) буквальный файл ("profile%41.db")
+		wantStatus    status
+		wantMigrate   bool // ожидаем подсказку `memo migrate` в Detail
+	}{
+		{
+			name:          "legacy с памятью, буквальный файл существует — предупреждение поднимает ok до warn",
+			seedLegacy:    true,
+			createLiteral: true,
+			wantStatus:    statusWarn,
+			wantMigrate:   true,
+		},
+		{
+			name:          "legacy пуст, буквальный файл существует — переносить нечего, предупреждения нет",
+			seedLegacy:    false,
+			createLiteral: true,
+			wantStatus:    statusOK,
+			wantMigrate:   false,
+		},
+		{
+			name:          "legacy с памятью, буквального файла нет — статус остаётся fail, но причина объяснена",
+			seedLegacy:    true,
+			createLiteral: false,
+			wantStatus:    statusFail,
+			wantMigrate:   true,
+		},
+		{
+			name:          "legacy пуст, буквального файла нет — обычный fail без предупреждения",
+			seedLegacy:    false,
+			createLiteral: false,
+			wantStatus:    statusFail,
+			wantMigrate:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			legacyPath := filepath.Join(dir, "profileA.db")
+			newPath := filepath.Join(dir, "profile%41.db")
+
+			if tc.seedLegacy {
+				legacySt, err := store.OpenSQLite(legacyPath)
+				if err != nil {
+					t.Fatalf("OpenSQLite(legacy): %v", err)
+				}
+				putDoctorMemory(t, legacySt, nil)
+				if err := legacySt.Close(); err != nil {
+					t.Fatalf("Close(legacy): %v", err)
+				}
+			}
+			if tc.createLiteral {
+				newSt, err := store.OpenSQLite(newPath)
+				if err != nil {
+					t.Fatalf("OpenSQLite(new): %v", err)
+				}
+				if err := newSt.Close(); err != nil {
+					t.Fatalf("Close(new): %v", err)
+				}
+			}
+
+			sec, st := storeSection(config.StoreConfig{Path: newPath})
+			if st != nil {
+				defer st.Close()
+			}
+
+			if sec.Status != tc.wantStatus {
+				t.Errorf("Status = %s, хочу %s", sec.Status, tc.wantStatus)
+			}
+			hasMigrateHint := strings.Contains(sec.Detail, "memo migrate")
+			if hasMigrateHint != tc.wantMigrate {
+				t.Errorf("Detail = %q, наличие подсказки `memo migrate` = %v, хочу %v", sec.Detail, hasMigrateHint, tc.wantMigrate)
+			}
+			if tc.wantMigrate && !strings.Contains(sec.Detail, legacyPath) {
+				t.Errorf("Detail = %q, хочу упоминание старого пути %q", sec.Detail, legacyPath)
+			}
+		})
+	}
+}
+
 func TestRunDoctor_MissingDBFileExitsNonZero(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "no-such.db")
 	tomlPath := writeMinimalConfig(t, t.TempDir(), missing)

@@ -274,12 +274,91 @@ func configSection(cfg config.Config, configPath string) section {
 func storeSection(cfg config.StoreConfig) (section, store.Store) {
 	switch cfg.Driver {
 	case "", "sqlite":
-		return databaseSection(cfg.Path)
+		sec, st := databaseSection(cfg.Path)
+		return applyLegacyURIWarning(cfg.Path, sec), st
 	case "postgres":
 		return postgresDatabaseSection(cfg)
 	default:
 		return section{Name: "БД", Status: statusFail, Detail: fmt.Sprintf("неизвестный store.driver %q", cfg.Driver)}, nil
 	}
+}
+
+// applyLegacyURIWarning — ревизия по итогам ревью задачи 12.2
+// (tasks/12.2-sqlite-uri-escaping.md): экранирование "%" в sqliteDSN
+// (store.escapeSQLiteURIPath) поменяло, КАКОЙ физический файл открывает
+// store.OpenSQLite для путей, содержащих валидную последовательность "%XX"
+// (пример: "profile%41.db" раньше SQLite декодировал в "profileA.db" —
+// другой, отдельный файл; теперь открывается буквально "profile%41.db" — см.
+// доккомментарий store.SQLiteLegacyURIPath, там же вся механика percent-
+// декодирования). Старая база по декодированному пути при этом никуда не
+// переносится и не удаляется — тихо становится сиротой, и ни OpenSQLite (не
+// роняет ошибку — просто создаёт новый пустой файл), ни остальные секции
+// doctor (проверяют уже открытый st, т.е. новый файл) этого не заметят.
+// databaseSection делает os.Stat по буквальному пути ДО открытия — тем же
+// приёмом, что и здесь, но он не знает о "старом" пути вовсе.
+//
+// Почему не в самом OpenSQLite/при обычном старте memo, а только здесь: при
+// каждом старте (в отличие от однократного read-only прогона doctor) это
+// значило бы ещё одно read-only open+запрос к ВТОРОМУ файлу на КАЖДЫЙ запуск
+// memo/MCP-сервера ради узкого случая ("%XX" в пути — редкость), да ещё и по
+// пути, который сам же memo больше никогда не откроет как рабочий — лишняя
+// работа и задержка старта без соразмерной пользы. doctor уже read-only
+// диагностика, вызывается по требованию, и для неё лишний проверочный запрос
+// — обычное дело (см. остальные секции).
+//
+// Проверка "старого" пути идёт через nonEmptySQLiteFile (init.go, тот же
+// пакет main, задача 12.1 доработок) — тот же read-only помощник, что и у
+// подсказки `memo init` про `memo migrate`, с таймаутом sqliteMemoryCountTimeout,
+// а не probeTimeout: probeTimeout откалиброван под СЕТЕВЫЕ пробы живости
+// Embedder/Reasoner (см. её комментарий), природа же этой проверки — локальный
+// файловый ввод-вывод, который не должен незаметно делить таймаут с сетевым.
+//
+// rawPath — тот же нераскрытый cfg.Store.Path, что получает databaseSection.
+// sec — уже готовая секция «БД» (её Detail/Status не переопределяются, а
+// дополняются: если декодирование ничего не меняет для rawPath — подавляющее
+// большинство путей без "%" — sec возвращается как есть). Диагностика мягкая:
+// любая ошибка самой проверки (раскрытие "~", повреждённый файл, нет прав,
+// таймаут) просто оставляет sec без изменений — тот же принцип, что у
+// nonEmptySQLiteFile (не превращать диагностику предупреждения в повод
+// завалить весь отчёт). Статус повышается до statusWarn только если секция
+// была statusOK — если она уже statusFail (например, буквальный путь не
+// существует вовсе — вероятный симптом именно этой подмены), реальная
+// проблема правдивее описывается как Fail, а не Warn; предупреждение при этом
+// всё равно добавляется в Detail, чтобы объяснить вероятную причину.
+func applyLegacyURIWarning(rawPath string, sec section) section {
+	expanded, err := expandHomeLocal(rawPath)
+	if err != nil {
+		return sec
+	}
+	legacy := store.SQLiteLegacyURIPath(expanded)
+	if legacy == expanded {
+		return sec
+	}
+
+	has, _ := nonEmptySQLiteFile(legacy)
+	if !has {
+		return sec
+	}
+
+	// Готовая команда `memo migrate` вместо голого упоминания её имени —
+	// doctor знает оба пути (старый и текущий), а формат "sqlite:<путь>"
+	// формирует formatMigrateEndpoint (migrate.go), уже используемая для той
+	// же подсказки в `memo init` (doInit, init.go): один источник синтаксиса
+	// вместо третьего независимого способа собрать ту же строку.
+	// shellQuoteSingle — та же причина, что и там: путь может содержать $,
+	// обратные кавычки и другие спецсимволы шелла.
+	migrateCmd := fmt.Sprintf("memo migrate %s %s",
+		shellQuoteSingle(formatMigrateEndpoint(config.StoreConfig{Driver: storeDriverSQLite, Path: legacy})),
+		shellQuoteSingle(formatMigrateEndpoint(config.StoreConfig{Driver: storeDriverSQLite, Path: expanded})),
+	)
+	sec.Detail = fmt.Sprintf(
+		"%s; ⚠ раньше memo открывал по этому пути другой файл — %s (percent-декодирование %%XX в прежнем, неэкранирующем коде) — и в нём есть накопленная память; перенеси её: `%s` (или поправь store.path)",
+		sec.Detail, legacy, migrateCmd,
+	)
+	if sec.Status == statusOK {
+		sec.Status = statusWarn
+	}
+	return sec
 }
 
 // databaseSection — секция 2 для sqlite: существование и размер файла БД,

@@ -27,6 +27,26 @@ func newID(t *testing.T) string {
 	return ulid.Make().String()
 }
 
+// putTestMemory кладёт в st одну живую запись памяти с разумными дефолтами
+// (по образцу putDoctorMemory в cmd/memo/doctor_test.go) — общий хелпер для
+// тестов, которым нужна лишь произвольная запись, а не конкретное её
+// содержимое. Возвращает Id заведённой записи для последующей проверки (Get,
+// SQLiteHasMemoriesContext и т.п.).
+func putTestMemory(t *testing.T, st Store, mutate func(*memory.Memory)) string {
+	t.Helper()
+	m := memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: "project:x",
+		Content: "запись", Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	}
+	if mutate != nil {
+		mutate(&m)
+	}
+	if err := st.Put(context.Background(), m); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	return m.Id
+}
+
 func strPtr(s string) *string { return &s }
 
 func int64Ptr(v int64) *int64 { return &v }
