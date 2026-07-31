@@ -68,8 +68,16 @@ var webFS embed.FS
 
 // runWeb разбирает флаги подкоманды `web` и поднимает HTTP-сервер поверх
 // Store. Вынесена из диспетчера в main.go для тестируемости (по образцу
-// runInit). .env/reasoner/embedder не создаются — морда только читает store
+// runInit). Reasoner/Embedder не создаются — морда только читает store
 // лексически (без ollama/DeepSeek).
+//
+// .env при этом грузится наравне с остальными подкомандами (задача 12: до
+// появления PostgreSQL-бэкенда морде секреты были не нужны вовсе — .env
+// хранил только ключи LLM-провайдеров, которыми она не пользуется, поэтому
+// загрузку сознательно пропускали. С driver="postgres" в .env лежит
+// MEMO_POSTGRES_PASSWORD — секрет САМОГО хранилища, без которого не открыть
+// store, а значит пропуск загрузки ронял `memo web` на аутентификации там,
+// где все прочие команды работали).
 func runWeb(args []string, stdout io.Writer) error {
 	flagSet := flag.NewFlagSet("web", flag.ExitOnError)
 	flagSet.SetOutput(stdout)
@@ -82,6 +90,8 @@ func runWeb(args []string, stdout io.Writer) error {
 	configPath := flagSet.String("config", "", "путь к TOML-конфигу (опционально)")
 	dbPath := flagSet.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	_ = flagSet.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора
+
+	loadDotEnvForConfig(*configPath, "memo web")
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {

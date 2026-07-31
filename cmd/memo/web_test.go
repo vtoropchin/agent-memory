@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -952,5 +954,49 @@ func TestStaticIndexServed(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("статус = %d, хочу 200 (index.html из embed.FS)", resp.StatusCode)
+	}
+}
+
+// TestRunWeb_LoadsDotEnvBeforeOpeningStore закрепляет регрессию: `memo web`
+// была единственной подкомандой, которая не вызывала loadDotEnvForConfig.
+// Пока .env хранил только ключи LLM-провайдеров, морде не нужные, это ничего
+// не ломало — но с driver="postgres" там лежит MEMO_POSTGRES_PASSWORD, секрет
+// самого хранилища, и `memo web -config …` падал на аутентификации там, где
+// recall/save/doctor/migrate работали.
+//
+// Проверяем именно порядок: .env должен быть прочитан ДО открытия store.
+// Конфиг указывает на заведомо недоступный адрес, поэтому runWeb обязан
+// вернуть ошибку подключения — но к этому моменту переменная из .env уже
+// должна стоять в окружении.
+func TestRunWeb_LoadsDotEnvBeforeOpeningStore(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "agentmemory.toml")
+	cfg := "" +
+		"[store]\n" +
+		"driver  = \"postgres\"\n" +
+		"host    = \"127.0.0.1\"\n" +
+		"port    = 1\n" + // никто не слушает — connection refused сразу, без сети
+		"user    = \"memo\"\n" +
+		"dbname  = \"memo\"\n" +
+		"sslmode = \"disable\"\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("запись конфига: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("MEMO_POSTGRES_PASSWORD=from-dotenv\n"), 0o600); err != nil {
+		t.Fatalf("запись .env: %v", err)
+	}
+
+	// Пустое значение в shell-env перекрывается значением из .env (см.
+	// TestLoadDotEnv_EmptyEnvOverriddenByDotEnv); t.Setenv вернёт прежнее
+	// окружение после теста.
+	t.Setenv(memoPostgresPasswordEnv, "")
+
+	err := runWeb([]string{"-config", cfgPath}, io.Discard)
+	if err == nil {
+		t.Fatal("runWeb вернула nil, хочу ошибку подключения к недоступному хосту")
+	}
+
+	if got := os.Getenv(memoPostgresPasswordEnv); got != "from-dotenv" {
+		t.Errorf("%s = %q, хочу \"from-dotenv\" — .env не загружен до открытия хранилища", memoPostgresPasswordEnv, got)
 	}
 }

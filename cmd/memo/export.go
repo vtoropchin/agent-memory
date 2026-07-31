@@ -142,6 +142,11 @@ func runExport(args []string, out io.Writer) error {
 	scopesFlag := fs.String("scopes", "", "пространства через запятую для частичного экспорта (пусто — вся БД)")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
 
+	// .env — наравне с остальными подкомандами: при driver="postgres" там лежит
+	// MEMO_POSTGRES_PASSWORD, без которого не открыть хранилище (см. коммент к
+	// runWeb о том, почему раньше загрузку здесь пропускали).
+	loadDotEnvForConfig(*configPath, "memo export")
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return fmt.Errorf("загрузка конфига: %w", err)

@@ -265,6 +265,12 @@ func runImport(args []string, out io.Writer) error {
 		return nil
 	}
 
+	// .env — наравне с остальными подкомандами: при driver="postgres" там лежит
+	// MEMO_POSTGRES_PASSWORD, без которого не открыть хранилище (см. коммент к
+	// runWeb о том, почему раньше загрузку здесь пропускали). Ниже dry-run:
+	// он до БД не доходит, поэтому секрет ему не нужен.
+	loadDotEnvForConfig(*configPath, "memo import")
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return fmt.Errorf("загрузка конфига: %w", err)
