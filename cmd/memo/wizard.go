@@ -12,11 +12,13 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -120,17 +122,49 @@ func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConf
 		}
 	}
 
-	if cfg.StorePath == "" {
-		store := defaultStorePath
-		if err := huh.NewInput().
-			Title("Путь к файлу БД").
-			Value(&store).Run(); err != nil {
+	// Петля вокруг выбора бэкенда хранилища + его настройки — по образцу петли
+	// эмбеддера выше: postgres-ветка (promptPostgresStore) может попросить
+	// "выбрать другую настройку" (reselect=true) при недоступности сервера,
+	// тогда сбрасываем драйвер вместе со всеми postgres-полями и возвращаемся к
+	// select бэкенда (в том числе чтобы можно было уйти на sqlite). sqlite —
+	// однократный проход, ровно тот же вопрос про путь к файлу, что и раньше.
+	for {
+		if cfg.StoreDriver == "" {
+			driver := storeDriverSQLite
+			if err := huh.NewSelect[string]().
+				Title("Хранилище памяти").
+				Options(providerSelectOptions(storeDrivers)...).
+				Value(&driver).Run(); err != nil {
+				return cfg, err
+			}
+			cfg.StoreDriver = driver
+		}
+
+		if cfg.StoreDriver != storeDriverPostgres {
+			if cfg.StorePath == "" {
+				store := defaultStorePath
+				if err := huh.NewInput().
+					Title("Путь к файлу БД").
+					Value(&store).Run(); err != nil {
+					return cfg, err
+				}
+				if store == "" {
+					store = defaultStorePath
+				}
+				cfg.StorePath = store
+			}
+			break
+		}
+
+		reselect, err := promptPostgresStore(out, &cfg)
+		if err != nil {
 			return cfg, err
 		}
-		if store == "" {
-			store = defaultStorePath
+		if !reselect {
+			break
 		}
-		cfg.StorePath = store
+		cfg.StoreDriver = ""
+		clearPostgresFields(&cfg)
 	}
 
 	// Ambient-режим через хуки харнесса — только для Claude Code (задача 7.2);
@@ -244,6 +278,162 @@ func promptOllamaEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) (
 		}
 		// menuRetry — назад к пере-пробе resolveOllamaEmbedState.
 	}
+}
+
+// promptPostgresStore спрашивает параметры подключения к общей базе команды
+// (promptPostgresFields) и тут же проверяет их пробой — по образцу
+// promptOllamaEmbedder: молча сгенерировать конфиг, с которым memo заведомо не
+// стартует, визард не должен. Проба — read-only (probeStoreConnection, init.go:
+// store.OpenPostgresReadOnly, а не store.Open — почему именно так, см. её
+// комментарий): `memo init` не имеет права накатить прод-схему памяти в общую
+// командную базу просто потому, что кто-то проверял доступность сервера.
+//
+// Неудача — причина в out и меню из 2 пунктов: "Ввести параметры заново"
+// (сбрасывает postgres-поля, следующая итерация спросит их с нуля) и "Выбрать
+// другую настройку" — возврат (true, nil), по которому promptInitTUI вернётся к
+// select бэкенда (в том числе на sqlite).
+func promptPostgresStore(out io.Writer, cfg *initConfig) (reselect bool, err error) {
+	reask := false
+	for {
+		if err := promptPostgresFields(cfg, reask); err != nil {
+			return false, err
+		}
+
+		storeCfg := storeConfigFromInit(*cfg)
+		probeErr := probeStoreConnection(storeCfg)
+		if probeErr == nil {
+			fmt.Fprintf(out, "подключение к %s проверено\n", storeCfg.Target())
+			return false, nil
+		}
+
+		fmt.Fprintf(out, "не удалось подключиться к %s (%v).\n", storeCfg.Target(), probeErr)
+		fmt.Fprintln(out, "проверь, что сервер доступен по сети (listen_addresses/pg_hba.conf), что база и роль созданы и что пароль верный — см. раздел «Общая база команды» в README.")
+
+		const (
+			menuRetry    = "retry"
+			menuReselect = "reselect"
+		)
+		action := menuRetry
+		if err := huh.NewSelect[string]().
+			Title("Что дальше?").
+			Options(
+				huh.NewOption("Ввести параметры подключения заново", menuRetry),
+				huh.NewOption("Выбрать другую настройку", menuReselect),
+			).
+			Value(&action).Run(); err != nil {
+			return false, err
+		}
+		if action == menuReselect {
+			return true, nil
+		}
+		// Повторный проход спрашивает ВСЕ поля заново, но с уже введёнными
+		// значениями в качестве дефолтов: ошибся в одном пароле — не должен
+		// перенабирать host/user/dbname. Поэтому сбрасывается сам факт «поле
+		// уже заполнено, спрашивать не надо», а не значения.
+		reask = true
+	}
+}
+
+// promptPostgresFields спрашивает поля подключения к PostgreSQL. Уже заданные
+// (флагом либо предыдущей итерацией) при reask=false не переспрашиваются — тот
+// же принцип, что во всём визарде; reask=true (повтор после неудачной пробы)
+// спрашивает всё, подставляя ранее введённое как дефолт промпта. host/user/dbname
+// обязаны быть непусты (то же правило, что проверит config.StoreConfig.Validate в
+// doInit), поэтому у host стоит Validate на непустоту, а user/dbname/port/sslmode
+// приходят с дефолтами. Пароль — отдельный вопрос со скрытым вводом
+// (Password(true)), как ключи провайдеров; пустой пароль допустим
+// (trust-аутентификация) и просто не попадёт в .env.
+func promptPostgresFields(cfg *initConfig, reask bool) error {
+	if reask || cfg.PostgresHost == "" {
+		host := cfg.PostgresHost
+		if err := huh.NewInput().
+			Title("Адрес сервера PostgreSQL (напр. postgres.lan)").
+			Validate(func(s string) error {
+				if strings.TrimSpace(s) == "" {
+					return fmt.Errorf("адрес сервера не может быть пустым")
+				}
+				return nil
+			}).
+			Value(&host).Run(); err != nil {
+			return err
+		}
+		cfg.PostgresHost = strings.TrimSpace(host)
+	}
+
+	if reask || cfg.PostgresPort == 0 {
+		port := strconv.Itoa(defaultPostgresPort)
+		if cfg.PostgresPort != 0 {
+			port = strconv.Itoa(cfg.PostgresPort)
+		}
+		if err := huh.NewInput().
+			Title("Порт PostgreSQL").
+			Validate(func(s string) error {
+				_, err := parsePostgresPortInput(s)
+				return err
+			}).
+			Value(&port).Run(); err != nil {
+			return err
+		}
+		// Тот же парсер, что стоит в Validate выше — второй ветки разбора (а с
+		// ней и недостижимой обработки ошибки) в коде нет.
+		parsed, err := parsePostgresPortInput(port)
+		if err != nil {
+			return err
+		}
+		cfg.PostgresPort = parsed
+	}
+
+	if reask || cfg.PostgresUser == "" {
+		user := cmp.Or(cfg.PostgresUser, defaultPostgresUser)
+		if err := huh.NewInput().Title("Роль PostgreSQL").Value(&user).Run(); err != nil {
+			return err
+		}
+		cfg.PostgresUser = cmp.Or(strings.TrimSpace(user), defaultPostgresUser)
+	}
+
+	if reask || cfg.PostgresDBName == "" {
+		dbname := cmp.Or(cfg.PostgresDBName, defaultPostgresDBName)
+		if err := huh.NewInput().Title("Имя базы PostgreSQL").Value(&dbname).Run(); err != nil {
+			return err
+		}
+		cfg.PostgresDBName = cmp.Or(strings.TrimSpace(dbname), defaultPostgresDBName)
+	}
+
+	if reask || cfg.PostgresSSLMode == "" {
+		sslmode := cmp.Or(cfg.PostgresSSLMode, defaultPostgresSSLMode)
+		if err := huh.NewInput().
+			Title("Режим TLS (sslmode: disable, require, verify-full, ...)").
+			Value(&sslmode).Run(); err != nil {
+			return err
+		}
+		cfg.PostgresSSLMode = cmp.Or(strings.TrimSpace(sslmode), defaultPostgresSSLMode)
+	}
+
+	if reask || cfg.PostgresPassword == "" {
+		password := cfg.PostgresPassword
+		if err := huh.NewInput().
+			Title("Пароль PostgreSQL (Enter — пропустить: trust-аутентификация или указать позже в .env)").
+			Password(true).
+			Value(&password).Run(); err != nil {
+			return err
+		}
+		cfg.PostgresPassword = password
+	}
+
+	return nil
+}
+
+// clearPostgresFields сбрасывает все поля подключения к PostgreSQL, включая
+// пароль — чтобы они не утекли в конфиг при уходе на другой бэкенд (пункт меню
+// "Выбрать другую настройку"). Повтор ввода после неудачной пробы значения НЕ
+// стирает — см. reask в promptPostgresStore/promptPostgresFields.
+func clearPostgresFields(cfg *initConfig) {
+	cfg.PostgresHost = ""
+	cfg.PostgresPort = 0
+	cfg.PostgresUser = ""
+	cfg.PostgresDBName = ""
+	cfg.PostgresSSLMode = ""
+	cfg.PostgresPassword = ""
 }
 
 // promptOpenAIEmbedder спрашивает токен (скрытый ввод, если не задан), потом

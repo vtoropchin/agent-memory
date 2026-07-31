@@ -78,7 +78,11 @@ var _ Store = (*pgStore)(nil)
 //     промежуточного узла сети (LAN, но не факт, что без балансировщика) без
 //     необходимости перезапускать memo, и подчищает соединения, накопившие
 //     server-side состояние (temp-объекты, память сессии) за долгую жизнь.
-func dialPostgres(cfg config.StoreConfig) (*sql.DB, error) {
+//
+// ctx ограничивает по времени именно установление соединения (см. PingContext
+// ниже) — вызывающие без своего дедлайна передают context.Background() и
+// получают прежнее поведение.
+func dialPostgres(ctx context.Context, cfg config.StoreConfig) (*sql.DB, error) {
 	db, err := sql.Open("pgx", cfg.DSN())
 	if err != nil {
 		return nil, fmt.Errorf("открытие postgres %s: %w", cfg.Target(), err)
@@ -87,7 +91,13 @@ func dialPostgres(cfg config.StoreConfig) (*sql.DB, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxIdleTime(5 * time.Minute)
 	db.SetConnMaxLifetime(30 * time.Minute)
-	if err := db.Ping(); err != nil {
+	// PingContext, а не Ping: sql.Open ленив, и именно этот вызов выполняет
+	// настоящую работу — DNS-резолв, TCP-коннект и стартовый хендшейк pgx, —
+	// поэтому только через ctx её и можно ограничить по времени. Без дедлайна
+	// вызывающий висит до таймаута ОС на хосте, который дропает пакеты
+	// (закрытый firewall, опечатка в адресе); для `memo init` это прямо
+	// нарушало бы принцип «установка не блокируется недоступным сервисом».
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("проверка соединения %s: %w", cfg.Target(), err)
 	}
@@ -102,7 +112,7 @@ func dialPostgres(cfg config.StoreConfig) (*sql.DB, error) {
 // postgres_vector.go), а не здесь — до первого reindex векторный слой не нужен,
 // как и memories_vec у sqlite-vec (DESIGN.md §15).
 func openPostgres(cfg config.StoreConfig) (Store, error) {
-	db, err := dialPostgres(cfg)
+	db, err := dialPostgres(context.Background(), cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -132,14 +142,28 @@ func openPostgres(cfg config.StoreConfig) (Store, error) {
 // нужна (Stats, EmbedMeta, ...), вернут ошибку вида "relation ... does not exist" —
 // это ожидаемый диагностический сигнал ("БД доступна, но схема ещё не накатана"), а
 // не повод создать её здесь.
+//
+// Без ctx (эта форма) открытие ограничено только таймаутами ОС — так её вызывает
+// `memo doctor`, которому пользователь сам сказал «диагностируй» и может прервать
+// по Ctrl+C. Вызывающим, которым нужен дедлайн (напр. проба подключения в
+// `memo init`, где висящая установка недопустима), — OpenPostgresReadOnlyContext.
 func OpenPostgresReadOnly(cfg config.StoreConfig) (Store, error) {
-	db, err := dialPostgres(cfg)
+	return OpenPostgresReadOnlyContext(context.Background(), cfg)
+}
+
+// OpenPostgresReadOnlyContext — та же read-only точка входа, что
+// OpenPostgresReadOnly, но с ctx: он ограничивает и установление соединения
+// (dialPostgres -> PingContext), и чтение current_schema(). Отдельная форма, а не
+// смена сигнатуры существующей функции — чтобы не трогать вызов из `memo doctor`
+// и его контракт.
+func OpenPostgresReadOnlyContext(ctx context.Context, cfg config.StoreConfig) (Store, error) {
+	db, err := dialPostgres(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	s := &pgStore{db: db, now: defaultNow}
-	if err := db.QueryRow(`SELECT current_schema()`).Scan(&s.schema); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&s.schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("определение текущей схемы %s: %w", cfg.Target(), err)
 	}

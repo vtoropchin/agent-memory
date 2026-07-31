@@ -58,6 +58,40 @@ func TestLoadDotEnv_ParsesCommentsAndQuotes(t *testing.T) {
 	}
 }
 
+// TestParseDotEnv_DuplicateKeys фиксирует правило дубликатов ключа: побеждает
+// первое НЕПУСТОЕ вхождение, а пустое значение (`KEY=`) перекрывается
+// последующим непустым. Ключевой кейс — второй: .env с пустой строкой-
+// плейсхолдером и настоящим ключом ниже (частый след ручной правки) должен
+// отдавать настоящий ключ, иначе Reasoner тихо деградирует в Noop.
+func TestParseDotEnv_DuplicateKeys(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "первое непустое побеждает", content: "K=first\nK=second\n", want: "first"},
+		{name: "пустое перекрывается непустым", content: "K=\nK=real\n", want: "real"},
+		{name: "после непустого пустое не затирает", content: "K=\nK=real\nK=\n", want: "real"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".env")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("запись .env: %v", err)
+			}
+
+			vars, loaded, err := parseDotEnv(path)
+			if err != nil || !loaded {
+				t.Fatalf("parseDotEnv: loaded=%v err=%v", loaded, err)
+			}
+			if got := vars["K"]; got != tc.want {
+				t.Errorf("K = %q, хочу %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestLoadDotEnv_ShellEnvTakesPriority проверяет, что уже установленная в
 // окружении переменная не перезатирается значением из .env.
 func TestLoadDotEnv_ShellEnvTakesPriority(t *testing.T) {

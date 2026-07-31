@@ -30,12 +30,16 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/charmbracelet/huh"
 	"github.com/mattn/go-isatty"
+
+	"agentmemory/internal/config"
+	"agentmemory/internal/memory/store"
 )
 
 // Дефолты полей initConfig, не заданных ни флагом, ни интерактивным вводом.
@@ -67,10 +71,32 @@ const (
 	defaultDeepSeekModel   = "deepseek-chat"
 	defaultStorePath       = "~/.agentmemory/memory.db"
 
+	// Дефолты полей подключения к PostgreSQL (DESIGN.md §13, §14 Этап 12).
+	// Хоста среди них нет намеренно: адрес общего сервера команды —
+	// единственный параметр, у которого не бывает осмысленного дефолта (у
+	// port/sslmode он есть в config.Default(), user/dbname по конвенции из
+	// README «Общая база команды» — роль и база называются memo), поэтому
+	// host остаётся пустым и обязателен: интерактивно — валидацией непустоты
+	// в промпте, неинтерактивно — через config.StoreConfig.Validate в doInit.
+	defaultPostgresPort    = 5432
+	defaultPostgresUser    = "memo"
+	defaultPostgresDBName  = "memo"
+	defaultPostgresSSLMode = "disable"
+
 	// fetchModelsTimeout — таймаут запроса списка моделей у ollama/OpenAI в
 	// интерактивном промпте: недоступный/зависший сервер не должен вешать
 	// установку навсегда (задача 11.1 — "не блокировать установку").
 	fetchModelsTimeout = 5 * time.Second
+
+	// probeStoreTimeout — таймаут пробы подключения к PostgreSQL
+	// (probeStoreConnectionLive): тот же инвариант, что у fetchModelsTimeout —
+	// установка не должна блокироваться недоступным сервисом ни интерактивно,
+	// ни в CI под -no-input. Значение больше, чем у списка моделей: проба
+	// делает полноценное соединение (DNS + TCP + стартовый хендшейк pgx, при
+	// sslmode != disable ещё и TLS) по, возможно, не локальной сети. Без
+	// дедлайна вовсе процесс висел бы до таймаута ОС на хосте, который дропает
+	// пакеты (закрытый firewall, опечатка в адресе).
+	probeStoreTimeout = 10 * time.Second
 )
 
 // providerSpec описывает один провайдер эмбеддинга/reasoner: значение флага
@@ -99,6 +125,45 @@ var embedderProviders = []providerSpec{
 var reasonerProviders = []providerSpec{
 	{key: "deepseek", label: "deepseek", envKey: deepseekAPIKeyEnv},
 	{key: "noop", label: "noop (без LLM)"},
+}
+
+// storeDriverSQLite/storeDriverPostgres — значения флага -store-driver и поля
+// `driver` секции [store] генерируемого agentmemory.toml (DESIGN.md §13, §14
+// Этап 12). Пустое значение эквивалентно sqlite — это контракт
+// config.StoreConfig.Validate, а не локальное соглашение init.
+const (
+	storeDriverSQLite   = "sqlite"
+	storeDriverPostgres = "postgres"
+)
+
+// storeDrivers — бэкенды хранилища в порядке показа в select-промпте (первый —
+// дефолт), по образцу embedderProviders/reasonerProviders: один источник и для
+// help-текста -store-driver, и для вариантов TUI (wizard.go). Тип переиспользован
+// (providerSpec) ради общих providerKeys/providerSelectOptions; поле envKey
+// намеренно пусто — секрет бэкенда (MEMO_POSTGRES_PASSWORD) привязан к драйверу
+// жёстко и кладётся в .env не через реестр провайдеров, а отдельной веткой в
+// doInit (см. там же, почему).
+var storeDrivers = []providerSpec{
+	{key: storeDriverSQLite, label: "sqlite (локальный файл — дефолт)"},
+	{key: storeDriverPostgres, label: "postgres (общая база команды: PostgreSQL + pgvector)"},
+}
+
+var storeDriverOptions = providerKeys(storeDrivers)
+
+// validateStoreDriverKey проверяет значение флага -store-driver по реестру
+// storeDrivers (пусто — валидно, это дефолтный sqlite). Сообщение — в стиле
+// валидации провайдеров в doInit. Итоговую валидацию конфигурации хранилища
+// всё равно делает config.StoreConfig.Validate (в doInit, вместе с проверкой
+// обязательных полей postgres) — здесь ранняя проверка нужна только затем,
+// чтобы опечатка не увела интерактивный мастер по ветке другого бэкенда.
+func validateStoreDriverKey(driver string) error {
+	if driver == "" {
+		return nil
+	}
+	if _, ok := providerByKey(storeDrivers, driver); !ok {
+		return fmt.Errorf("неизвестный бэкенд хранилища %q — поддерживаются: %s", driver, strings.Join(storeDriverOptions, ", "))
+	}
+	return nil
 }
 
 // embedderProviderOptions/reasonerProviderOptions — ключи провайдеров в
@@ -210,19 +275,17 @@ var hookEventsByChoice = map[string][]hookEventMapping{
 // configTomlTemplate — шаблон agentmemory.toml по образцу корневого
 // agentmemory.toml/config.example.toml (DESIGN.md §13). Константа-строка, а не
 // toml.Marshal — так сохраняются комментарии. %[1]s — экранированное имя
-// проекта, %[2]s — путь к файлу БД, %[3]s — тело секции [embedder]
-// (renderEmbedderTomlBlock), %[4]s — тело секции [reasoner]
-// (renderReasonerTomlBlock) — обе зависят от выбранного провайдера.
+// проекта, %[2]s — тело секции [store] (renderStoreTomlBlock), %[3]s — тело
+// секции [embedder] (renderEmbedderTomlBlock), %[4]s — тело секции [reasoner]
+// (renderReasonerTomlBlock) — все три зависят от выбранных в этом прогоне
+// бэкенда хранилища и провайдеров.
 const configTomlTemplate = `# Конфиг AgentMemory для проекта %[1]s (DESIGN.md §13).
 #
 # Агентское приложение поднимает MCP-сервер memo из сгенерированного
 # рядом MCP-конфига и передаёт ему этот файл флагом -config.
 
 [store]
-# Общий файл БД на все проекты (DESIGN.md §2.1: один файл, изоляция через scope).
-# Каталог создаётся автоматически при первом старте (store.Open).
-path = "%[2]s"
-
+%[2]s
 [embedder]
 %[3]s
 [reasoner]
@@ -242,6 +305,46 @@ consolidate_after = "168h"                 # неделя episodic → semantic
 project = "%[1]s"
 shared  = ["user:*"]
 `
+
+// renderStoreTomlBlock рендерит тело секции [store] под выбранный
+// cfg.StoreDriver — единственное место, определяющее, какие поля и комментарии
+// попадают в agentmemory.toml для каждого бэкенда (DESIGN.md §13, §14 Этап 12),
+// по образцу renderEmbedderTomlBlock/renderReasonerTomlBlock.
+//
+// Для sqlite поле driver НЕ пишется намеренно: пустое значение по контракту
+// config.StoreConfig.Validate и так означает sqlite, а дефолтный вывод
+// `memo init` обязан остаться побайтово тем же, что до появления второго
+// бэкенда (старые конфиги и ожидания существующих тестов не должны
+// разъезжаться из-за новой строки).
+//
+// Пароль postgres здесь не появляется ни при каких значениях cfg — это
+// инвариант, а не забывчивость: секрет живёт только в env/.env
+// (MEMO_POSTGRES_PASSWORD, DESIGN.md §13), ровно как ключи провайдеров.
+func renderStoreTomlBlock(cfg initConfig) string {
+	switch cfg.StoreDriver {
+	case storeDriverPostgres:
+		return fmt.Sprintf(`# Общая база команды: PostgreSQL + pgvector (DESIGN.md §14 Этап 12) — одна база
+# на нескольких разработчиков вместо локального файла. Схему таблиц memo
+# накатывает сам при первом старте, база и роль должны существовать заранее.
+# Пароль в этот файл НЕ пишется — читается из env %[1]s (или .env
+# рядом с этим конфигом), то же правило, что для DEEPSEEK_API_KEY/OPENAI_API_KEY.
+# Пустой пароль — не ошибка (сервер может использовать trust-аутентификацию).
+driver  = "postgres"
+host    = "%[2]s"
+port    = %[3]d
+user    = "%[4]s"
+dbname  = "%[5]s"
+sslmode = "%[6]s"
+`, memoPostgresPasswordEnv, escapeTOMLString(cfg.PostgresHost), cfg.PostgresPort,
+			escapeTOMLString(cfg.PostgresUser), escapeTOMLString(cfg.PostgresDBName),
+			escapeTOMLString(cfg.PostgresSSLMode))
+	default: // "" | "sqlite"
+		return fmt.Sprintf(`# Общий файл БД на все проекты (DESIGN.md §2.1: один файл, изоляция через scope).
+# Каталог создаётся автоматически при первом старте (store.Open).
+path = "%s"
+`, escapeTOMLString(cfg.StorePath))
+	}
+}
 
 // renderEmbedderTomlBlock рендерит тело секции [embedder] под выбранный
 // cfg.EmbedderProvider — единственное место, определяющее, какие поля и
@@ -390,11 +493,141 @@ type initConfig struct {
 	EmbedderModel    string // ollama/openai: модель эмбеддинга; noop — не используется
 	ReasonerProvider string // deepseek | noop
 	ReasonerModel    string // deepseek: модель reasoner; noop — не используется
-	StorePath        string
+	StoreDriver      string // "" (== sqlite) | sqlite | postgres
+	StorePath        string // только если StoreDriver sqlite: путь к файлу БД
+	PostgresHost     string // только если StoreDriver == "postgres"
+	PostgresPort     int    // только если StoreDriver == "postgres"; 0 — дефолт defaultPostgresPort
+	PostgresUser     string // только если StoreDriver == "postgres"
+	PostgresDBName   string // только если StoreDriver == "postgres"
+	PostgresSSLMode  string // только если StoreDriver == "postgres"
+	PostgresPassword string // только если StoreDriver == "postgres"; в TOML не попадает никогда — только в .env
 	OpenAIKey        string // только если EmbedderProvider == "openai"
 	DeepseekKey      string // только если ReasonerProvider == "deepseek"
 	Hooks            string // "" | session-start | session-start+prompt-submit | none (см. hooksOptions)
 	Force            bool
+}
+
+// storeConfigFromInit собирает config.StoreConfig из параметров прогона init —
+// единственный мост между initConfig и настоящей конфигурацией хранилища.
+// Через него идут ВСЕ решения о хранилище, которым нужна логика рантайма:
+// валидация (StoreConfig.Validate — не копия её правил в init), проба
+// подключения (probeStoreConnection -> store.OpenPostgresReadOnly, которой
+// нужен DSN) и человекочитаемое имя цели в выводе/ошибках (StoreConfig.Target).
+// Так `memo init` не может разойтись с тем, что сочтёт валидным и куда пойдёт
+// сам memo при старте с этим же конфигом.
+//
+// cfg должен быть уже пропущен через applyInitDefaults — иначе порт/sslmode
+// уедут в нули и Target/DSN покажут не то, что реально попадёт в TOML.
+func storeConfigFromInit(cfg initConfig) config.StoreConfig {
+	return config.StoreConfig{
+		Driver:   cfg.StoreDriver,
+		Path:     cfg.StorePath,
+		Host:     cfg.PostgresHost,
+		Port:     cfg.PostgresPort,
+		User:     cfg.PostgresUser,
+		DBName:   cfg.PostgresDBName,
+		SSLMode:  cfg.PostgresSSLMode,
+		Password: cfg.PostgresPassword,
+	}
+}
+
+// probeStoreConnection — проба доступности хранилища перед генерацией конфига
+// (интерактивно — wizard.go promptPostgresStore, неинтерактивно — doInit).
+// Пакетная переменная, а не прямой вызов: проба — единственная часть init,
+// которая ходит в сеть, а doInit покрыт большим набором юнит-тестов, гоняющих
+// его на временных каталогах без всякого PostgreSQL. Тест подменяет её стабом
+// (с восстановлением через t.Cleanup) — тот же приём инъекции внешнего эффекта,
+// что у resolveOllamaEmbedState с параметром lookPath, только здесь точка
+// подмены пакетная: менять сигнатуру doInit(cfg, out) нельзя, на ней завязаны
+// все существующие тесты init.
+var probeStoreConnection = probeStoreConnectionLive
+
+// probeStoreConnectionLive — боевая проба: открывает соединение через
+// store.OpenPostgresReadOnly и дёргает Health.
+//
+// Почему read-only, а не общая фабрика store.Open: Open накатывает схему памяти
+// как побочный эффект открытия (CREATE TABLE/INDEX, триггеры — см. openPostgres),
+// то есть `memo init` на этапе «проверим, доступен ли сервер» молча создал бы
+// прод-схему в общей командной базе — при опечатке в имени базы/хоста ещё и не
+// в той. Проверка доступности обязана оставаться проверкой: OpenPostgresReadOnly
+// делает только Ping + current_schema(), ровно как это уже сделано в `memo doctor`
+// (doctor.go, postgresDatabaseSection). Схему накатит первый штатный старт memo.
+//
+// Отсутствие схемы памяти на сервере пробу НЕ валит: Health читает только
+// SELECT 1 / server_version / pg_is_in_recovery — «сервер доступен, база
+// открывается» и есть тот факт, который init проверяет.
+// Проба целиком (соединение + Health) ограничена probeStoreTimeout: висящая
+// установка недопустима ни интерактивно, ни под -no-input в CI, поэтому ctx
+// прокидывается и в открытие (store.OpenPostgresReadOnlyContext — ctx-форма
+// специально ради этого случая), и в сам Health.
+func probeStoreConnectionLive(cfg config.StoreConfig) error {
+	ctx, cancel := context.WithTimeout(context.Background(), probeStoreTimeout)
+	defer cancel()
+
+	st, err := store.OpenPostgresReadOnlyContext(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	if _, err := st.Health(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// dotEnvPostgresPassword достаёт MEMO_POSTGRES_PASSWORD из <dir>/.env — того
+// самого файла, который `memo init` сам же и написал в прошлый прогон. Нужна
+// для повторного init в уже настроенном на postgres проекте (сменить агента,
+// перезалить скилы -force, добавить хуки): без неё проба уходила бы на сервер
+// без пароля и падала на "password authentication failed", хотя рабочий пароль
+// лежит в двух шагах.
+//
+// Читается ИМЕННО файл проекта (parseDotEnv), а не окружение процесса, и это
+// принципиально: переменная окружения шелла источником пароля для init не
+// является (см. runInit — секрет попадает в .env только осознанным действием
+// пользователя), а <dir>/.env — артефакт самого проекта, который init создал и
+// который лежит рядом с генерируемым конфигом. Поэтому и loadDotEnv здесь не
+// годится: она по контракту уступает непустому shell-env и вернула бы значение
+// из окружения. Нечитаемый/битый .env — не ошибка init: возвращаем пусто и идём
+// в пробу как есть (её ошибка будет содержательнее).
+func dotEnvPostgresPassword(dir string) string {
+	vars, loaded, err := parseDotEnv(filepath.Join(dir, ".env"))
+	if err != nil || !loaded {
+		return ""
+	}
+	return vars[memoPostgresPasswordEnv]
+}
+
+// validatePostgresPort — единственное место с правилом допустимого порта в
+// cmd/memo (config.StoreConfig.Validate его намеренно не проверяет — её дело
+// driver и обязательные поля). Через него идут оба пути: интерактивный ввод
+// (parsePostgresPortInput в wizard.go) и флаг -postgres-port (doInit).
+func validatePostgresPort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("порт %d вне диапазона 1..65535", port)
+	}
+	return nil
+}
+
+// parsePostgresPortInput разбирает введённый в промпте порт: пустая строка —
+// дефолт defaultPostgresPort, иначе целое, проверенное validatePostgresPort.
+// Один парсер и для huh-валидатора поля, и для чтения результата — иначе в
+// коде появлялась бы вторая, недостижимая (а потому непроверяемая) ветка
+// разбора.
+func parsePostgresPortInput(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defaultPostgresPort, nil
+	}
+	port, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("порт должен быть числом")
+	}
+	if err := validatePostgresPort(port); err != nil {
+		return 0, err
+	}
+	return port, nil
 }
 
 // runInit разбирает флаги подкоманды `init` и выполняет скаффолдинг. Вынесена
@@ -418,11 +651,18 @@ func runInit(args []string, out io.Writer) error {
 	ollamaModel := fs.String("ollama-model", "", "алиас -embedder-model (для embedder-provider=ollama, дефолт "+defaultOllamaModel+")")
 	reasonerProvider := fs.String("reasoner-provider", "", fmt.Sprintf("провайдер reasoner (%s); дефолт %s", strings.Join(reasonerProviderOptions, ", "), defaultReasonerProvider))
 	reasonerModel := fs.String("reasoner-model", "", "модель reasoner (для reasoner-provider=deepseek, дефолт "+defaultDeepSeekModel+")")
-	store := fs.String("store", "", "путь к файлу SQLite (дефолт "+defaultStorePath+")")
+	storeDriver := fs.String("store-driver", "", fmt.Sprintf("бэкенд хранилища (%s); дефолт %s", strings.Join(storeDriverOptions, ", "), storeDriverSQLite))
+	storePath := fs.String("store", "", "путь к файлу SQLite — только при -store-driver="+storeDriverSQLite+" (дефолт "+defaultStorePath+")")
+	postgresHost := fs.String("postgres-host", "", "адрес сервера PostgreSQL (обязателен при -store-driver="+storeDriverPostgres+")")
+	postgresPort := fs.Int("postgres-port", 0, fmt.Sprintf("порт PostgreSQL (для -store-driver=%s, дефолт %d)", storeDriverPostgres, defaultPostgresPort))
+	postgresUser := fs.String("postgres-user", "", "роль PostgreSQL (для -store-driver="+storeDriverPostgres+", дефолт "+defaultPostgresUser+")")
+	postgresDBName := fs.String("postgres-dbname", "", "имя базы PostgreSQL (для -store-driver="+storeDriverPostgres+", дефолт "+defaultPostgresDBName+")")
+	postgresSSLMode := fs.String("postgres-sslmode", "", "режим TLS PostgreSQL (для -store-driver="+storeDriverPostgres+", дефолт "+defaultPostgresSSLMode+")")
+	postgresPassword := fs.String("postgres-password", "", "пароль PostgreSQL — пишется в <dir>/.env как "+memoPostgresPasswordEnv+", в TOML не попадает никогда; пустой пароль допустим (trust-аутентификация). Осторожно: попадёт в историю shell и будет виден в `ps` на время работы команды — надёжнее заранее положить строку "+memoPostgresPasswordEnv+"=... в <dir>/.env")
 	deepseekKey := fs.String("deepseek-key", "", "ключ DeepSeek API — пишется в <dir>/.env, только если reasoner-provider=deepseek (осторожно: попадёт в историю shell)")
 	openaiKey := fs.String("openai-key", "", "ключ OpenAI API (или env OPENAI_API_KEY) — пишется в <dir>/.env, только если embedder-provider=openai")
 	hooks := fs.String("hooks", "", fmt.Sprintf("хуки Claude Code для ambient-режима (%s); дефолт %s в интерактивном режиме, %s без него", strings.Join(hooksOptions, ", "), hooksSessionStart, hooksNone))
-	noInput := fs.Bool("no-input", false, "не спрашивать интерактивно — использовать только флаги и дефолты (без сетевых запросов)")
+	noInput := fs.Bool("no-input", false, "не спрашивать интерактивно — использовать только флаги и дефолты (без сетевых запросов к провайдерам; при -store-driver="+storeDriverPostgres+" проба подключения к БД выполняется всё равно)")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора
 
 	openaiKeyVal := *openaiKey
@@ -430,6 +670,16 @@ func runInit(args []string, out io.Writer) error {
 		openaiKeyVal = os.Getenv(openaiAPIKeyEnv)
 	}
 
+	// Пароль postgres, в отличие от -openai-key выше, НЕ подхватывается из
+	// одноимённой env-переменной (MEMO_POSTGRES_PASSWORD). Отличие осознанное:
+	// записать секрет в файл (<dir>/.env) init должен только по явному действию
+	// пользователя — флагом или интерактивным вводом в этом прогоне, — а не
+	// потому, что переменная случайно оказалась в окружении: пользователь,
+	// запускающий init, при таком подхвате нигде не увидит, что и откуда было
+	// сохранено на диск. Повторные прогоны от этого не страдают: пароль для
+	// пробы восстанавливается из уже лежащего рядом <dir>/.env
+	// (dotEnvPostgresPassword в doInit) — это файл самого проекта, а не
+	// окружение.
 	cfg := initConfig{
 		Project:          *project,
 		Dir:              *dir,
@@ -440,10 +690,34 @@ func runInit(args []string, out io.Writer) error {
 		EmbedderModel:    cmp.Or(*embedderModel, *ollamaModel),
 		ReasonerProvider: *reasonerProvider,
 		ReasonerModel:    *reasonerModel,
-		StorePath:        *store,
+		StoreDriver:      *storeDriver,
+		StorePath:        *storePath,
+		PostgresHost:     *postgresHost,
+		PostgresPort:     *postgresPort,
+		PostgresUser:     *postgresUser,
+		PostgresDBName:   *postgresDBName,
+		PostgresSSLMode:  *postgresSSLMode,
+		PostgresPassword: *postgresPassword,
 		DeepseekKey:      *deepseekKey,
 		OpenAIKey:        openaiKeyVal,
 		Hooks:            *hooks,
+	}
+
+	// Драйвер хранилища проверяется ДО интерактивного промпта (в отличие от
+	// провайдеров, чью валидацию делает doInit в самом конце): от него зависит,
+	// какие вопросы задаст мастер, поэтому опечатка вроде -store-driver=postgre
+	// иначе молча увела бы пользователя в sqlite-ветку — он ответил бы на все
+	// вопросы и только потом получил ошибку.
+	if err := validateStoreDriverKey(cfg.StoreDriver); err != nil {
+		return err
+	}
+
+	// -store без -store-driver означает sqlite: до появления второго бэкенда
+	// этот флаг был единственным способом сказать «про хранилище не спрашивай»,
+	// и скрипты/мануалы, написанные под него, не должны вдруг упираться в новый
+	// вопрос мастера.
+	if cfg.StoreDriver == "" && cfg.StorePath != "" {
+		cfg.StoreDriver = storeDriverSQLite
 	}
 
 	if !*noInput && isInteractiveStdin() {
@@ -524,8 +798,37 @@ func applyInitDefaults(cfg initConfig) initConfig {
 	}
 	clearUnselectedProviderKeys(&cfg, embedderProviders, cfg.EmbedderProvider)
 	clearUnselectedProviderKeys(&cfg, reasonerProviders, cfg.ReasonerProvider)
-	if cfg.StorePath == "" {
-		cfg.StorePath = defaultStorePath
+	// Дефолты хранилища и обнуление полей НЕвыбранного бэкенда — та же защита
+	// от рассинхрона флагов, что clearUnselectedProviderKeys даёт ключам
+	// провайдеров: -postgres-* при sqlite (и наоборот -store при postgres) не
+	// должны ни попасть в TOML, ни утечь паролем в .env. StoreDriver == "" не
+	// нормализуется в "sqlite" намеренно — от этого зависит побайтовая
+	// неизменность дефолтного конфига (см. renderStoreTomlBlock).
+	switch cfg.StoreDriver {
+	case storeDriverPostgres:
+		cfg.StorePath = ""
+		if cfg.PostgresPort == 0 {
+			cfg.PostgresPort = defaultPostgresPort
+		}
+		if cfg.PostgresUser == "" {
+			cfg.PostgresUser = defaultPostgresUser
+		}
+		if cfg.PostgresDBName == "" {
+			cfg.PostgresDBName = defaultPostgresDBName
+		}
+		if cfg.PostgresSSLMode == "" {
+			cfg.PostgresSSLMode = defaultPostgresSSLMode
+		}
+	default: // "" | "sqlite" | неизвестный драйвер (его отклонит Validate в doInit)
+		if cfg.StorePath == "" {
+			cfg.StorePath = defaultStorePath
+		}
+		cfg.PostgresHost = ""
+		cfg.PostgresPort = 0
+		cfg.PostgresUser = ""
+		cfg.PostgresDBName = ""
+		cfg.PostgresSSLMode = ""
+		cfg.PostgresPassword = ""
 	}
 	return cfg
 }
@@ -570,6 +873,26 @@ func doInit(cfg initConfig, out io.Writer) error {
 
 	cfg = applyInitDefaults(cfg)
 
+	// Валидация хранилища — ПОСЛЕ applyInitDefaults, в отличие от провайдеров
+	// выше: правила берутся у config.StoreConfig.Validate (та же проверка, что
+	// отклонит невалидный конфиг при старте memo — своей копии правил здесь
+	// нет), а ей нужно уже разрешённое значение port/sslmode, иначе она
+	// проверяла бы не то, что попадёт в TOML. Дефолт скрыть опечатку не может:
+	// неизвестный driver Validate отклоняет при любых дефолтах, а host/user/
+	// dbname обязательны и дефолтом хоста не подменяются (см. defaultPostgres*).
+	storeCfg := storeConfigFromInit(cfg)
+	if err := storeCfg.Validate(); err != nil {
+		return fmt.Errorf("настройки хранилища: %w", err)
+	}
+	if cfg.StoreDriver == storeDriverPostgres {
+		// Порт из флага -postgres-port проверяется тем же правилом, что и порт
+		// из интерактивного промпта (validatePostgresPort) — иначе -postgres-port=-5
+		// молча уехал бы в TOML.
+		if err := validatePostgresPort(cfg.PostgresPort); err != nil {
+			return fmt.Errorf("настройки хранилища: %w", err)
+		}
+	}
+
 	target, ok := agentRegistry[cfg.Agent]
 	if !ok {
 		return fmt.Errorf("неизвестное агентское приложение %q — поддерживаются: %s", cfg.Agent, strings.Join(agentKeys(), ", "))
@@ -578,6 +901,30 @@ func doInit(cfg initConfig, out io.Writer) error {
 	project, err := resolveProjectName(cfg.Project, cfg.Dir)
 	if err != nil {
 		return err
+	}
+
+	// Проба доступности PostgreSQL — после всех дешёвых локальных проверок
+	// (валидация конфигурации, агент, имя проекта: нет смысла ходить в сеть,
+	// если прогон и так обречён), но ДО записи любых файлов и даже до создания
+	// каталога: молча сгенерировать конфиг, с которым memo заведомо не
+	// стартует, хуже, чем упасть здесь с внятной причиной, а неудачный init не
+	// должен оставлять после себя следов.
+	//
+	// В интерактивном прогоне эту же пробу уже сделал визард (wizard.go,
+	// promptPostgresStore) и дал меню повторить ввод — повтор здесь (второе
+	// read-only соединение) осознан: doInit обязан оставаться самодостаточным,
+	// он же единственная точка входа для -no-input, прогонов без TTY (CI) и
+	// всех тестов.
+	if cfg.StoreDriver == storeDriverPostgres {
+		if storeCfg.Password == "" {
+			// Повторный init в уже настроенном проекте: пароль лежит в
+			// <dir>/.env с прошлого прогона — берём его ТОЛЬКО для пробы, в
+			// cfg (и, значит, в перезапись .env ниже) он не возвращается.
+			storeCfg.Password = dotEnvPostgresPassword(cfg.Dir)
+		}
+		if err := probeStoreConnection(storeCfg); err != nil {
+			return fmt.Errorf("хранилище %s недоступно: %w (проверь адрес, что база и роль созданы и что пароль передан -postgres-password или лежит в %s/.env)", storeCfg.Target(), err, cfg.Dir)
+		}
 	}
 
 	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
@@ -592,7 +939,7 @@ func doInit(cfg initConfig, out io.Writer) error {
 	}
 
 	tomlContent := fmt.Sprintf(configTomlTemplate,
-		escapeTOMLString(project), escapeTOMLString(cfg.StorePath), renderEmbedderTomlBlock(cfg), renderReasonerTomlBlock(cfg))
+		escapeTOMLString(project), renderStoreTomlBlock(cfg), renderEmbedderTomlBlock(cfg), renderReasonerTomlBlock(cfg))
 
 	// .mcp.json/opencode.json — запись сервера memo мержится в существующий
 	// файл (mergeMCPConfig), а не перезаписывает его целиком: единственный
@@ -634,10 +981,26 @@ func doInit(cfg initConfig, out io.Writer) error {
 			envVars[p.envKey] = *f
 		}
 	}
+	// Пароль PostgreSQL идёт тем же путём, что ключи провайдеров (DESIGN.md §13:
+	// секреты только в env/.env, в TOML — никогда), но не через реестр
+	// selectedProviders: у бэкенда хранилища нет провайдерской пары
+	// "провайдер -> поле с ключом", секрет ровно один и привязан к driver.
+	// Пустой пароль — не ошибка (trust-аутентификация, см. StoreConfig.Validate):
+	// просто ничего не дописываем, .env из-за postgres не создаётся.
+	if cfg.StoreDriver == storeDriverPostgres && cfg.PostgresPassword != "" {
+		envVars[memoPostgresPasswordEnv] = cfg.PostgresPassword
+	}
 	if len(envVars) > 0 {
 		if err := mergeEnvFile(filepath.Join(cfg.Dir, ".env"), envVars, out); err != nil {
 			return err
 		}
+	}
+	// Строка .env в .gitignore нужна не только когда секрет записан прямо
+	// сейчас: при driver=postgres пустой пароль — штатный сценарий (промпт сам
+	// предлагает «указать позже в .env», trust-аутентификация тоже возможна), и
+	// пользователь создаст этот файл руками — он не должен оказаться в
+	// репозитории незаигнориренным.
+	if len(envVars) > 0 || cfg.StoreDriver == storeDriverPostgres {
 		if err := ensureGitignoreEntry(filepath.Join(cfg.Dir, ".gitignore"), ".env", out); err != nil {
 			return err
 		}
@@ -660,7 +1023,10 @@ func doInit(cfg initConfig, out io.Writer) error {
 	fmt.Fprintf(out, "агент: %s\n", target.label)
 	fmt.Fprintf(out, "эмбеддинг: %s\n", cfg.EmbedderProvider)
 	fmt.Fprintf(out, "reasoner: %s\n", cfg.ReasonerProvider)
-	fmt.Fprintf(out, "путь БД: %s\n", cfg.StorePath)
+	// Хранилище печатается через StoreConfig.Target() — один формат с логом
+	// старта memo и секцией «БД» в `memo doctor`: путь к файлу для sqlite,
+	// postgres://host:port/dbname для postgres (без пароля).
+	fmt.Fprintf(out, "хранилище: %s\n", storeCfg.Target())
 	fmt.Fprintln(out, "дальше: перезапусти агентское приложение в этом каталоге и одобри сервер `memo`; убедись, что memo доступен — `go install` кладёт его на PATH (см. `make install`).")
 	return nil
 }

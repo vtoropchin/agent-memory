@@ -49,15 +49,51 @@ func loadDotEnvForConfig(configPath, label string) {
 // вызывающему для логирования в stderr — memo не должен из-за неё падать
 // (DESIGN.md §15, деградация вместо падения).
 func loadDotEnv(path string) (loaded bool, err error) {
+	vars, loaded, err := parseDotEnv(path)
+	if err != nil || !loaded {
+		return loaded, err
+	}
+
+	for key, value := range vars {
+		if existing, ok := os.LookupEnv(key); ok && existing != "" {
+			continue // непустой shell-env приоритетнее .env — не перезатираем
+		}
+		if err := os.Setenv(key, value); err != nil {
+			return true, fmt.Errorf("установка переменной %q: %w", key, err)
+		}
+	}
+	return true, nil
+}
+
+// parseDotEnv разбирает .env по path в карту KEY->VALUE, НЕ трогая окружение
+// процесса. Отделено от loadDotEnv, потому что у файла .env появился второй
+// потребитель, которому нужно именно значение из файла, а не итоговое
+// os.Getenv: `memo init` при повторном прогоне восстанавливает из <dir>/.env
+// пароль PostgreSQL для пробы подключения (см. dotEnvPostgresPassword в
+// init.go — там же, почему именно из файла, а не из окружения). Через loadDotEnv
+// это сделать нельзя: она по контракту уступает непустому shell-env, то есть
+// вернула бы значение из окружения, а не из файла проекта.
+//
+// Дубликаты ключа: побеждает первое НЕПУСТОЕ вхождение — пустое значение
+// (`KEY=`) перекрывается последующим непустым. Это ровно то правило, которое
+// давала построчная установка через os.Setenv до выделения этой функции:
+// повторное вхождение пропускалось только тогда, когда уже установленная
+// переменная непуста (`ok && existing != ""`), а `KEY=` оставляло её пустой и
+// потому перекрываемой. Край не теоретический: пустая строка в .env — обычный
+// след ручной правки или инжекта плейсхолдера, и настоящий ключ, дописанный
+// ниже, обязан победить.
+// loaded=false без ошибки — файла нет (штатный случай, .env опционален).
+func parseDotEnv(path string) (vars map[string]string, loaded bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return nil, false, nil
 		}
-		return false, fmt.Errorf("открытие %q: %w", path, err)
+		return nil, false, fmt.Errorf("открытие %q: %w", path, err)
 	}
 	defer f.Close()
 
+	vars = map[string]string{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -72,19 +108,15 @@ func loadDotEnv(path string) (loaded bool, err error) {
 		if key == "" {
 			continue
 		}
-		value = unquoteEnvValue(strings.TrimSpace(value))
-
-		if existing, ok := os.LookupEnv(key); ok && existing != "" {
-			continue // непустой shell-env приоритетнее .env — не перезатираем
+		if v, seen := vars[key]; seen && v != "" {
+			continue
 		}
-		if err := os.Setenv(key, value); err != nil {
-			return true, fmt.Errorf("установка переменной %q: %w", key, err)
-		}
+		vars[key] = unquoteEnvValue(strings.TrimSpace(value))
 	}
 	if err := sc.Err(); err != nil {
-		return true, fmt.Errorf("чтение %q: %w", path, err)
+		return nil, true, fmt.Errorf("чтение %q: %w", path, err)
 	}
-	return true, nil
+	return vars, true, nil
 }
 
 // unquoteEnvValue снимает опциональные окружающие кавычки (' или ") со
