@@ -243,7 +243,7 @@ func TestSaveSameContentDifferentScopeIsolated(t *testing.T) {
 
 func TestSaveValidation(t *testing.T) {
 	ctx := context.Background()
-	w, _ := newTestWriter(t)
+	w, st := newTestWriter(t)
 
 	t.Run("пустой content", func(t *testing.T) {
 		_, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "s", Content: "   "})
@@ -263,6 +263,25 @@ func TestSaveValidation(t *testing.T) {
 		_, _, err := w.Save(ctx, SaveInput{Kind: memory.Kind("unknown"), Scope: "s", Content: "факт"})
 		if !errors.Is(err, ErrUnknownKind) {
 			t.Errorf("err = %v, want ErrUnknownKind", err)
+		}
+	})
+
+	t.Run("kind=debt принимается", func(t *testing.T) {
+		id, merged, err := w.Save(ctx, SaveInput{
+			Kind: memory.KindDebt, Scope: "s-debt", Content: "нет тестов на дедуп в write-пути",
+		})
+		if err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if merged {
+			t.Errorf("Save: merged = true, want false (новая запись)")
+		}
+		got, err := st.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.Kind != memory.KindDebt {
+			t.Errorf("Kind = %q, want %q", got.Kind, memory.KindDebt)
 		}
 	})
 

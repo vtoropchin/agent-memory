@@ -64,6 +64,7 @@ type Recaller struct {
 	store         store.Store
 	weights       config.RecallWeights
 	defaultBudget int
+	debtWeight    float64
 	now           func() int64
 	reasoner      reason.Reasoner
 	embedder      embed.Embedder
@@ -78,10 +79,18 @@ func New(s store.Store, cfg config.RecallConfig, reasoner reason.Reasoner, embed
 	if budget <= 0 {
 		budget = 800
 	}
+	debtWeight := cfg.DebtWeight
+	// Тот же диапазон (0, 1] и та же защита от NaN, что и в
+	// config.RecallConfig.Validate (см. её годок) — New не должен полагаться на
+	// то, что вызывающий код всегда прошёл через config.Load.
+	if !(debtWeight > 0 && debtWeight <= 1) {
+		debtWeight = config.DefaultDebtWeight
+	}
 	r := &Recaller{
 		store:         s,
 		weights:       cfg.Weights,
 		defaultBudget: budget,
+		debtWeight:    debtWeight,
 		now:           func() int64 { return time.Now().Unix() },
 		reasoner:      reasoner,
 		embedder:      embedder,
@@ -93,7 +102,9 @@ func New(s store.Store, cfg config.RecallConfig, reasoner reason.Reasoner, embed
 }
 
 // section — одна секция брифа: заголовок + kind, который она отображает. Порядок
-// среза задаёт порядок секций в брифе (DESIGN.md §8).
+// среза задаёт ПОРЯДОК и ЗАГОЛОВКИ известных секций в брифе (DESIGN.md §8) — не
+// фильтр данных: запись, чей kind сюда не входит, всё равно печатается
+// (composeBody), просто отдельным блоком после известных секций.
 type section struct {
 	kind  memory.Kind
 	title string
@@ -102,6 +113,7 @@ type section struct {
 var sections = []section{
 	{memory.KindSemantic, "Facts (semantic)"},
 	{memory.KindProcedural, "How-to (procedural)"},
+	{memory.KindDebt, "Tech debt (debt)"},
 	{memory.KindEpisodic, "Recent context (episodic)"},
 }
 
@@ -129,8 +141,9 @@ type scoredCandidate struct {
 // собирается в rank() для каждой выжившей записи и рендерится в Markdown-бриф под
 // каждой строкой, если задан Query.Explain. Все поля — уже вычисленные в rank()
 // величины (RRF-слияние + разложение final на слагаемые после весов
-// config.RecallWeights), а не отдельный пересчёт: Relevance+Importance+Recency+Access
-// равно Final с точностью до округления при печати (formatExplainLine).
+// config.RecallWeights), а не отдельный пересчёт: (Relevance+Importance+Recency+Access)
+// умноженное на KindFactor равно Final с точностью до округления при печати
+// (formatExplainLine).
 type Explain struct {
 	Sources    []string // источники кандидата, слитые в эту запись: "lexical", "vector" (memory.Candidate.Source)
 	RRF        float64  // сырой (ненормированный) RRF-скор слияния — Σ 1/(k+rank) по источникам
@@ -138,7 +151,13 @@ type Explain struct {
 	Importance float64  // w_importance * (importance/5)
 	Recency    float64  // w_recency * recency_decay
 	Access     float64  // w_access * log1p(access_count)
-	Final      float64  // итог (Relevance+Importance+Recency+Access), по которому отсортирован бриф
+	Sum        float64  // Relevance+Importance+Recency+Access, ДО умножения на KindFactor — считается один раз здесь, formatExplainLine его не пересчитывает
+	// KindFactor — понижающий множитель по kind (задача с техдолгом): 1.0 для
+	// всех kind, кроме debt, для debt — config.RecallConfig.DebtWeight (см.
+	// Recaller.debtWeight). Применяется поверх суммы слагаемых выше, а не
+	// внутри них — чтобы трасса честно показывала, ЧТО именно понижает скор.
+	KindFactor float64
+	Final      float64 // итог (Sum * KindFactor), по которому отсортирован бриф
 }
 
 // Candidates выполняет гибридный поиск (FTS + вектор при доступном Embedder, RRF,
@@ -325,8 +344,11 @@ func fuseRRF(sources ...[]memory.Candidate) []rrfEntry {
 }
 
 // rank накладывает бизнес-сигналы поверх RRF (DESIGN.md §8 п.3):
-// final = w_rel·rrf_norm + w_imp·(importance/5) + w_rec·recency_decay + w_acc·log(1+access_count).
-// rrf_norm нормирует rrf в [0,1] по максимуму в текущей выдаче.
+// final = (w_rel·rrf_norm + w_imp·(importance/5) + w_rec·recency_decay + w_acc·log(1+access_count)) * kind_factor.
+// rrf_norm нормирует rrf в [0,1] по максимуму в текущей выдаче. kind_factor — 1.0
+// для всех kind, кроме debt (техдолг): для него применяется r.debtWeight, понижая
+// итоговый скор так, чтобы накопленные долги не вытесняли факты из бюджета
+// токенов, оставаясь при этом в дефолтной выдаче recall (DESIGN.md §4).
 func (r *Recaller) rank(entries []rrfEntry) []scoredCandidate {
 	maxRRF := 0.0
 	for _, e := range entries {
@@ -350,7 +372,13 @@ func (r *Recaller) rank(entries []rrfEntry) []scoredCandidate {
 		importanceTerm := r.weights.Importance * importanceNorm
 		recencyTerm := r.weights.Recency * recency
 		accessTerm := r.weights.Access * accessBoost
-		final := relevanceTerm + importanceTerm + recencyTerm + accessTerm
+		sum := relevanceTerm + importanceTerm + recencyTerm + accessTerm
+
+		kindFactor := 1.0
+		if e.mem.Kind == memory.KindDebt {
+			kindFactor = r.debtWeight
+		}
+		final := sum * kindFactor
 
 		result = append(result, scoredCandidate{
 			mem:   e.mem,
@@ -362,6 +390,8 @@ func (r *Recaller) rank(entries []rrfEntry) []scoredCandidate {
 				Importance: importanceTerm,
 				Recency:    recencyTerm,
 				Access:     accessTerm,
+				Sum:        sum,
+				KindFactor: kindFactor,
 				Final:      final,
 			},
 		})
@@ -467,13 +497,20 @@ func formatLine(m memory.Memory) string {
 // formatExplainLine форматирует explain-довесок под строкой записи брифа
 // (DESIGN.md §8, §12, задача 8.1): источники кандидата и разложение итогового
 // скора на уже взвешенные слагаемые — без пересчёта, те же величины, что явно
-// посчитаны в rank() и сохранены в scoredCandidate.explain. Округление до 2-3
-// знаков — только для читаемости строки, сумма Relevance+Importance+Recency+Access
-// равна Final с точностью до этого округления.
+// посчитаны в rank() и сохранены в scoredCandidate.explain (включая саму сумму,
+// Explain.Sum). Хвост "× kind FACTOR = FINAL" печатается, только если KindFactor
+// отличается от 1.0 (для всех kind, кроме debt, он равен 1.0, и Final совпадает
+// с Sum — печатать тождество было бы бесполезной тавтологией, вдобавок платной:
+// строка удлиняется ДО оценки бюджета в selectByBudget); для debt хвост явно
+// показывает, что именно понижает скор.
 func formatExplainLine(e Explain) string {
 	via := strings.Join(e.Sources, "+")
-	return fmt.Sprintf("  · via %s · rrf %.3f · rel %.2f + imp %.2f + rec %.2f + acc %.2f = %.2f",
-		via, e.RRF, e.Relevance, e.Importance, e.Recency, e.Access, e.Final)
+	line := fmt.Sprintf("  · via %s · rrf %.3f · rel %.2f + imp %.2f + rec %.2f + acc %.2f = %.2f",
+		via, e.RRF, e.Relevance, e.Importance, e.Recency, e.Access, e.Sum)
+	if e.KindFactor != 1 {
+		line += fmt.Sprintf(" × kind %.2f = %.2f", e.KindFactor, e.Final)
+	}
+	return line
 }
 
 // composeBody собирает тело брифа: секции по kind в фиксированном порядке
@@ -483,7 +520,9 @@ func formatExplainLine(e Explain) string {
 // заново.
 func composeBody(included []briefItem, collapsed int) string {
 	var bodyBlocks []string
+	known := make(map[memory.Kind]bool, len(sections))
 	for _, sec := range sections {
+		known[sec.kind] = true
 		var lines []string
 		for _, it := range included {
 			if it.mem.Kind == sec.kind {
@@ -493,6 +532,22 @@ func composeBody(included []briefItem, collapsed int) string {
 		if len(lines) > 0 {
 			bodyBlocks = append(bodyBlocks, "### "+sec.title+"\n"+strings.Join(lines, "\n"))
 		}
+	}
+	// Остаток: kind, не входящий ни в одну известную секцию выше — новый kind,
+	// которого этот бинарь не знает (напр. более новый клиент на общей БД,
+	// DESIGN.md §2.1, либо запись, положенная в обход write.Save). Запись уже
+	// прошла selectByBudget и учтена в Count — молча её не показать значило бы
+	// разойтись с заголовком брифа (DESIGN.md §15: никаких тихих обрезаний).
+	// Порядок внутри блока — тот же, что и у известных секций: included уже
+	// отсортирован по убыванию final.
+	var otherLines []string
+	for _, it := range included {
+		if !known[it.mem.Kind] {
+			otherLines = append(otherLines, it.line)
+		}
+	}
+	if len(otherLines) > 0 {
+		bodyBlocks = append(bodyBlocks, "### Other\n"+strings.Join(otherLines, "\n"))
 	}
 	if collapsed > 0 {
 		bodyBlocks = append(bodyBlocks, fmt.Sprintf(

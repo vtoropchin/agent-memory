@@ -103,10 +103,51 @@ type RecallWeights struct {
 	Access     float64 `toml:"access"`
 }
 
+// DefaultDebtWeight — дефолт понижающего множителя итогового скора записей
+// kind=debt (техдолг, DESIGN.md §4/§8), используемый и Default() (когда TOML
+// не переопределяет recall.debt_weight), и recall.New (когда
+// config.RecallConfig.DebtWeight не задан или вне допустимого диапазона (0,
+// 1] — см. RecallConfig.DebtWeight, RecallConfig.Validate) — одно число,
+// общее для обоих мест, вместо двух независимо согласованных констант.
+const DefaultDebtWeight = 0.6
+
 // RecallConfig — настройки сборки recall-брифа.
 type RecallConfig struct {
 	DefaultTokenBudget int           `toml:"default_token_budget"`
 	Weights            RecallWeights `toml:"weights"`
+	// DebtWeight — понижающий множитель итогового скора записей kind=debt
+	// (техдолг, DESIGN.md §4/§8): применяется в recall.Recaller.rank поверх
+	// обычного final-score, чтобы накопленные долги не вытесняли факты из
+	// бюджета токенов. 0 — единственное значение вне (0, 1], которое трактуется
+	// как "не задано": отсутствующее в TOML поле и явное debt_weight = 0
+	// неразличимы (BurntSushi/toml даёт для обоих нулевое float64) — обоим
+	// откат на дефолт DefaultDebtWeight делает recall.New, а не ошибка. Любое
+	// ДРУГОЕ значение вне (0, 1] (отрицательное, больше 1, NaN/±Inf — TOML 1.0
+	// допускает такие литералы) — опечатка конфигурации, отвергается
+	// Validate/Load (см. годок Validate).
+	DebtWeight float64 `toml:"debt_weight"`
+}
+
+// Validate проверяет RecallConfig на уровне конфигурации. На сегодня
+// покрывает только DebtWeight (имя метода не подразумевает, что остальные
+// поля тоже провалидированы — Weights/DefaultTokenBudget валидации пока не
+// требуют): значение — либо 0 ("не задано в TOML", откат на
+// DefaultDebtWeight делает recall.New, а не Validate), либо строго в
+// диапазоне (0, 1] — это множитель понижения скора, а не произвольное число.
+// Форма условия "!(x > 0 && x <= 1)", а не "x <= 0 || x > 1", отвергает и
+// NaN: обе стороны исходного условия ложны для NaN (любое сравнение с NaN —
+// false), так что naive-форма пропускала бы NaN мимо обеих веток, а TOML 1.0
+// (BurntSushi/toml) допускает литерал "nan". Значение вне диапазона — явная
+// опечатка конфигурации (напр. "6" вместо "0.6"), fail-fast, а не молчаливая
+// деградация (тот же принцип, что у MaintConfig.Durations).
+func (r RecallConfig) Validate() error {
+	if r.DebtWeight == 0 {
+		return nil
+	}
+	if !(r.DebtWeight > 0 && r.DebtWeight <= 1) {
+		return fmt.Errorf("recall.debt_weight %v должен быть в диапазоне (0, 1] (0 — использовать дефолт %v)", r.DebtWeight, DefaultDebtWeight)
+	}
+	return nil
 }
 
 // MaintConfig — настройки фоновых джобов обслуживания памяти (DESIGN.md §11).
@@ -204,6 +245,7 @@ func Default() Config {
 				Recency:    0.4,
 				Access:     0.2,
 			},
+			DebtWeight: DefaultDebtWeight,
 		},
 		Maint: MaintConfig{
 			DecayInterval:    "24h",
@@ -238,6 +280,10 @@ func Load(path string) (Config, error) {
 	}
 
 	if err := cfg.Store.Validate(); err != nil {
+		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
+	}
+
+	if err := cfg.Recall.Validate(); err != nil {
 		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
 	}
 

@@ -121,35 +121,43 @@ func TestDecayArchivesAtImportanceFloor(t *testing.T) {
 	}
 }
 
-func TestDecaySkipsSemantic(t *testing.T) {
-	ctx := context.Background()
-	s := newTestStore(t)
-	w := write.New(s, embed.NewNoop())
-	d := NewDecayer(s, w)
+// TestDecaySkipsNonEpisodic — регрессионная страховка (в т.ч. для нового
+// kind=debt, техдолг): Decayer.Decay работает только с episodic (см. годок
+// Decayer), значит запись любого другого kind, сколь угодно старая, не должна
+// ни понижаться по importance, ни архивироваться. Табличный тест вместо
+// отдельных TestDecaySkipsSemantic/TestDecaySkipsDebt с идентичным телом —
+// заодно накрывает procedural, для которого раньше не было своего кейса.
+func TestDecaySkipsNonEpisodic(t *testing.T) {
+	kinds := []memory.Kind{memory.KindSemantic, memory.KindProcedural, memory.KindDebt}
+	for _, kind := range kinds {
+		t.Run(string(kind), func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStore(t)
+			w := write.New(s, embed.NewNoop())
+			d := NewDecayer(s, w)
 
-	longAgo := time.Now().Add(-30 * 24 * time.Hour).Unix()
-	id := ulid.Make().String()
-	if err := s.Put(ctx, memory.Memory{
-		Id: id, Kind: memory.KindSemantic, Scope: "project:x", Content: "устойчивый факт",
-		Importance: 3, CreatedAt: longAgo, UpdatedAt: longAgo,
-	}); err != nil {
-		t.Fatalf("Put semantic: %v", err)
-	}
+			longAgo := time.Now().Add(-1000 * 24 * time.Hour).Unix()
+			m := putMemoryWithKind(t, s, "project:x", kind, "устойчивая запись", 3, longAgo)
 
-	result, err := d.Decay(ctx, time.Hour, 48*time.Hour, 0)
-	if err != nil {
-		t.Fatalf("Decay: %v", err)
-	}
-	if result.Scanned != 0 {
-		t.Errorf("Scanned = %d, want 0 (semantic decay не подлежит)", result.Scanned)
-	}
+			result, err := d.Decay(ctx, time.Hour, 48*time.Hour, 0)
+			if err != nil {
+				t.Fatalf("Decay: %v", err)
+			}
+			if result.Scanned != 0 {
+				t.Errorf("Scanned = %d, want 0 (%s decay не подлежит)", result.Scanned, kind)
+			}
 
-	got, err := s.Get(ctx, id)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if got.Importance != 3 {
-		t.Errorf("Importance = %d, want 3 (не тронуто)", got.Importance)
+			got, err := s.Get(ctx, m.Id)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Importance != 3 {
+				t.Errorf("Importance = %d, want 3 (не тронуто)", got.Importance)
+			}
+			if got.SupersededBy != nil {
+				t.Errorf("SupersededBy = %v, want nil (не архивировано)", got.SupersededBy)
+			}
+		})
 	}
 }
 

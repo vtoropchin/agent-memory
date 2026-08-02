@@ -83,6 +83,11 @@ model    = "deepseek-chat"
 [recall]
 default_token_budget = 800
 weights = { relevance = 1.0, importance = 0.5, recency = 0.4, access = 0.2 }
+# debt_weight — понижающий множитель итогового скора записей kind=debt (техдолг):
+# долг участвует в дефолтной выдаче recall наравне с остальными записями, но не
+# должен вытеснять факты из бюджета токенов. Не задано (0) = дефолт 0.6; явное
+# значение вне (0, 1] — ошибка конфигурации.
+debt_weight = 0.6
 
 [maint]
 decay_interval    = "24h"

@@ -13,8 +13,8 @@ import (
 )
 
 // kindEnum — допустимые значения поля kind/kinds во входных схемах инструментов
-// (DESIGN.md §2: semantic | episodic | procedural).
-var kindEnum = []any{"semantic", "episodic", "procedural"}
+// (DESIGN.md §2: semantic | episodic | procedural | debt).
+var kindEnum = []any{"semantic", "episodic", "procedural", "debt"}
 
 // linkRelValues — допустимые значения rel во входном links (DESIGN.md §4: типы
 // рёбер графа связей). Используются и для валидации (normalizeLinks), и для
@@ -124,7 +124,7 @@ func mustSchema[T any]() *jsonschema.Schema {
 
 // saveInput — вход инструмента memory_save (DESIGN.md §12).
 type saveInput struct {
-	Kind       string      `json:"kind" jsonschema:"тип памяти: semantic (факт/знание/предпочтение) | episodic (событие сессии) | procedural (рецепт/воркфлоу)"`
+	Kind       string      `json:"kind" jsonschema:"тип памяти: semantic (факт/знание/предпочтение) | episodic (событие сессии) | procedural (рецепт/воркфлоу) | debt (техдолг: известная проблема, отложенная осознанно; content — атомарно: что не так + где (пакет/файл) + почему отложено + критерий закрытия; importance — приоритет долга; tags — область, напр. \"pkg:store\")"`
 	Content    string      `json:"content" jsonschema:"сам факт, атомарно — 1-3 предложения"`
 	Scope      string      `json:"scope" jsonschema:"пространство имён записи: user:*, project:<name> или agent:self"`
 	Importance int         `json:"importance,omitempty" jsonschema:"важность 1..5 (по умолчанию 3, если не указано)"`

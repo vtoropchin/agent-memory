@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -400,6 +401,93 @@ func TestStoreConfigDSNEmptyPassword(t *testing.T) {
 	}
 	if _, ok := u.User.Password(); ok {
 		t.Errorf("Password() ok = true при пустом Password, want false")
+	}
+}
+
+// TestDefaultRecallDebtWeight фиксирует дефолт понижающего множителя для kind=debt
+// (задача с техдолгом): 0.6, тот же, что recall.New подставляет при отсутствии
+// поля в TOML. Сравнение намеренно с литералом, а не с константой DefaultDebtWeight
+// — иначе тест стал бы тавтологией (значение сравнивалось бы само с собой) и не
+// заметил бы случайную правку самой константы.
+func TestDefaultRecallDebtWeight(t *testing.T) {
+	cfg := Default()
+	if cfg.Recall.DebtWeight != 0.6 {
+		t.Errorf("Default().Recall.DebtWeight = %v, want 0.6", cfg.Recall.DebtWeight)
+	}
+	if err := cfg.Recall.Validate(); err != nil {
+		t.Errorf("Default().Recall.Validate() = %v, дефолт должен быть валиден", err)
+	}
+}
+
+// TestRecallConfigValidate покрывает RecallConfig.Validate: 0 (поле не задано в
+// TOML) валиден и трактуется отдельно от Load/recall.New как "используй дефолт",
+// значения внутри (0, 1] валидны, вне диапазона — ошибка.
+func TestRecallConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		weight  float64
+		wantErr bool
+	}{
+		{"0 — не задано, валидно", 0, false},
+		{"0.6 — в диапазоне", 0.6, false},
+		{"1 — верхняя граница включена", 1, false},
+		{"1.5 — вне диапазона", 1.5, true},
+		{"-0.1 — отрицательное", -0.1, true},
+		{"NaN — отвергается", math.NaN(), true},
+		{"+Inf — отвергается", math.Inf(1), true},
+		{"-Inf — отвергается", math.Inf(-1), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (RecallConfig{DebtWeight: tc.weight}).Validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Validate() err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestLoadRecallDebtWeight покрывает recall.debt_weight на уровне Load (TOML ->
+// Load -> assert): явное значение читается как есть, поле, отсутствующее в TOML,
+// оставляет дефолт DefaultDebtWeight нетронутым, а значение вне (0, 1] (включая
+// NaN — баг из code review: TOML 1.0/BurntSushi/toml v1.6.0 допускает литерал
+// "nan" для float-полей, а обычные сравнения ==, <, > всегда дают false для NaN,
+// так что старая форма проверки RecallConfig.Validate пропускала бы его мимо
+// обеих веток) фейлит загрузку конфига целиком — явная опечатка, а не
+// молчаливая деградация.
+func TestLoadRecallDebtWeight(t *testing.T) {
+	tests := []struct {
+		name     string
+		tomlBody string
+		wantErr  bool
+		want     float64
+	}{
+		{"явное значение читается", "[recall]\ndebt_weight = 0.3\n", false, 0.3},
+		// Литерал 0.6, а не константа DefaultDebtWeight — тот же довод, что и в
+		// TestDefaultRecallDebtWeight: иначе кейс сравнивал бы значение само с собой.
+		{"поле не задано — остаётся дефолт", "[recall]\ndefault_token_budget = 500\n", false, 0.6},
+		{"NaN — ошибка", "[recall]\ndebt_weight = nan\n", true, 0},
+		{"вне (0, 1] — ошибка", "[recall]\ndebt_weight = 6\n", true, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			if err := os.WriteFile(path, []byte(tc.tomlBody), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			cfg, err := Load(path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Load() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if cfg.Recall.DebtWeight != tc.want {
+				t.Errorf("Recall.DebtWeight = %v, want %v", cfg.Recall.DebtWeight, tc.want)
+			}
+		})
 	}
 }
 

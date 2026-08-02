@@ -148,3 +148,35 @@ func TestSaveInputSchemaValidatesLinks(t *testing.T) {
 		t.Errorf("Validate(%s) = nil, want ошибку (элемент — ни строка, ни объект)", invalid)
 	}
 }
+
+// TestKindEnumIncludesDebt проверяет, что "debt" (техдолг, четвёртый memory.Kind
+// наравне с semantic/episodic/procedural — согласовано в задаче про сущность
+// техдолга) присутствует в enum поля kind/kinds обеих схем: memory_save (kind)
+// и memory_recall (kinds). Схема memory_recall.kinds фильтрует по типу — без
+// "debt" в её enum отфильтровать записи техдолга через строгий JSON Schema
+// валидатор было бы невозможно.
+func TestKindEnumIncludesDebt(t *testing.T) {
+	saveResolved, err := saveInputSchema().Resolve(nil)
+	if err != nil {
+		t.Fatalf("saveInputSchema().Resolve: %v", err)
+	}
+	var saveArgs any
+	if err := json.Unmarshal([]byte(`{"kind":"debt","content":"c","scope":"s"}`), &saveArgs); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if err := saveResolved.Validate(saveArgs); err != nil {
+		t.Errorf("memory_save schema Validate(kind=debt): %v, want nil", err)
+	}
+
+	recallResolved, err := recallInputSchema().Resolve(nil)
+	if err != nil {
+		t.Fatalf("recallInputSchema().Resolve: %v", err)
+	}
+	var recallArgs any
+	if err := json.Unmarshal([]byte(`{"query":"q","kinds":["debt"]}`), &recallArgs); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if err := recallResolved.Validate(recallArgs); err != nil {
+		t.Errorf("memory_recall schema Validate(kinds=[debt]): %v, want nil", err)
+	}
+}

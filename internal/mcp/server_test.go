@@ -133,6 +133,69 @@ func TestForgetRemovesFromRecall(t *testing.T) {
 	}
 }
 
+// TestSaveAndRecallDebtKind проверяет открытие kind="debt" на MCP-поверхности
+// (сущность техдолга, подзадача B): memory_save принимает kind=debt и запись
+// затем видна в memory_recall — тот же путь, что и для остальных трёх Kind.
+func TestSaveAndRecallDebtKind(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	res, _, err := srv.handleSave(ctx, nil, saveInput{
+		Kind:       "debt",
+		Content:    "internal/memory/store: SQLite-соединение не переживает конкурентный doctor+migrate — отложено до задачи миграций v2.",
+		Scope:      "project:agentmemory",
+		Importance: 4,
+		Tags:       []string{"pkg:store"},
+	})
+	if err != nil {
+		t.Fatalf("handleSave (kind=debt): %v", err)
+	}
+	if !strings.Contains(textOf(res), "Сохранено:") {
+		t.Fatalf("handleSave (kind=debt): неожиданный результат %q", textOf(res))
+	}
+	id := extractID(t, textOf(res))
+
+	recallRes, _, err := srv.handleRecall(ctx, nil, recallInput{
+		Query: "техдолг SQLite doctor migrate",
+		Scope: "project:agentmemory",
+		Kinds: []string{"debt"},
+	})
+	if err != nil {
+		t.Fatalf("handleRecall (kinds=[debt]): %v", err)
+	}
+	if !strings.Contains(textOf(recallRes), "doctor+migrate") {
+		t.Fatalf("бриф не содержит сохранённую запись техдолга:\n%s", textOf(recallRes))
+	}
+
+	// Закрытие долга — существующим механизмом forget+replaced_by (без новых
+	// инструментов/полей): запись о фиксе, затем memory_forget(id, replaced_by).
+	fixRes, _, err := srv.handleSave(ctx, nil, saveInput{
+		Kind:    "semantic",
+		Content: "internal/memory/store: конкурентный doctor+migrate исправлен — соединение открывается заново под мьютексом.",
+		Scope:   "project:agentmemory",
+	})
+	if err != nil {
+		t.Fatalf("handleSave (запись-фикс): %v", err)
+	}
+	fixID := extractID(t, textOf(fixRes))
+
+	if _, _, err := srv.handleForget(ctx, nil, forgetInput{ID: id, ReplacedBy: fixID}); err != nil {
+		t.Fatalf("handleForget (закрытие долга replaced_by): %v", err)
+	}
+
+	after, _, err := srv.handleRecall(ctx, nil, recallInput{
+		Query: "техдолг SQLite doctor migrate",
+		Scope: "project:agentmemory",
+		Kinds: []string{"debt"},
+	})
+	if err != nil {
+		t.Fatalf("handleRecall (после закрытия долга): %v", err)
+	}
+	if strings.Contains(textOf(after), "doctor+migrate") {
+		t.Fatalf("закрытая запись техдолга не должна быть видна в recall:\n%s", textOf(after))
+	}
+}
+
 func TestUpdateImportancePersists(t *testing.T) {
 	ctx := context.Background()
 	srv := newTestServer(t)

@@ -340,6 +340,265 @@ func TestRecall_GroupsByKindInOrder(t *testing.T) {
 	}
 }
 
+// TestRecall_DebtSectionInOrder проверяет, что kind=debt попадает в дефолтную
+// выдачу recall (без явного фильтра kinds) как отдельная секция "Tech debt (debt)",
+// расположенная между How-to (procedural) и Recent context (episodic) — см. годок
+// пакетной переменной sections.
+func TestRecall_DebtSectionInOrder(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:debt-section"
+
+	semID, procID, debtID, epiID := newID(t), newID(t), newID(t), newID(t)
+	putMemory(t, ctx, s, memory.Memory{
+		Id: semID, Kind: memory.KindSemantic, Scope: scope,
+		Content: "общий термин факт про техдолг секцию", Summary: strPtr("Семантический факт"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: procID, Kind: memory.KindProcedural, Scope: scope,
+		Content: "общий термин факт про техдолг секцию", Summary: strPtr("Процедурный рецепт"),
+		Importance: 3, CreatedAt: 2, UpdatedAt: 2,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: debtID, Kind: memory.KindDebt, Scope: scope,
+		Content: "общий термин факт про техдолг секцию", Summary: strPtr("Известная проблема архитектуры"),
+		Importance: 3, CreatedAt: 3, UpdatedAt: 3,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: epiID, Kind: memory.KindEpisodic, Scope: scope,
+		Content: "общий термин факт про техдолг секцию", Summary: strPtr("Эпизодическое событие"),
+		Importance: 3, CreatedAt: 4, UpdatedAt: 4,
+	})
+
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "термин факт техдолг секцию", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+
+	idxHowTo := strings.Index(brief.Markdown, "### How-to (procedural)")
+	idxDebt := strings.Index(brief.Markdown, "### Tech debt (debt)")
+	idxRecent := strings.Index(brief.Markdown, "### Recent context (episodic)")
+	if idxHowTo == -1 || idxDebt == -1 || idxRecent == -1 {
+		t.Fatalf("все секции должны присутствовать:\n%s", brief.Markdown)
+	}
+	if !(idxHowTo < idxDebt && idxDebt < idxRecent) {
+		t.Errorf("порядок секций должен быть How-to -> Tech debt -> Recent context:\n%s", brief.Markdown)
+	}
+	if !strings.Contains(sectionOf(t, brief.Markdown, "Tech debt (debt)"), "Известная проблема архитектуры") {
+		t.Errorf("секция Tech debt должна содержать debt-запись:\n%s", brief.Markdown)
+	}
+}
+
+// TestRecall_UnknownKindStillInBody проверяет DESIGN.md §15 "никаких тихих
+// обрезаний": запись с kind, не входящим ни в одну известную секцию (годок
+// пакетной переменной sections) — например, более новый клиент на общей
+// PostgreSQL-базе (DESIGN.md §2.1) записал kind, которого этот бинарь ещё не
+// знает, либо запись положена в обход write.Save (как cmd/memo/import.go) — уже
+// проходит selectByBudget (учтена в brief.Count) и обязана присутствовать в теле
+// брифа отдельным блоком, а не пропадать молча.
+func TestRecall_UnknownKindStillInBody(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:unknown-kind"
+
+	// Store.Put напрямую, в обход write.Save (которая валидирует kind) — тот же
+	// путь, что даёт находка: cmd/memo/import.go кладёт memory.Kind(rec.Kind) в
+	// store.Put без валидации.
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.Kind("future_kind"), Scope: scope,
+		Content: "запись неизвестного будущего kind", Summary: strPtr("Из будущего"),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "запись неизвестного будущего kind", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if brief.Count != 1 {
+		t.Fatalf("Count = %d, want 1 (запись учтена в бюджете, значит обязана быть и в теле)", brief.Count)
+	}
+	if !strings.Contains(brief.Markdown, "Из будущего") {
+		t.Errorf("тело брифа должно содержать запись неизвестного kind, а не молча её терять:\n%s", brief.Markdown)
+	}
+}
+
+// TestRecall_DebtWeightLowersRank проверяет РЕАЛЬНЫЙ эффект понижающего множителя
+// config.RecallConfig.DebtWeight — вытеснение записи kind=debt из бюджета токенов
+// (не просто перестановку строк в уже целиком вместившемся брифе: composeBody
+// группирует записи по секциям в фиксированном порядке (DESIGN.md §8), так что
+// позиция строки в Markdown ничего не говорит о ранжировании — только бюджетный
+// отбор в selectByBudget его проявляет).
+//
+// Debt-запись намеренно получает более высокую Importance, чем semantic — запас
+// по сигналам ДО применения kindFactor, с большим отрывом, чем любая возможная
+// асимметрия RRF-тай-брейка между двумя записями с идентичным содержимым (та
+// зависит от порядка, в котором стор возвращает связанные строки, и не должна
+// решать исход теста). Token_budget=1 (минимально возможный) по правилу
+// selectByBudget "минимум одна запись" гарантированно оставляет в брифе ровно
+// самую высокоранговую запись, а вторая уходит в Collapsed:
+//   - при DebtWeight=1.0 kindFactor не понижает debt, и она (с преимуществом по
+//     importance) остаётся в бюджете, а semantic вытесняется;
+//   - при малом DebtWeight (0.1) debt проигрывает semantic-записи, несмотря на
+//     исходное преимущество по importance, и вытесняется сама — это и есть эффект
+//     множителя, изолированный от прочих сигналов.
+func TestRecall_DebtWeightLowersRank(t *testing.T) {
+	newFixture := func(t *testing.T) (store.Store, memory.Query) {
+		t.Helper()
+		s := newTestStore(t)
+		ctx := context.Background()
+		scope := "project:debt-weight"
+		semID, debtID := newID(t), newID(t)
+		putMemory(t, ctx, s, memory.Memory{
+			Id: semID, Kind: memory.KindSemantic, Scope: scope,
+			Content: "уникальныймаркерdebtweight общий термин поиска", Summary: strPtr("Семантический факт про вес"),
+			Importance: 1, CreatedAt: 1000, UpdatedAt: 1000,
+		})
+		putMemory(t, ctx, s, memory.Memory{
+			Id: debtID, Kind: memory.KindDebt, Scope: scope,
+			Content: "уникальныймаркерdebtweight общий термин поиска", Summary: strPtr("Долг про вес"),
+			Importance: 5, CreatedAt: 1000, UpdatedAt: 1000,
+		})
+		q := memory.Query{Text: "уникальныймаркерdebtweight общий термин поиска", Scope: scope, TokenBudget: 1}
+		return s, q
+	}
+
+	t.Run("DebtWeight=1.0 — debt (с преимуществом по importance) остаётся в бюджете", func(t *testing.T) {
+		ctx := context.Background()
+		s, q := newFixture(t)
+		r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights(), DebtWeight: 1.0}, reason.NewNoop(), embed.NewNoop(),
+			WithNow(func() int64 { return 1000 }))
+
+		brief, err := r.Recall(ctx, q)
+		if err != nil {
+			t.Fatalf("Recall: %v", err)
+		}
+		if brief.Count != 1 || brief.Collapsed != 1 {
+			t.Fatalf("brief = %+v, want Count=1 Collapsed=1", brief)
+		}
+		if !strings.Contains(brief.Markdown, "Долг про вес") {
+			t.Errorf("при DebtWeight=1.0 debt-запись должна остаться в бюджете:\n%s", brief.Markdown)
+		}
+		if strings.Contains(brief.Markdown, "Семантический факт про вес") {
+			t.Errorf("semantic-запись (ниже по importance) должна быть вытеснена:\n%s", brief.Markdown)
+		}
+	})
+
+	t.Run("DebtWeight=0.1 — debt вытесняется semantic-записью", func(t *testing.T) {
+		ctx := context.Background()
+		s, q := newFixture(t)
+		r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights(), DebtWeight: 0.1}, reason.NewNoop(), embed.NewNoop(),
+			WithNow(func() int64 { return 1000 }))
+
+		brief, err := r.Recall(ctx, q)
+		if err != nil {
+			t.Fatalf("Recall: %v", err)
+		}
+		if brief.Count != 1 || brief.Collapsed != 1 {
+			t.Fatalf("brief = %+v, want Count=1 Collapsed=1", brief)
+		}
+		if !strings.Contains(brief.Markdown, "Семантический факт про вес") {
+			t.Errorf("при малом DebtWeight semantic-запись должна вытеснить debt из бюджета:\n%s", brief.Markdown)
+		}
+		if strings.Contains(brief.Markdown, "Долг про вес") {
+			t.Errorf("debt-запись (несмотря на более высокий importance) должна быть вытеснена малым DebtWeight:\n%s", brief.Markdown)
+		}
+	})
+}
+
+// TestRecall_DebtExplainMatchesKindFactor проверяет, что explain-трасса debt-записи
+// честно отражает применённый множитель (задача 8.1 расширена KindFactor): Final
+// равен сумме слагаемых, умноженной на KindFactor, а не самой сумме.
+func TestRecall_DebtExplainMatchesKindFactor(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:debt-explain"
+
+	debtID := newID(t)
+	putMemory(t, ctx, s, memory.Memory{
+		Id: debtID, Kind: memory.KindDebt, Scope: scope,
+		Content: "уникальныймаркерdebtexplain термин поиска", Summary: strPtr("Долг с трассой"),
+		Importance: 4, CreatedAt: 1000, UpdatedAt: 1000,
+	})
+
+	const debtWeight = 0.6
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights(), DebtWeight: debtWeight}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{
+		Text: "уникальныймаркерdebtexplain термин поиска", Scope: scope, Explain: true,
+	})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if brief.Count != 1 {
+		t.Fatalf("Count = %d, want 1: brief=%+v", brief.Count, brief)
+	}
+
+	e := explainLineFor(t, brief.Markdown, "Долг с трассой")
+	if e.sources != "lexical" {
+		t.Errorf("sources = %q, want lexical", e.sources)
+	}
+	sum := e.rel + e.imp + e.rec + e.acc
+	if math.Abs(e.sum-sum) > 0.02 {
+		t.Errorf("промежуточная сумма в трассе(%.3f) не сходится с rel+imp+rec+acc(%.3f)", e.sum, sum)
+	}
+	if math.Abs(e.kindFactor-debtWeight) > 0.001 {
+		t.Errorf("KindFactor в трассе = %.3f, want debtWeight %.2f", e.kindFactor, debtWeight)
+	}
+	wantFinal := sum * debtWeight
+	if math.Abs(e.final-wantFinal) > 0.02 {
+		t.Errorf("final(%.3f) должен быть суммой слагаемых(%.3f) * debtWeight(%.2f) = %.3f", e.final, sum, debtWeight, wantFinal)
+	}
+}
+
+// TestNew_DebtWeightFallsBackOnInvalidValues проверяет, что recall.New откатывает
+// debtWeight на дефолт config.DefaultDebtWeight для ЛЮБОГО значения вне (0, 1] —
+// включая NaN/+Inf/-Inf, которые TOML 1.0 (BurntSushi/toml) допускает как
+// литералы. Все сравнения (==, <, >) дают false для NaN, поэтому наивная проверка
+// "debtWeight <= 0 || debtWeight > 1" пропускала бы NaN мимо обеих веток и
+// оставляла r.debtWeight == NaN, откуда final-score debt-записей в rank()
+// становился NaN. config.RecallConfig.Validate отсекает такие значения раньше при
+// вызове через config.Load — этот тест проверяет именно New() как отдельную линию
+// защиты (для тестов, будущих вызывающих, не прошедших через Load), напрямую по
+// приватному полю debtWeight (тест лежит в package recall) — без похода через
+// Store/Recall/Markdown ради проверки одного числа.
+//
+// Кейс {"ноль", 0} заодно покрывает и путь "поле не задано вовсе": в Go нулевое
+// значение float64-поля и явное DebtWeight: 0 неразличимы, так что отдельный тест
+// на "config.RecallConfig{} без явного DebtWeight" был бы точным дублем этого
+// кейса. Мутант "config.DefaultDebtWeight = 1.0" должен красить весь набор.
+func TestNew_DebtWeightFallsBackOnInvalidValues(t *testing.T) {
+	cases := []struct {
+		name string
+		in   float64
+	}{
+		{"NaN", math.NaN()},
+		{"+Inf", math.Inf(1)},
+		{"-Inf", math.Inf(-1)},
+		{"больше_1", 1.5},
+		{"ноль", 0},
+		{"отрицательное", -0.1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := New(nil, config.RecallConfig{DebtWeight: tc.in}, reason.NewNoop(), embed.NewNoop())
+			if math.IsNaN(r.debtWeight) || math.IsInf(r.debtWeight, 0) {
+				t.Fatalf("debtWeight не должен быть NaN/Inf при DebtWeight=%v, got %v", tc.in, r.debtWeight)
+			}
+			if r.debtWeight != config.DefaultDebtWeight {
+				t.Errorf("debtWeight = %v, want дефолт %v (DebtWeight=%v вне (0,1])", r.debtWeight, config.DefaultDebtWeight, tc.in)
+			}
+		})
+	}
+}
+
 func TestRecall_FiltersByScope(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -804,13 +1063,28 @@ func TestRecall_NoopEmbedderNeverCallsEmbed(t *testing.T) {
 }
 
 // explainLineRe разбирает explain-довесок, собранный formatExplainLine (задача
-// 8.1): "  · via <источники> · rrf <r> · rel <a> + imp <b> + rec <c> + acc <d> = <f>".
+// 8.1, расширена KindFactor задачей с техдолгом): "  · via <источники> · rrf <r>
+// · rel <a> + imp <b> + rec <c> + acc <d> = <sum>", за которым, ТОЛЬКО если
+// KindFactor != 1, следует необязательный хвост " × kind <factor> = <final>"
+// (formatExplainLine не печатает тождественный хвост "× kind 1.00 = <sum>" —
+// он же тратил бы token_budget на константу). Группы 8 (factor) и 9 (final)
+// пустые, если хвоста нет — explainLineFor трактует это как factor=1, final=sum.
 var explainLineRe = regexp.MustCompile(
-	`· via (\S+) · rrf (-?[\d.]+) · rel (-?[\d.]+) \+ imp (-?[\d.]+) \+ rec (-?[\d.]+) \+ acc (-?[\d.]+) = (-?[\d.]+)`)
+	`· via (\S+) · rrf (-?[\d.]+) · rel (-?[\d.]+) \+ imp (-?[\d.]+) \+ rec (-?[\d.]+) \+ acc (-?[\d.]+) = (-?[\d.]+)(?: × kind (-?[\d.]+) = (-?[\d.]+))?`)
+
+// explainLine — разобранные поля одной explain-строки (см. explainLineRe), уже
+// приведённые к float64, с именованными полями вместо позиционных возвратов.
+type explainLine struct {
+	sources                 string
+	rrf, rel, imp, rec, acc float64
+	sum                     float64 // rel+imp+rec+acc, ДО умножения на kindFactor
+	kindFactor              float64 // 1.0, если хвост "× kind" не напечатан (формат опустил тождественный множитель)
+	final                   float64 // sum*kindFactor — совпадает с sum, если хвоста нет
+}
 
 // explainLineFor находит explain-строку, относящуюся к записи, чей маркер
-// summary/content встречается в md первым после neederMarker, и разбирает её поля.
-func explainLineFor(t *testing.T, md, marker string) (sources string, rrf, rel, imp, rec, acc, final float64) {
+// summary/content встречается в md первым после marker, и разбирает её поля.
+func explainLineFor(t *testing.T, md, marker string) explainLine {
 	t.Helper()
 	idx := strings.Index(md, marker)
 	if idx == -1 {
@@ -828,7 +1102,23 @@ func explainLineFor(t *testing.T, md, marker string) (sources string, rrf, rel, 
 		}
 		return v
 	}
-	return m[1], parse(m[2]), parse(m[3]), parse(m[4]), parse(m[5]), parse(m[6]), parse(m[7])
+	e := explainLine{
+		sources: m[1],
+		rrf:     parse(m[2]),
+		rel:     parse(m[3]),
+		imp:     parse(m[4]),
+		rec:     parse(m[5]),
+		acc:     parse(m[6]),
+		sum:     parse(m[7]),
+	}
+	if m[8] == "" {
+		// Хвост "× kind ... = ..." не напечатан — formatExplainLine опускает его
+		// именно тогда, когда kindFactor == 1 и, следовательно, final == sum.
+		e.kindFactor, e.final = 1, e.sum
+	} else {
+		e.kindFactor, e.final = parse(m[8]), parse(m[9])
+	}
+	return e
 }
 
 // TestRecall_ExplainFalse_BriefByteIdentical проверяет требование задачи 8.1:
@@ -866,11 +1156,14 @@ func TestRecall_ExplainFalse_BriefByteIdentical(t *testing.T) {
 	}
 }
 
-// TestRecall_ExplainTrue_ShowsSourcesAndSumMatchesFinal проверяет саму задачу 8.1:
-// заголовок брифа помечен "(explain)", explain-строка под каждой записью содержит
-// корректные источники (запись, найденная и лексикой, и вектором -> "lexical+vector";
-// запись, найденная только лексикой -> "lexical") и сумма слагаемых Relevance+
-// Importance+Recency+Access сходится с Final (допуск на округление печати).
+// TestRecall_ExplainTrue_ShowsSourcesAndSumMatchesFinal проверяет саму задачу 8.1
+// (расширена KindFactor задачей с техдолгом): заголовок брифа помечен "(explain)",
+// explain-строка под каждой записью содержит корректные источники (запись,
+// найденная и лексикой, и вектором -> "lexical+vector"; запись, найденная только
+// лексикой -> "lexical"), сумма слагаемых Relevance+Importance+Recency+Access
+// сходится с промежуточной суммой в трассе, KindFactor равен 1.0 для НЕ-debt
+// записей (явное требование задачи с техдолгом — kind_factor понижает только
+// debt), а настоящий Final равен (сумма слагаемых) * KindFactor, а не самой сумме.
 func TestRecall_ExplainTrue_ShowsSourcesAndSumMatchesFinal(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -912,25 +1205,37 @@ func TestRecall_ExplainTrue_ShowsSourcesAndSumMatchesFinal(t *testing.T) {
 		t.Fatalf("заголовок брифа должен быть помечен (explain):\n%s", brief.Markdown)
 	}
 
-	sourcesBoth, rrfBoth, relBoth, impBoth, recBoth, accBoth, finalBoth :=
-		explainLineFor(t, brief.Markdown, "Найдена обоими источниками explain")
-	if sourcesBoth != "lexical+vector" {
-		t.Errorf("sources для записи, найденной обоими источниками = %q, want lexical+vector", sourcesBoth)
+	eBoth := explainLineFor(t, brief.Markdown, "Найдена обоими источниками explain")
+	if eBoth.sources != "lexical+vector" {
+		t.Errorf("sources для записи, найденной обоими источниками = %q, want lexical+vector", eBoth.sources)
 	}
-	if sum := relBoth + impBoth + recBoth + accBoth; math.Abs(sum-finalBoth) > 0.02 {
-		t.Errorf("сумма слагаемых %v (=%.3f) не сходится с final %.3f", []float64{relBoth, impBoth, recBoth, accBoth}, sum, finalBoth)
+	if sum := eBoth.rel + eBoth.imp + eBoth.rec + eBoth.acc; math.Abs(sum-eBoth.sum) > 0.02 {
+		t.Errorf("сумма слагаемых %v (=%.3f) не сходится с промежуточной суммой в трассе %.3f",
+			[]float64{eBoth.rel, eBoth.imp, eBoth.rec, eBoth.acc}, sum, eBoth.sum)
 	}
-	if rrfBoth <= 0 {
-		t.Errorf("rrf для найденной записи должен быть положительным, got %v", rrfBoth)
+	if math.Abs(eBoth.kindFactor-1.0) > 0.001 {
+		t.Errorf("KindFactor для не-debt (semantic) записи = %.3f, want 1.0", eBoth.kindFactor)
+	}
+	if wantFinal := eBoth.sum * eBoth.kindFactor; math.Abs(wantFinal-eBoth.final) > 0.02 {
+		t.Errorf("final %.3f должен быть (сумма слагаемых %.3f) * KindFactor %.3f = %.3f", eBoth.final, eBoth.sum, eBoth.kindFactor, wantFinal)
+	}
+	if eBoth.rrf <= 0 {
+		t.Errorf("rrf для найденной записи должен быть положительным, got %v", eBoth.rrf)
 	}
 
-	sourcesLex, _, relLex, impLex, recLex, accLex, finalLex :=
-		explainLineFor(t, brief.Markdown, "Найдена только лексикой explain")
-	if sourcesLex != "lexical" {
-		t.Errorf("sources для записи, найденной только лексикой = %q, want lexical", sourcesLex)
+	eLex := explainLineFor(t, brief.Markdown, "Найдена только лексикой explain")
+	if eLex.sources != "lexical" {
+		t.Errorf("sources для записи, найденной только лексикой = %q, want lexical", eLex.sources)
 	}
-	if sum := relLex + impLex + recLex + accLex; math.Abs(sum-finalLex) > 0.02 {
-		t.Errorf("сумма слагаемых %v (=%.3f) не сходится с final %.3f", []float64{relLex, impLex, recLex, accLex}, sum, finalLex)
+	if sum := eLex.rel + eLex.imp + eLex.rec + eLex.acc; math.Abs(sum-eLex.sum) > 0.02 {
+		t.Errorf("сумма слагаемых %v (=%.3f) не сходится с промежуточной суммой в трассе %.3f",
+			[]float64{eLex.rel, eLex.imp, eLex.rec, eLex.acc}, sum, eLex.sum)
+	}
+	if math.Abs(eLex.kindFactor-1.0) > 0.001 {
+		t.Errorf("KindFactor для не-debt (semantic) записи = %.3f, want 1.0", eLex.kindFactor)
+	}
+	if wantFinal := eLex.sum * eLex.kindFactor; math.Abs(wantFinal-eLex.final) > 0.02 {
+		t.Errorf("final %.3f должен быть (сумма слагаемых %.3f) * KindFactor %.3f = %.3f", eLex.final, eLex.sum, eLex.kindFactor, wantFinal)
 	}
 }
 

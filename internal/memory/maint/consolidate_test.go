@@ -67,6 +67,49 @@ func putEpisodic(t *testing.T, s store.Store, scope, content string, createdAt i
 // что бы ни было передано в olderThan (в разумных пределах часов/дней).
 const veryOld = 1000
 
+// TestConsolidateSkipsDebt — регрессионная страховка нового kind=debt (техдолг):
+// Consolidate работает только с episodic (ListEpisodicForConsolidation выбирает
+// строго kind=episodic на уровне Store, см. годок Consolidator), значит debt-запись
+// не должна ни попасть в промпт Reasoner, ни быть тронутой supersede, даже если она
+// того же scope и того же возраста, что консолидируемые episodic.
+func TestConsolidateSkipsDebt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	a := putEpisodic(t, s, "project:x", "Пользователь любит Go", veryOld)
+	b := putEpisodic(t, s, "project:x", "Пользователь снова пишет на Go", veryOld+1)
+
+	debt := putMemoryWithKind(t, s, "project:x", memory.KindDebt, "известная проблема архитектуры", 3, veryOld)
+	debtID := debt.Id
+
+	resp := fmt.Sprintf(
+		`[{"content": "Пользователь предпочитает Go", "summary": "любит Go", "tags": ["go","pref"], "source_ids": ["%s", "%s"]}]`,
+		a.Id, b.Id,
+	)
+	rs := &fakeReasoner{resp: resp}
+	w := write.New(s, embed.NewNoop())
+	c := NewConsolidator(s, rs, w)
+
+	result, err := c.Consolidate(ctx, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	if result.Scanned != 2 {
+		t.Errorf("Scanned = %d, want 2 (debt не должен попасть в выборку episodic)", result.Scanned)
+	}
+
+	got, err := s.Get(ctx, debtID)
+	if err != nil {
+		t.Fatalf("Get debt: %v", err)
+	}
+	if got.SupersededBy != nil {
+		t.Errorf("debt.SupersededBy = %v, want nil (Consolidate не должен трогать debt)", got.SupersededBy)
+	}
+	if got.Content != "известная проблема архитектуры" {
+		t.Errorf("debt.Content = %q, want не тронуто", got.Content)
+	}
+}
+
 func TestConsolidateSuccess(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

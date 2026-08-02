@@ -121,7 +121,7 @@ API из 6.2.
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| 11.1 CLI на cobra + переработка `init` (провайдеры, динамические модели, интерактив) | [11.1-init-cobra-provider-setup.md](11.1-init-cobra-provider-setup.md) | ⬜ ожидает |
+| 11.1 CLI на cobra + переработка `init` (провайдеры, динамические модели, интерактив) | [11.1-init-cobra-provider-setup.md](11.1-init-cobra-provider-setup.md) | ✅ выполнена |
 
 ## Этап 12 — Общая память команды (PostgreSQL + pgvector)
 
@@ -134,6 +134,17 @@ API из 6.2.
 | 12.1 `init` + postgres: проверка готовности базы и подсказка про `memo migrate` | [12.1-init-postgres-followups.md](12.1-init-postgres-followups.md) | ✅ выполнена |
 | 12.2 Единое экранирование пути в `file:`-URI для SQLite (`OpenSQLite` vs `escapeSQLiteURIPath`) | [12.2-sqlite-uri-escaping.md](12.2-sqlite-uri-escaping.md) | ✅ выполнена |
 | 12.3 Пустой `store.path` для sqlite молча открывает анонимную временную БД | [12.3-empty-sqlite-path.md](12.3-empty-sqlite-path.md) | ⬜ ожидает |
+
+## Этап 13 — Сущность техдолга (`kind = "debt"`)
+
+Техдолг хранится в `memo` наравне с остальной памятью — новый `kind = "debt"`,
+без миграции схемы и без отдельных MCP-инструментов/CLI-подкоманды. Одна задача
+на всю итерацию (ядро kind+recall+config, MCP-поверхность, web — независимые
+подзадачи A/B/C внутри неё).
+
+| Задача | Файл | Статус |
+|--------|------|--------|
+| 13.1 Сущность «техдолг» (kind=debt): ядро, MCP, web | [13.1-tech-debt-entity.md](13.1-tech-debt-entity.md) | ✅ выполнена |
 
 ### Отклонённые идеи (чтобы не возвращаться)
 

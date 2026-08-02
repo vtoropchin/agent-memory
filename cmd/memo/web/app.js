@@ -12,10 +12,11 @@ const KIND_BADGE_CLASS = {
   semantic: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
   episodic: "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200",
   procedural: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
+  debt: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
 };
 const KIND_BADGE_CLASS_DEFAULT = "bg-slate-100 text-slate-800 dark:bg-slate-700 dark:text-slate-200";
 
-const KIND_LABEL = { semantic: "семантика", episodic: "эпизод", procedural: "процедура" };
+const KIND_LABEL = { semantic: "семантика", episodic: "эпизод", procedural: "процедура", debt: "тех-долг" };
 
 // --- бейдж источника кандидата поиска (задача 10.1): "lexical"/"vector"/
 // "lexical+vector" (Candidate.Source, см. DESIGN.md §8/§12, задача 8.1) -> короткая

@@ -193,7 +193,7 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		return "", false, ErrEmptyScope
 	}
 	switch in.Kind {
-	case memory.KindSemantic, memory.KindEpisodic, memory.KindProcedural:
+	case memory.KindSemantic, memory.KindEpisodic, memory.KindProcedural, memory.KindDebt:
 	default:
 		return "", false, fmt.Errorf("%w: %q", ErrUnknownKind, in.Kind)
 	}

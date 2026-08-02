@@ -39,7 +39,7 @@ func runRecall(args []string, out io.Writer) error {
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	scopesFlag := fs.String("scopes", "", "пространства через запятую (пусто — дефолт инстанса из [scope])")
-	kindsFlag := fs.String("kinds", "", "типы через запятую: semantic,episodic,procedural (пусто — все)")
+	kindsFlag := fs.String("kinds", "", "типы через запятую: semantic,episodic,procedural,debt (пусто — все)")
 	budget := fs.Int("budget", 0, "бюджет токенов брифа (0 — дефолт из [recall])")
 	jsonOut := fs.Bool("json", false, "печатать сырой JSON вместо Markdown")
 	quiet := fs.Bool("quiet", false, "при пустой выдаче — пустой stdout и exit 0 (для хуков)")
@@ -147,7 +147,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 	}
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
-	kindFlag := fs.String("kind", "", "тип факта: semantic|episodic|procedural (обязателен)")
+	kindFlag := fs.String("kind", "", "тип факта: semantic|episodic|procedural|debt (обязателен)")
 	contentFlag := fs.String("content", "", "текст факта (обязателен); \"-\" — читать из stdin")
 	importance := fs.Int("importance", 0, "важность 1..5 (0 — дефолт 3)")
 	tagsFlag := fs.String("tags", "", "теги через запятую")

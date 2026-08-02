@@ -24,7 +24,8 @@ func buildInstructions(scope config.ScopeConfig) string {
 	b.WriteString("- факту с известным сроком годности задавай ttl (memory_save/memory_update) — Go-длительность от сейчас, напр. \"72h\"; в memory_update \"0\" снимает срок.\n")
 	b.WriteString("- links (в memory_save и memory_update) — связь либо строка-id (rel=related), либо объект {\"id\":..,\"rel\":..} с типом: related|supersedes|causes|part_of; links в memory_update ДОБАВЛЯЕТ связи, не заменяет их.\n")
 	b.WriteString("- memory_update — правка существующего факта (содержание, важность, теги, links).\n")
-	b.WriteString("- memory_forget — мягкое удаление (тумстоун): запись перестаёт участвовать в recall, история сохраняется.\n\n")
+	b.WriteString("- memory_forget — мягкое удаление (тумстоун): запись перестаёт участвовать в recall, история сохраняется.\n")
+	b.WriteString("- kind=debt — техдолг: известная проблема, отложенная осознанно; в отличие от episodic сам не затухает — закрывай явно через memory_forget(id, replaced_by=<id записи о фиксе>).\n\n")
 
 	if scope.Project == "" {
 		b.WriteString("Мультипроектность выключена (adhoc-режим):\n")
