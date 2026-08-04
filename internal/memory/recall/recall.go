@@ -113,6 +113,7 @@ type section struct {
 var sections = []section{
 	{memory.KindSemantic, "Facts (semantic)"},
 	{memory.KindProcedural, "How-to (procedural)"},
+	{memory.KindTask, "Tasks (task)"},
 	{memory.KindDebt, "Tech debt (debt)"},
 	{memory.KindEpisodic, "Recent context (episodic)"},
 }
@@ -485,11 +486,19 @@ func estimateTokens(s string) int {
 }
 
 // formatLine форматирует одну строку брифа: краткая форма (Summary), если задана,
-// иначе Content, плюс маркер важности.
+// иначе Content, плюс маркер важности. У задач (memory.KindTask) строка
+// дополнительно начинается с маркера состояния — `- [doing] Заголовок [★4]`:
+// список задач без статусов бесполезен, а сам статус в бриф иначе не попадает
+// (в строку выводится только текст записи). Для задачи Summary — её заголовок и
+// он обязателен (write.ErrTaskSummaryRequired), поэтому многокилобайтный content
+// задачи в бриф не просачивается; полный текст агент забирает по id (memory_get).
 func formatLine(m memory.Memory) string {
 	text := m.Content
 	if m.Summary != nil && strings.TrimSpace(*m.Summary) != "" {
 		text = *m.Summary
+	}
+	if m.Kind == memory.KindTask && m.Status != "" {
+		return fmt.Sprintf("- [%s] %s [★%d]", m.Status, text, m.Importance)
 	}
 	return fmt.Sprintf("- %s [★%d]", text, m.Importance)
 }

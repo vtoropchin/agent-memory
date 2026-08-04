@@ -28,6 +28,7 @@ func (s *Server) handleRecall(ctx context.Context, _ *sdkmcp.CallToolRequest, in
 		Text:          in.Query,
 		Scopes:        s.resolveRecallScopes(in),
 		Kinds:         in.Kinds,
+		Statuses:      in.Statuses,
 		Tags:          in.Tags,
 		CreatedAfter:  createdAfter,
 		CreatedBefore: createdBefore,

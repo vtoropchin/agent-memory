@@ -31,6 +31,7 @@ func (s *Server) handleUpdate(ctx context.Context, _ *sdkmcp.CallToolRequest, in
 		Content:    in.Content,
 		Summary:    in.Summary,
 		Importance: in.Importance,
+		Status:     in.Status,
 		Tags:       in.Tags,
 		Links:      links,
 		TTL:        in.TTL,

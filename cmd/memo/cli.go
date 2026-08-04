@@ -39,7 +39,8 @@ func runRecall(args []string, out io.Writer) error {
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	scopesFlag := fs.String("scopes", "", "пространства через запятую (пусто — дефолт инстанса из [scope])")
-	kindsFlag := fs.String("kinds", "", "типы через запятую: semantic,episodic,procedural,debt (пусто — все)")
+	kindsFlag := fs.String("kinds", "", "типы через запятую: semantic,episodic,procedural,debt,task (пусто — все)")
+	statusesFlag := fs.String("statuses", "", "состояния задач через запятую: todo,doing,blocked,done (пусто — все записи, кроме выполненных задач)")
 	budget := fs.Int("budget", 0, "бюджет токенов брифа (0 — дефолт из [recall])")
 	jsonOut := fs.Bool("json", false, "печатать сырой JSON вместо Markdown")
 	quiet := fs.Bool("quiet", false, "при пустой выдаче — пустой stdout и exit 0 (для хуков)")
@@ -76,6 +77,7 @@ func runRecall(args []string, out io.Writer) error {
 		Text:        query,
 		Scopes:      scopes,
 		Kinds:       splitCSV(*kindsFlag),
+		Statuses:    splitCSV(*statusesFlag),
 		TokenBudget: *budget,
 		Summarize:   *summarize,
 	})
@@ -147,8 +149,10 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 	}
 	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
-	kindFlag := fs.String("kind", "", "тип факта: semantic|episodic|procedural|debt (обязателен)")
+	kindFlag := fs.String("kind", "", "тип факта: semantic|episodic|procedural|debt|task (обязателен)")
 	contentFlag := fs.String("content", "", "текст факта (обязателен); \"-\" — читать из stdin")
+	summaryFlag := fs.String("summary", "", "краткая форма для брифа; для -kind task это заголовок задачи и он обязателен")
+	statusFlag := fs.String("status", "", "состояние задачи: todo|doing|blocked|done (только для -kind task; пусто — todo)")
 	importance := fs.Int("importance", 0, "важность 1..5 (0 — дефолт 3)")
 	tagsFlag := fs.String("tags", "", "теги через запятую")
 	scopeFlag := fs.String("scope", "", "пространство записи (пусто — домашний scope инстанса из [scope])")
@@ -213,6 +217,8 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 		Kind:       memory.Kind(*kindFlag),
 		Scope:      scope,
 		Content:    content,
+		Summary:    *summaryFlag,
+		Status:     *statusFlag,
 		Importance: *importance,
 		Tags:       splitCSV(*tagsFlag),
 		Source:     source,

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,6 +30,18 @@ var (
 	// Save/Update возвращают ошибку, а не молча трактуют невалидный ttl как
 	// "вечно" — агент должен узнать об опечатке в формате сразу.
 	ErrInvalidTTL = errors.New("write: невалидный ttl")
+	// ErrUnknownStatus — status не входит в memory.Statuses (задача 14.1).
+	ErrUnknownStatus = errors.New("write: неизвестный status")
+	// ErrStatusNotApplicable — status передан для записи, у которой его не
+	// бывает: состояние есть только у задач (memory.KindTask). Fail-fast, а не
+	// молчаливое отбрасывание, — иначе агент, перепутавший kind, считал бы, что
+	// завёл задачу, и не нашёл бы её ни по одному фильтру статуса.
+	ErrStatusNotApplicable = errors.New("write: status допустим только для kind=task")
+	// ErrTaskSummaryRequired — у задачи (kind=task) не задан summary. Content
+	// задачи — документ целиком, в бриф recall выводится Summary (см.
+	// recall.formatLine), поэтому заголовок задачи обязателен: без него бриф
+	// распух бы полным текстом одной задачи.
+	ErrTaskSummaryRequired = errors.New("write: для kind=task обязателен summary — заголовок задачи")
 )
 
 // defaultDedupLimit — сколько кандидатов из того же scope/kind рассматриваем при
@@ -103,11 +116,15 @@ type LinkInput struct {
 // SaveInput — структурированный факт, который агент передаёт на вход Save.
 // Классификацию (Kind) и разбиение на атомарные факты делает агент (DESIGN.md §7.1).
 type SaveInput struct {
-	Kind       memory.Kind
-	Scope      string
-	Content    string
-	Summary    string // ультра-короткая форма для брифа (DESIGN.md §4); пусто = не указана.
-	Importance int    // 1..5; 0 трактуется как «не указано» → дефолт 3
+	Kind    memory.Kind
+	Scope   string
+	Content string
+	Summary string // ультра-короткая форма для брифа (DESIGN.md §4); пусто = не указана.
+	// Status — состояние задачи (memory.Status), только для Kind == KindTask:
+	// пусто → memory.StatusTodo (задача заводится не начатой). Для остальных
+	// kind непустое значение — ErrStatusNotApplicable (см. normalizeStatus).
+	Status     string
+	Importance int // 1..5; 0 трактуется как «не указано» → дефолт 3
 	Tags       []string
 	Links      []LinkInput // связи с целевыми записями; висячие ссылки пропускаются молча (см. Save)
 	Source     string      // session id / откуда пришло; пусто = не указан
@@ -137,7 +154,14 @@ type UpdateInput struct {
 	Summary    *string
 	Importance *int // нормализуется ClampImportance — тем же правилом, что и Save
 	Tags       []string
-	Links      []LinkInput // связи, добавляемые к текущим links записи (пустой Rel -> related);
+	// Status — новое состояние задачи (memory.Status), задача 14.1: nil — не
+	// менять. Применим только к записи с Kind == KindTask (иначе
+	// ErrStatusNotApplicable), значение обязано входить в memory.Statuses.
+	// Пустая строка здесь НЕ сентинел «снять» (в отличие от Summary/TTL):
+	// задача без состояния бессмысленна, поэтому пустой status — та же ошибка,
+	// что и неизвестный.
+	Status *string
+	Links  []LinkInput // связи, добавляемые к текущим links записи (пустой Rel -> related);
 	// висячие ссылки пропускаются молча, как в Save (см. resolveLinks); nil — не менять.
 	// TTL продлевает или снимает срок жизни записи (задача 9.4): nil — не менять
 	// текущий ExpiresAt; "" или "0" — снять срок (запись становится вечной,
@@ -193,9 +217,17 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		return "", false, ErrEmptyScope
 	}
 	switch in.Kind {
-	case memory.KindSemantic, memory.KindEpisodic, memory.KindProcedural, memory.KindDebt:
+	case memory.KindSemantic, memory.KindEpisodic, memory.KindProcedural, memory.KindDebt, memory.KindTask:
 	default:
 		return "", false, fmt.Errorf("%w: %q", ErrUnknownKind, in.Kind)
+	}
+	summary := strings.TrimSpace(in.Summary)
+	if in.Kind == memory.KindTask && summary == "" {
+		return "", false, ErrTaskSummaryRequired
+	}
+	status, err := normalizeStatus(in.Kind, in.Status)
+	if err != nil {
+		return "", false, err
 	}
 	now := w.now()
 	expiresAt, err := parseTTL(in.TTL, now)
@@ -226,8 +258,8 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		sourcePtr = &s
 	}
 	var summaryPtr *string
-	if s := strings.TrimSpace(in.Summary); s != "" {
-		summaryPtr = &s
+	if summary != "" {
+		summaryPtr = &summary
 	}
 
 	m := memory.Memory{
@@ -241,6 +273,7 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		UpdatedAt:  now,
 		Source:     sourcePtr,
 		ExpiresAt:  expiresAt,
+		Status:     status,
 		Tags:       tags,
 		Links:      links,
 	}
@@ -282,7 +315,12 @@ func (w *Writer) embedNow(ctx context.Context, id, content string) {
 // SearchLexical не заполняет Tags кандидатов (см. store.SearchLexical) — это не
 // проблема: сравнение идёт только по Content, а при слиянии reinforce отдельно
 // запрашивает полную запись через Store.Get.
+//
+// Задачи (memory.KindTask) дедупом не проходят вовсе — см. SkipDedup.
 func (w *Writer) dedup(ctx context.Context, scope string, kind memory.Kind, content string, importance int, tags []string) (string, bool, error) {
+	if SkipDedup(kind) {
+		return "", false, nil
+	}
 	candidates, err := w.store.SearchLexical(ctx, memory.Query{
 		Text:  content,
 		Scope: scope,
@@ -325,6 +363,19 @@ func isNearDuplicate(normNew, normOld string) bool {
 	}
 	return hammingDistance(simhash64(normNew), simhash64(normOld)) <= simhashDistanceThreshold
 }
+
+// SkipDedup сообщает, исключён ли этот kind из дедупликации похожего контента —
+// и на write path (Writer.dedup), и в ретроактивном dedup-sweep (DESIGN.md §11,
+// maint.DedupSweeper), чтобы правило существовало в коде ровно один раз.
+//
+// Исключены задачи (memory.KindTask): у них content — документ (описание,
+// границы, критерий приёмки), и две РАЗНЫЕ задачи по одной подсистеме
+// текстуально похожи настолько, что SimHash-порог, откалиброванный на коротких
+// атомарных фактах (simhashDistanceThreshold), счёл бы их дублем. Цена ошибки
+// здесь несимметрична: лишний факт в памяти — шум, а слитая задача — потерянная
+// работа, о которой агент уже не вспомнит. Дубли задач разводит сам агент,
+// заводящий их осознанно, а не эвристика.
+func SkipDedup(kind memory.Kind) bool { return kind == memory.KindTask }
 
 // IsNearDuplicate экспортирует то же правило «дублирования» контента, которое
 // write path использует при вставке (см. isNearDuplicate выше), для повторного
@@ -490,6 +541,20 @@ func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 		}
 		changed = true
 	}
+	if in.Status != nil {
+		status, err := normalizeStatus(m.Kind, *in.Status)
+		if err != nil {
+			return err
+		}
+		// Пустой вход для задачи normalizeStatus трактует как «не указан» и даёт
+		// дефолт todo — при СОЗДАНИИ это верно, при правке означало бы молчаливый
+		// откат состояния к начальному вместо того, о чём просил вызывающий.
+		if strings.TrimSpace(*in.Status) == "" {
+			return fmt.Errorf("%w: пустое значение", ErrUnknownStatus)
+		}
+		m.Status = status
+		changed = true
+	}
 	if in.Tags != nil {
 		m.Tags = unionTags(nil, in.Tags)
 		changed = true
@@ -577,6 +642,39 @@ func mergeLinks(existing, additional []memory.Link) []memory.Link {
 		out = append(out, l)
 	}
 	return out
+}
+
+// normalizeStatus приводит переданный status к memory.Status с учётом kind
+// записи (задача 14.1) — единственное место этого правила для Save и Update:
+//   - kind != task: непустой status — ErrStatusNotApplicable (состояние есть
+//     только у задач), пустой — "" (у записи нет статуса);
+//   - kind == task: пустой status — дефолт memory.StatusTodo (задача заводится
+//     не начатой), значение вне memory.Statuses — ErrUnknownStatus.
+func normalizeStatus(kind memory.Kind, status string) (memory.Status, error) {
+	status = strings.TrimSpace(status)
+	if kind != memory.KindTask {
+		if status != "" {
+			return "", fmt.Errorf("%w (получен %q для kind=%q)", ErrStatusNotApplicable, status, kind)
+		}
+		return "", nil
+	}
+	if status == "" {
+		return memory.StatusTodo, nil
+	}
+	if !slices.Contains(memory.Statuses, memory.Status(status)) {
+		return "", fmt.Errorf("%w: %q, допустимые значения: %s", ErrUnknownStatus, status, statusList())
+	}
+	return memory.Status(status), nil
+}
+
+// statusList перечисляет допустимые статусы через запятую — для текста ошибки
+// (тот же перечень memory.Statuses, что и в валидации; не расходится).
+func statusList() string {
+	out := make([]string, len(memory.Statuses))
+	for i, s := range memory.Statuses {
+		out[i] = string(s)
+	}
+	return strings.Join(out, ", ")
 }
 
 // ClampImportance приводит importance к диапазону [1,5]; 0 (не указано) → дефолт 3.

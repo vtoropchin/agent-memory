@@ -93,6 +93,7 @@ func recordToMemory(rec exportRecord) memory.Memory {
 		SupersededBy: rec.SupersededBy,
 		Source:       rec.Source,
 		ExpiresAt:    rec.ExpiresAt,
+		Status:       memory.Status(rec.Status),
 		Tags:         rec.Tags,
 	}
 }

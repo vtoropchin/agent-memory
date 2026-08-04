@@ -40,7 +40,9 @@ func NewDedupSweeper(s store.Store) *DedupSweeper {
 // Scope И Kind): одинаковый текст в разных scope дублем не считается, и запись
 // одного Kind никогда не supersede'ит запись другого Kind в том же scope — даже
 // при идентичном content (episodic-наблюдение и semantic-факт легитимно разные
-// сущности, пусть и сформулированные одинаково).
+// сущности, пусть и сформулированные одинаково). Задачи (kind=task) в сравнение
+// не попадают вовсе — write.SkipDedup, см. groupForDedup; они не входят и в
+// DedupResult.Scanned (счётчик честно означает «просканировано на дубли»).
 //
 // Из каждой найденной пары выживает запись с большим Importance, при равенстве —
 // более новая (CreatedAt); проигравшая помечается Store.Supersede(loserID,
@@ -79,9 +81,16 @@ type dedupGroupKey struct {
 // похожих становится «чемпионом» первой в sweepGroup. Порядок обхода самих групп
 // на результат не влияет: группы независимы (Supersede происходит только внутри
 // одной группы), поэтому достаточно map, а не упорядоченного слайса.
+// Kind, исключённый из дедупликации на write path (write.SkipDedup — задачи,
+// kind=task), не попадает в группы и здесь: иначе ретроактивный sweep слил бы
+// ровно те записи, которые Save сознательно не сливает, и правило зависело бы от
+// того, каким путём запись попала в БД.
 func groupForDedup(all []memory.Memory) map[dedupGroupKey][]memory.Memory {
 	groups := make(map[dedupGroupKey][]memory.Memory)
 	for _, m := range all {
+		if write.SkipDedup(m.Kind) {
+			continue
+		}
 		key := dedupGroupKey{scope: m.Scope, kind: m.Kind}
 		groups[key] = append(groups[key], m)
 	}

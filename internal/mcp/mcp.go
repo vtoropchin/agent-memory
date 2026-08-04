@@ -23,8 +23,8 @@ const (
 )
 
 // Server — MCP-сервер AgentMemory: держит уже собранные Writer/Recaller/Store и
-// регистрирует поверх них ровно 4 инструмента (DESIGN.md §12): memory_save,
-// memory_recall, memory_update, memory_forget.
+// регистрирует поверх них ровно 5 инструментов (DESIGN.md §12): memory_save,
+// memory_recall, memory_get, memory_update, memory_forget.
 type Server struct {
 	sdk      *sdkmcp.Server
 	writer   *write.Writer
@@ -62,6 +62,12 @@ func (s *Server) registerTools() {
 		Description: "Найти релевантную память по смыслу запроса и вернуть компактный Markdown-бриф, сгруппированный по типу и обрезанный под бюджет токенов.",
 		InputSchema: recallInputSchema(),
 	}, s.handleRecall)
+
+	sdkmcp.AddTool(s.sdk, &sdkmcp.Tool{
+		Name:        "memory_get",
+		Description: "Прочитать одну запись памяти целиком по её id: полный content (для задач — весь текст задачи) плюс метаданные. Нужен, когда брифа memory_recall недостаточно — он показывает только краткую форму.",
+		InputSchema: getInputSchema(),
+	}, s.handleGet)
 
 	sdkmcp.AddTool(s.sdk, &sdkmcp.Tool{
 		Name:        "memory_update",

@@ -179,7 +179,7 @@ func (s *pgStore) ListMissingVectors(ctx context.Context, limit int) ([]memory.M
 
 	a := &argList{}
 	query := `
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
 		FROM memories m
 		LEFT JOIN ` + s.vecTable() + ` v ON v.memory_id = m.id
 		WHERE m.superseded_by IS NULL AND v.memory_id IS NULL

@@ -13,10 +13,33 @@ const KIND_BADGE_CLASS = {
   episodic: "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200",
   procedural: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
   debt: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
+  task: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200",
 };
 const KIND_BADGE_CLASS_DEFAULT = "bg-slate-100 text-slate-800 dark:bg-slate-700 dark:text-slate-200";
 
-const KIND_LABEL = { semantic: "семантика", episodic: "эпизод", procedural: "процедура", debt: "тех-долг" };
+const KIND_LABEL = { semantic: "семантика", episodic: "эпизод", procedural: "процедура", debt: "тех-долг", task: "задача" };
+
+// --- бейдж состояния задачи (kind=task, задача 14.1): memory.Status -> подпись
+// и цвет. Литеральные классы — для Tailwind-сканера @source, как и у KIND_BADGE_CLASS. ---
+const STATUS_LABEL = { todo: "к работе", doing: "в работе", blocked: "заблокирована", done: "выполнена" };
+const STATUS_BADGE_CLASS = {
+  todo: "border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-400",
+  doing: "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400",
+  blocked: "border-rose-300 text-rose-700 dark:border-rose-700 dark:text-rose-400",
+  done: "border-emerald-300 text-emerald-700 dark:border-emerald-700 dark:text-emerald-400",
+};
+const STATUS_BADGE_CLASS_DEFAULT = "border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-400";
+
+// statusBadge — чип состояния задачи или null, если у записи статуса нет (все
+// kind, кроме task). Вызывающий код добавляет результат только при непустом
+// значении — чтобы карточки прочих типов памяти выглядели ровно как раньше.
+function statusBadge(status) {
+  if (!status) return null;
+  return el("span", {
+    class: "rounded-full border px-2 py-0.5 text-xs font-medium " + (STATUS_BADGE_CLASS[status] || STATUS_BADGE_CLASS_DEFAULT),
+    text: STATUS_LABEL[status] || status,
+  });
+}
 
 // --- бейдж источника кандидата поиска (задача 10.1): "lexical"/"vector"/
 // "lexical+vector" (Candidate.Source, см. DESIGN.md §8/§12, задача 8.1) -> короткая
@@ -521,6 +544,9 @@ function renderCard(item, isSearch) {
 
   const topRow = el("div", { class: "flex flex-wrap items-center gap-2" }, [kindBadge, scopeBadge, stars]);
 
+  const status = statusBadge(item.status);
+  if (status) topRow.appendChild(status);
+
   if (item.supersededBy) {
     topRow.appendChild(
       el("span", {
@@ -542,6 +568,14 @@ function renderCard(item, isSearch) {
     );
   }
 
+  // У задачи (kind=task) summary — заголовок, а content — весь документ задачи:
+  // без отдельной строки заголовка список задач по одной подсистеме выглядит
+  // как несколько одинаковых абзацев. Для остальных типов памяти карточка
+  // остаётся прежней: там summary — не заголовок, а краткий пересказ content,
+  // и печатать оба подряд значило бы дублировать одно и то же.
+  const titleEl = item.kind === "task" && item.summary
+    ? el("p", { class: "mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100", text: item.summary })
+    : null;
   const contentEl = el("p", { class: "mt-2 text-sm text-slate-800 dark:text-slate-200", text: firstLines(item.content, 220) });
 
   const tagsRow = el("div", { class: "mt-2 flex flex-wrap gap-1" });
@@ -562,7 +596,7 @@ function renderCard(item, isSearch) {
         openCard(item.id);
       },
     },
-    [topRow, contentEl, tagsRow, el("div", { class: "mt-2" }, [dateEl])]
+    [topRow, titleEl, contentEl, tagsRow, el("div", { class: "mt-2" }, [dateEl])]
   );
   return card;
 }
@@ -883,7 +917,10 @@ function renderCardModal(card) {
     ? renderImportanceControl(m.id, m.importance, handleMetadataUpdated)
     : el("span", { class: "text-amber-500 text-sm", text: fmtStars(m.importance) });
 
-  content.appendChild(el("div", { class: "flex flex-wrap items-center gap-2" }, [kindBadge, scopeBadge, importanceEl, vectorStatusBadge(card.embedding)]));
+  const badges = [kindBadge, scopeBadge, importanceEl, vectorStatusBadge(card.embedding)];
+  const statusEl = statusBadge(m.status);
+  if (statusEl) badges.splice(2, 0, statusEl);
+  content.appendChild(el("div", { class: "flex flex-wrap items-center gap-2" }, badges));
 
   if (m.supersededBy) {
     content.appendChild(

@@ -284,3 +284,42 @@ func TestSweepIsIdempotent(t *testing.T) {
 		t.Errorf("Sweep #2: Scanned = %d, want 1 (после первого прохода жива только одна запись)", second.Scanned)
 	}
 }
+
+// TestSweepSkipsTasks: задачи не участвуют в ретроактивном дедупе (write.SkipDedup,
+// задача 14.1) — две задачи с идентичным content остаются двумя живыми записями,
+// тогда как та же пара semantic-записей схлопывается в одну.
+func TestSweepSkipsTasks(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:tasks-sweep"
+
+	t1 := putMemoryWithKind(t, s, scope, memory.KindTask, near1, 3, 100)
+	t2 := putMemoryWithKind(t, s, scope, memory.KindTask, near1, 3, 200)
+	f1 := putMemoryWithKind(t, s, scope, memory.KindSemantic, near1, 3, 100)
+	f2 := putMemoryWithKind(t, s, scope, memory.KindSemantic, near1, 3, 200)
+
+	res, err := NewDedupSweeper(s).Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.Superseded != 1 {
+		t.Errorf("Superseded = %d, want 1 (схлопнуться должна только пара semantic)", res.Superseded)
+	}
+
+	for _, id := range []string{t1.Id, t2.Id} {
+		m, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get %s: %v", id, err)
+		}
+		if m.SupersededBy != nil {
+			t.Errorf("задача %s не должна быть схлопнута дедупом", id)
+		}
+	}
+	loser, err := s.Get(ctx, f1.Id)
+	if err != nil {
+		t.Fatalf("Get %s: %v", f1.Id, err)
+	}
+	if loser.SupersededBy == nil || *loser.SupersededBy != f2.Id {
+		t.Errorf("пара semantic обязана схлопнуться в пользу более новой записи, got %v", loser.SupersededBy)
+	}
+}

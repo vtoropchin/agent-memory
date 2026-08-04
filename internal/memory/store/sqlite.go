@@ -164,7 +164,7 @@ const createMemoriesFTS = `CREATE VIRTUAL TABLE memories_fts USING fts5(content,
 // (content, summary, tags) без content_stemmed (пересобрать и перегнать контент).
 // Задача 9.4 (TTL) добавила migrations[1]/schemaVersion=2 тем же механизмом, не
 // трогая migrate()/этот комментарий про сам механизм — см. migrateExpiresAt.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // migrationStep — один шаг миграции схемы: переводит БД с версии i на версию i+1.
 // Выполняется целиком в одной транзакции.
@@ -175,6 +175,7 @@ type migrationStep func(ctx context.Context, tx *sql.Tx) error
 var migrations = []migrationStep{
 	migrateStemmedFTS, // 0 -> 1 (задача 8.3): memories_fts + колонка content_stemmed
 	migrateExpiresAt,  // 1 -> 2 (задача 9.4): memories + колонка expires_at (TTL)
+	migrateStatus,     // 2 -> 3 (задача 14.1): memories + колонка status (состояние задачи)
 }
 
 // migrate применяет по порядку шаги migrations, начиная с версии, прочитанной из
@@ -391,6 +392,26 @@ func migrateExpiresAt(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// migrateStatus — миграция 2 -> 3 (задача 14.1): добавляет к memories колонку
+// status (nullable TEXT — состояние задачи, memory.Status, DESIGN.md §4). Как и
+// expires_at, в baseSchema сознательно не объявляется: единая точка правды о
+// форме memories после введения задач — здесь. Существующие строки получают
+// NULL — записи прочих kind статуса и не имеют (Memory.Status пусто), досчёта не
+// требуется: задач в БД, созданной до этой миграции, не существует.
+func migrateStatus(ctx context.Context, tx *sql.Tx) error {
+	has, err := hasColumn(ctx, tx, "memories", "status")
+	if err != nil {
+		return fmt.Errorf("проверка колонки status: %w", err)
+	}
+	if has {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE memories ADD COLUMN status TEXT`); err != nil {
+		return fmt.Errorf("добавление колонки status: %w", err)
+	}
+	return nil
+}
+
 // sqliteStore — реализация Store поверх SQLite (метаданные + FTS5 + sqlite-vec).
 type sqliteStore struct {
 	db  *sql.DB
@@ -508,16 +529,25 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 	if m.ExpiresAt > 0 {
 		expiresAt = m.ExpiresAt
 	}
+	// status: пусто (записи прочих kind, у которых состояния не бывает) хранится
+	// как SQL NULL, а не пустой строкой — иначе фильтр «не выполненная задача»
+	// и любой будущий IS NULL-предикат отличали бы «нет статуса» от '' лишь по
+	// соглашению.
+	var status any
+	if m.Status != "" {
+		status = string(m.Status)
+	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			kind=excluded.kind, scope=excluded.scope, content=excluded.content, summary=excluded.summary,
 			importance=excluded.importance, created_at=excluded.created_at, updated_at=excluded.updated_at,
 			accessed_at=excluded.accessed_at, access_count=excluded.access_count,
-			superseded_by=excluded.superseded_by, source=excluded.source, expires_at=excluded.expires_at
-	`, m.Id, string(m.Kind), m.Scope, m.Content, m.Summary, m.Importance, m.CreatedAt, m.UpdatedAt, m.AccessedAt, m.AccessCount, m.SupersededBy, m.Source, expiresAt)
+			superseded_by=excluded.superseded_by, source=excluded.source, expires_at=excluded.expires_at,
+			status=excluded.status
+	`, m.Id, string(m.Kind), m.Scope, m.Content, m.Summary, m.Importance, m.CreatedAt, m.UpdatedAt, m.AccessedAt, m.AccessCount, m.SupersededBy, m.Source, expiresAt, status)
 	if err != nil {
 		return fmt.Errorf("upsert memories: %w", err)
 	}
@@ -572,7 +602,7 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 // Get возвращает запись по id вместе с её тегами и исходящими связями.
 func (s *sqliteStore) Get(ctx context.Context, id string) (memory.Memory, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
 		FROM memories WHERE id = ?
 	`, id)
 
@@ -681,10 +711,11 @@ func scanMemory(row rowScanner) (memory.Memory, error) {
 		superseded sql.NullString
 		source     sql.NullString
 		expiresAt  sql.NullInt64
+		status     sql.NullString
 	)
 
 	if err := row.Scan(&m.Id, &kind, &m.Scope, &m.Content, &summary, &m.Importance,
-		&m.CreatedAt, &m.UpdatedAt, &accessedAt, &m.AccessCount, &superseded, &source, &expiresAt); err != nil {
+		&m.CreatedAt, &m.UpdatedAt, &accessedAt, &m.AccessCount, &superseded, &source, &expiresAt, &status); err != nil {
 		return memory.Memory{}, err
 	}
 
@@ -703,6 +734,9 @@ func scanMemory(row rowScanner) (memory.Memory, error) {
 	}
 	if expiresAt.Valid {
 		m.ExpiresAt = expiresAt.Int64
+	}
+	if status.Valid {
+		m.Status = memory.Status(status.String)
 	}
 	return m, nil
 }
@@ -743,6 +777,33 @@ func kindPredicate(kinds []string) (clause string, args []any) {
 		args[i] = k
 	}
 	return "m.kind IN (" + strings.Join(placeholders, ",") + ")", args
+}
+
+// statusPredicate строит условие фильтра по состоянию задачи (Query.Statuses,
+// задача 14.1) — единая точка для metaFilters (recall) и List (browse-морда).
+//
+// Пустой набор — НЕ «без фильтра»: выдача очищается от выполненных задач
+// (kind='task' И status='done'). Записи прочих kind проходят всегда (у них
+// status = NULL, а NOT (…) на NULL-колонке в SQL даёт UNKNOWN, поэтому условие
+// написано через явную дизъюнкцию, а не через NOT). Правило одностороннее:
+// «сделанное не мешается под ногами, пока его не спросили» — спросить можно,
+// передав Statuses = ["done"] либо, для полного обзора без фильтра состояний,
+// Query.IncludeDone (см. её годок).
+func statusPredicate(statuses []string, includeDone bool) (clause string, args []any) {
+	if len(statuses) == 0 {
+		if includeDone {
+			return "", nil
+		}
+		return "(m.status IS NULL OR m.kind <> ? OR m.status <> ?)",
+			[]any{string(memory.KindTask), string(memory.StatusDone)}
+	}
+	placeholders := make([]string, len(statuses))
+	args = make([]any, len(statuses))
+	for i, s := range statuses {
+		placeholders[i] = "?"
+		args[i] = s
+	}
+	return "m.status IN (" + strings.Join(placeholders, ",") + ")", args
 }
 
 // tagsPredicate строит условие "хотя бы один из тегов" (OR-семантика, Query.Tags,
@@ -793,6 +854,10 @@ func metaFilters(q memory.Query, now int64) (conds []string, args []any) {
 		conds = append(conds, clause)
 		args = append(args, kindArgs...)
 	}
+	if clause, statusArgs := statusPredicate(q.Statuses, q.IncludeDone); clause != "" {
+		conds = append(conds, clause)
+		args = append(args, statusArgs...)
+	}
 	if q.SinceTs > 0 {
 		conds = append(conds, "m.created_at >= ?")
 		args = append(args, q.SinceTs)
@@ -828,7 +893,7 @@ func (s *sqliteStore) SearchLexical(ctx context.Context, q memory.Query) ([]memo
 	matchQuery := sanitizeFTSQuery(q.Text)
 	useMatch := matchQuery != ""
 
-	query := "SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at"
+	query := "SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status"
 	if useMatch {
 		query += ", -bm25(memories_fts) AS score FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid"
 		conds = append(conds, "memories_fts MATCH ?")
@@ -979,7 +1044,7 @@ func (s *sqliteStore) SearchVector(ctx context.Context, vec []float32, q memory.
 		WITH knn AS (
 			SELECT memory_id, distance FROM memories_vec WHERE embedding MATCH ? AND k = ?
 		)
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, knn.distance
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status, knn.distance
 		FROM knn JOIN memories m ON m.id = knn.memory_id
 		WHERE ` + strings.Join(conds, " AND ") + `
 		ORDER BY knn.distance ASC
@@ -1060,7 +1125,7 @@ func (s *sqliteStore) SemanticNeighbors(ctx context.Context, id string, k int) (
 			SELECT memory_id, distance FROM memories_vec
 			WHERE embedding MATCH (SELECT embedding FROM memories_vec WHERE memory_id = ?) AND k = ?
 		)
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, knn.distance
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status, knn.distance
 		FROM knn JOIN memories m ON m.id = knn.memory_id
 		ORDER BY knn.distance ASC
 	`
@@ -1096,7 +1161,7 @@ func (s *sqliteStore) SemanticNeighbors(ctx context.Context, id string, k int) (
 // не должны включать тумстоуны.
 func (s *sqliteStore) Neighbors(ctx context.Context, id string) ([]memory.Memory, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at
+		SELECT DISTINCT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
 		FROM memories m
 		JOIN links l ON (l.dst = m.id AND l.src = ?) OR (l.src = m.id AND l.dst = ?)
 		WHERE m.superseded_by IS NULL
@@ -1198,7 +1263,7 @@ func (s *sqliteStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory
 	}
 
 	query := `
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
 		FROM memories m` + where + `
 		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT ? OFFSET ?
@@ -1358,7 +1423,7 @@ func (s *sqliteStore) AllForExport(ctx context.Context, scopes []string) ([]memo
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
 		FROM memories m`+where+`
 		ORDER BY m.id ASC
 	`, args...)
@@ -1462,7 +1527,7 @@ func (s *sqliteStore) ListMissingVectors(ctx context.Context, limit int) ([]memo
 	}
 
 	query := `
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at
+		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
 		FROM memories m
 		LEFT JOIN memories_vec v ON v.memory_id = m.id
 		WHERE m.superseded_by IS NULL AND v.memory_id IS NULL
@@ -1500,7 +1565,7 @@ func (s *sqliteStore) ListMissingVectors(ctx context.Context, limit int) ([]memo
 // подгрузка тегов/связей на каждую запись была бы N+1 запросом без пользы.
 func (s *sqliteStore) ListEpisodicForConsolidation(ctx context.Context, olderThan int64, limit int) ([]memory.Memory, error) {
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
 		FROM memories
 		WHERE kind = ? AND superseded_by IS NULL AND created_at < ?
 		ORDER BY scope, created_at
@@ -1538,7 +1603,7 @@ func (s *sqliteStore) ListEpisodicForConsolidation(ctx context.Context, olderTha
 // (maint.Decayer) использует только Id/Importance/CreatedAt/AccessedAt.
 func (s *sqliteStore) ListEpisodicForDecay(ctx context.Context, notAccessedSince int64, limit int) ([]memory.Memory, error) {
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
 		FROM memories
 		WHERE kind = ? AND superseded_by IS NULL AND COALESCE(accessed_at, created_at) < ?
 		ORDER BY COALESCE(accessed_at, created_at)
@@ -1578,7 +1643,7 @@ func (s *sqliteStore) ListEpisodicForDecay(ctx context.Context, notAccessedSince
 // Tags/Links не подгружаются — Expirer использует только Id.
 func (s *sqliteStore) ListExpired(ctx context.Context, now int64, limit int) ([]memory.Memory, error) {
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
 		FROM memories
 		WHERE superseded_by IS NULL AND expires_at IS NOT NULL AND expires_at > 0 AND expires_at < ?
 		ORDER BY expires_at

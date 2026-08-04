@@ -17,7 +17,7 @@ import (
 func buildInstructions(scope config.ScopeConfig) string {
 	var b strings.Builder
 
-	b.WriteString("AgentMemory — долговременная память агента. 4 инструмента: memory_save, memory_recall, memory_update, memory_forget.\n\n")
+	b.WriteString("AgentMemory — долговременная память агента. 5 инструментов: memory_save, memory_recall, memory_get, memory_update, memory_forget.\n\n")
 	b.WriteString("- memory_recall — вызывай в начале задачи: возвращает Markdown-бриф релевантной памяти по смыслу запроса.\n")
 	b.WriteString("- memory_recall поддерживает фильтры tags (хотя бы один из тегов) и created_after/created_before (длительность назад от сейчас, напр. \"168h\" = за неделю).\n")
 	b.WriteString("- memory_save — сохраняй один атомарный факт/событие/процедуру (1–3 предложения) за вызов, не сваливай несколько фактов в одну запись.\n")
@@ -25,7 +25,11 @@ func buildInstructions(scope config.ScopeConfig) string {
 	b.WriteString("- links (в memory_save и memory_update) — связь либо строка-id (rel=related), либо объект {\"id\":..,\"rel\":..} с типом: related|supersedes|causes|part_of; links в memory_update ДОБАВЛЯЕТ связи, не заменяет их.\n")
 	b.WriteString("- memory_update — правка существующего факта (содержание, важность, теги, links).\n")
 	b.WriteString("- memory_forget — мягкое удаление (тумстоун): запись перестаёт участвовать в recall, история сохраняется.\n")
-	b.WriteString("- kind=debt — техдолг: известная проблема, отложенная осознанно; в отличие от episodic сам не затухает — закрывай явно через memory_forget(id, replaced_by=<id записи о фиксе>).\n\n")
+	b.WriteString("- memory_get — прочитать запись целиком по id (полный content); memory_recall показывает только краткую форму.\n")
+	b.WriteString("- kind=debt — техдолг: известная проблема, отложенная осознанно; в отличие от episodic сам не затухает — закрывай явно через memory_forget(id, replaced_by=<id записи о фиксе>).\n")
+	b.WriteString("- kind=task — задача агента вместо файла TODO: content — полный текст задачи (что сделать, границы, критерий приёмки), summary ОБЯЗАТЕЛЕН и служит заголовком в брифе, status = todo|doing|blocked|done (по умолчанию todo).\n")
+	b.WriteString("- ход работы веди через memory_update(id, status=...): взял — doing, ждёшь чего-то — blocked, закончил — done; отменённую задачу убирай через memory_forget. Подзадачи и зависимости — обычные links (part_of/causes).\n")
+	b.WriteString("- memory_recall без фильтра НЕ показывает выполненные задачи (status=done); чтобы увидеть сделанное, передай statuses=[\"done\"], чтобы получить свой список дел — statuses=[\"todo\",\"doing\",\"blocked\"].\n\n")
 
 	if scope.Project == "" {
 		b.WriteString("Мультипроектность выключена (adhoc-режим):\n")

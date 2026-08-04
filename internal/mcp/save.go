@@ -33,6 +33,8 @@ func (s *Server) handleSave(ctx context.Context, _ *sdkmcp.CallToolRequest, in s
 		Kind:       memory.Kind(in.Kind),
 		Scope:      scope,
 		Content:    in.Content,
+		Summary:    in.Summary,
+		Status:     in.Status,
 		Importance: in.Importance,
 		Tags:       in.Tags,
 		Links:      links,

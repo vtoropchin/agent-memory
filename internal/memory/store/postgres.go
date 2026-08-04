@@ -218,8 +218,15 @@ var baseSchemaStatements = []string{
 		superseded_by text,
 		source        text,
 		expires_at    bigint,
+		status        text,
 		search_vec    tsvector
 	)`,
+	// status добавляется ещё и отдельным ALTER (не только в CREATE TABLE выше) —
+	// идемпотентно и для БД, созданных до появления задач (kind=task, задача
+	// 14.1): в SQLite ту же роль играет шаг миграции migrateStatus, здесь
+	// достаточно ADD COLUMN IF NOT EXISTS (тот же приём, что у
+	// schema_version.triggers_checksum), поэтому pgMigrations не заводится.
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS status text`,
 	`CREATE INDEX IF NOT EXISTS memories_search_vec_idx ON memories USING GIN (search_vec)`,
 	`CREATE TABLE IF NOT EXISTS tags (
 		memory_id text NOT NULL REFERENCES memories(id),

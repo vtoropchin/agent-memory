@@ -13,8 +13,23 @@ import (
 )
 
 // kindEnum — допустимые значения поля kind/kinds во входных схемах инструментов
-// (DESIGN.md §2: semantic | episodic | procedural | debt).
-var kindEnum = []any{"semantic", "episodic", "procedural", "debt"}
+// (DESIGN.md §2: semantic | episodic | procedural | debt | task).
+var kindEnum = []any{"semantic", "episodic", "procedural", "debt", "task"}
+
+// statusEnum — допустимые значения status/statuses во входных схемах (DESIGN.md
+// §4, задача 14.1). Выводится из memory.Statuses — единственного перечня
+// состояний задачи, чтобы схема инструмента не разъезжалась с валидацией write.
+var statusEnum = func() []any {
+	out := make([]any, len(memory.Statuses))
+	for i, s := range memory.Statuses {
+		out[i] = string(s)
+	}
+	return out
+}()
+
+// statusDescription — общее описание поля status для memory_save/memory_update
+// (задача 14.1).
+const statusDescription = "состояние задачи (только для kind=task): todo — заведена, работа не начата (по умолчанию) | doing — взята в работу | blocked — ждёт внешнего разблокирования | done — выполнена (запись остаётся в истории, но перестаёт попадать в дефолтную выдачу memory_recall). Для остальных типов памяти поле не задаётся."
 
 // linkRelValues — допустимые значения rel во входном links (DESIGN.md §4: типы
 // рёбер графа связей). Используются и для валидации (normalizeLinks), и для
@@ -124,9 +139,11 @@ func mustSchema[T any]() *jsonschema.Schema {
 
 // saveInput — вход инструмента memory_save (DESIGN.md §12).
 type saveInput struct {
-	Kind       string      `json:"kind" jsonschema:"тип памяти: semantic (факт/знание/предпочтение) | episodic (событие сессии) | procedural (рецепт/воркфлоу) | debt (техдолг: известная проблема, отложенная осознанно; content — атомарно: что не так + где (пакет/файл) + почему отложено + критерий закрытия; importance — приоритет долга; tags — область, напр. \"pkg:store\")"`
-	Content    string      `json:"content" jsonschema:"сам факт, атомарно — 1-3 предложения"`
+	Kind       string      `json:"kind" jsonschema:"тип памяти: semantic (факт/знание/предпочтение) | episodic (событие сессии) | procedural (рецепт/воркфлоу) | debt (техдолг: известная проблема, отложенная осознанно; content — атомарно: что не так + где (пакет/файл) + почему отложено + критерий закрытия; importance — приоритет долга; tags — область, напр. \"pkg:store\") | task (задача: единица работы вместо файла TODO; content — полный документ задачи (что сделать, границы, критерий приёмки), summary ОБЯЗАТЕЛЕН и служит заголовком, status — состояние, importance — приоритет)"`
+	Content    string      `json:"content" jsonschema:"сам факт, атомарно — 1-3 предложения; для kind=task — полный текст задачи (описание, границы, критерий приёмки), объём не ограничен"`
 	Scope      string      `json:"scope" jsonschema:"пространство имён записи: user:*, project:<name> или agent:self"`
+	Summary    string      `json:"summary,omitempty" jsonschema:"краткая форма для брифа recall — вместо content выводится именно она; для kind=task это заголовок задачи и он обязателен"`
+	Status     string      `json:"status,omitempty" jsonschema:"состояние задачи (см. описание поля)"`
 	Importance int         `json:"importance,omitempty" jsonschema:"важность 1..5 (по умолчанию 3, если не указано)"`
 	Tags       []string    `json:"tags,omitempty" jsonschema:"теги для группировки и поиска"`
 	Links      []linkEntry `json:"links,omitempty"`
@@ -137,6 +154,8 @@ type saveInput struct {
 func saveInputSchema() *jsonschema.Schema {
 	s := mustSchema[saveInput]()
 	s.Properties["kind"].Enum = kindEnum
+	s.Properties["status"].Enum = statusEnum
+	s.Properties["status"].Description = statusDescription
 	s.Properties["links"] = &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription}
 	s.Properties["ttl"].Description = ttlDescription
 	return s
@@ -148,7 +167,10 @@ type recallInput struct {
 	Scope  string   `json:"scope,omitempty" jsonschema:"фильтр по одиночному пространству имён: user:*, project:<name> или agent:self (back-compat, см. scopes)"`
 	Scopes []string `json:"scopes,omitempty" jsonschema:"фильтр по набору пространств имён, перекрывает scope, напр. [\"project:<name>\", \"user:*\"]; пусто — дефолт инстанса: свой проект (project:<name>) плюс общий user:*; если у инстанса не настроен проект — без фильтра"`
 	Kinds  []string `json:"kinds,omitempty" jsonschema:"фильтр по типу памяти; пусто — искать по всем типам"`
-	Tags   []string `json:"tags,omitempty" jsonschema:"вернуть только записи, у которых есть хотя бы один из перечисленных тегов (OR); пусто — без фильтра по тегам"`
+	// Statuses — фильтр по состоянию задачи (задача 14.1). Пусто НЕ означает
+	// «все»: выполненные задачи из дефолтной выдачи исключаются (memory.Query.Statuses).
+	Statuses []string `json:"statuses,omitempty" jsonschema:"фильтр по состоянию задач (kind=task): вернуть только задачи с одним из перечисленных статусов. Пусто — все записи, КРОМЕ выполненных задач (status=done); чтобы увидеть сделанное, передай [\"done\"] явно"`
+	Tags     []string `json:"tags,omitempty" jsonschema:"вернуть только записи, у которых есть хотя бы один из перечисленных тегов (OR); пусто — без фильтра по тегам"`
 	// CreatedAfter/CreatedBefore — задача 8.2. Формат выбран длительностью назад от
 	// текущего момента (не абсолютной датой) — типичный запрос агента формулируется
 	// относительно "сейчас" ("за последнюю неделю"), а не конкретным календарным
@@ -163,6 +185,7 @@ type recallInput struct {
 func recallInputSchema() *jsonschema.Schema {
 	s := mustSchema[recallInput]()
 	s.Properties["kinds"].Items.Enum = kindEnum
+	s.Properties["statuses"].Items.Enum = statusEnum
 	return s
 }
 
@@ -174,6 +197,7 @@ type updateInput struct {
 	Content    *string     `json:"content,omitempty" jsonschema:"новый текст факта, если его нужно изменить"`
 	Summary    *string     `json:"summary,omitempty" jsonschema:"новая краткая форма для брифа; пустая строка очищает summary"`
 	Importance *int        `json:"importance,omitempty" jsonschema:"новая важность 1..5"`
+	Status     *string     `json:"status,omitempty" jsonschema:"новое состояние задачи (см. описание поля)"`
 	Tags       []string    `json:"tags,omitempty" jsonschema:"новый полный набор тегов — полностью заменяет старый"`
 	Links      []linkEntry `json:"links,omitempty"` // ДОБАВЛЯЮТСЯ к текущим links записи (не заменяют, в отличие от Tags — см. write.UpdateInput.Links)
 	// TTL — указатель, а не string: отличает "не менять срок" (nil, поле не
@@ -183,10 +207,21 @@ type updateInput struct {
 
 func updateInputSchema() *jsonschema.Schema {
 	s := mustSchema[updateInput]()
+	s.Properties["status"].Enum = statusEnum
+	s.Properties["status"].Description = statusDescription + " Смена статуса — обычная правка задачи: memory_update(id, status=\"doing\"|\"done\")."
 	linksSchema := &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription + " В отличие от tags, links ДОБАВЛЯЕТСЯ к уже существующим связям записи, а не заменяет их."}
 	s.Properties["links"] = linksSchema
 	s.Properties["ttl"].Description = ttlDescription + " Чтобы продлить или установить срок, передай длительность; чтобы снять срок (сделать запись вечной), передай \"0\"; не указано — текущий срок не меняется."
 	return s
+}
+
+// getInput — вход инструмента memory_get (DESIGN.md §12, задача 14.1).
+type getInput struct {
+	ID string `json:"id" jsonschema:"id (ULID) записи, которую нужно прочитать целиком"`
+}
+
+func getInputSchema() *jsonschema.Schema {
+	return mustSchema[getInput]()
 }
 
 // forgetInput — вход инструмента memory_forget (DESIGN.md §12).

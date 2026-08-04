@@ -213,9 +213,14 @@ type memoryDTO struct {
 	// ExpiresAt — явный срок жизни записи (unix ts, задача 9.4): 0 = вечная,
 	// без срока (Memory.ExpiresAt). Read-only показ в карточке — правка TTL из
 	// web-морды вне этой версии (см. DESIGN.md §12: read + курирование метаданных).
-	ExpiresAt int64     `json:"expiresAt"`
-	Tags      []string  `json:"tags"`
-	Links     []linkDTO `json:"links"`
+	ExpiresAt int64 `json:"expiresAt"`
+	// Status — состояние задачи (kind=task, задача 14.1): пусто у записей
+	// прочих типов. Read-only, как и ExpiresAt: смена статуса — работа агента
+	// через MCP, web-морда остаётся чтением + курированием метаданных
+	// (importance/tags, DESIGN.md §12).
+	Status string    `json:"status"`
+	Tags   []string  `json:"tags"`
+	Links  []linkDTO `json:"links"`
 }
 
 // linkDTO — представление memory.Link ({dst, rel}) для JSON API.
@@ -269,6 +274,7 @@ func toDTO(m memory.Memory) memoryDTO {
 		SupersededBy: m.SupersededBy,
 		Source:       m.Source,
 		ExpiresAt:    m.ExpiresAt,
+		Status:       string(m.Status),
 		Tags:         tags,
 		Links:        links,
 	}
@@ -636,7 +642,14 @@ func handleSearch(s store.Store, rc *recall.Recaller, embedder memembed.Embedder
 			Text:   text,
 			Scopes: nonEmpty(q["scope"]),
 			Kinds:  nonEmpty(q["kind"]),
-			Limit:  limit,
+			// IncludeDone (задача 14.1): в read path пустой фильтр состояний
+			// означает «всё, кроме выполненных задач» — правило recall-брифа
+			// агента, где сделанное не должно вытеснять актуальное. Морда —
+			// инструмент обзора: поиск в ней обязан находить и выполненные
+			// задачи, иначе они видны в листинге (Store.List статус не
+			// фильтрует), но пропадают в поиске по тем же данным.
+			IncludeDone: true,
+			Limit:       limit,
 		}
 
 		var candidates []memory.Candidate

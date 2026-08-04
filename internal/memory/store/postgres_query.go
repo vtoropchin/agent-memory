@@ -51,6 +51,25 @@ func kindPredicatePG(a *argList, kinds []string) string {
 	return "m.kind IN (" + strings.Join(placeholders, ",") + ")"
 }
 
+// statusPredicatePG — аналог statusPredicate (sqlite.go) для $N-плейсхолдеров:
+// фильтр по состоянию задачи (Query.Statuses, задача 14.1). Пустой набор — не
+// «без фильтра», а исключение выполненных задач из выдачи; семантику и довод
+// про NULL см. в годоке statusPredicate.
+func statusPredicatePG(a *argList, statuses []string, includeDone bool) string {
+	if len(statuses) == 0 {
+		if includeDone {
+			return ""
+		}
+		return "(m.status IS NULL OR m.kind <> " + a.add(string(memory.KindTask)) +
+			" OR m.status <> " + a.add(string(memory.StatusDone)) + ")"
+	}
+	placeholders := make([]string, len(statuses))
+	for i, s := range statuses {
+		placeholders[i] = a.add(s)
+	}
+	return "m.status IN (" + strings.Join(placeholders, ",") + ")"
+}
+
 // tagsPredicatePG — аналог tagsPredicate (sqlite.go) для $N-плейсхолдеров: условие
 // "хотя бы один из тегов" (OR-семантика, Query.Tags, задача 8.2) через EXISTS —
 // запись не задваивается, если совпало несколько перечисленных тегов.
@@ -80,6 +99,9 @@ func metaFiltersPG(a *argList, q memory.Query, now int64) []string {
 		conds = append(conds, clause)
 	}
 	if clause := kindPredicatePG(a, q.Kinds); clause != "" {
+		conds = append(conds, clause)
+	}
+	if clause := statusPredicatePG(a, q.Statuses, q.IncludeDone); clause != "" {
 		conds = append(conds, clause)
 	}
 	if q.SinceTs > 0 {

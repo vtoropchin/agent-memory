@@ -86,9 +86,14 @@ type exportRecord struct {
 	// поля при импорте (recordToMemory, старые бэкапы без TTL включительно)
 	// читается как нулевое значение Go — те же 0/вечная, обратная совместимость
 	// без инкремента exportVersion (поле аддитивное и опциональное).
-	ExpiresAt int64        `json:"expires_at,omitempty"`
-	Tags      []string     `json:"tags"`
-	Links     []exportLink `json:"links"`
+	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// Status — состояние задачи (kind=task, задача 14.1). omitempty по тем же
+	// причинам, что и у ExpiresAt: у записей прочих kind статуса нет, и поле не
+	// должно засорять бэкап пустой строкой; отсутствие поля в старых бэкапах
+	// читается как пустой статус — аддитивно, exportVersion не меняется.
+	Status string       `json:"status,omitempty"`
+	Tags   []string     `json:"tags"`
+	Links  []exportLink `json:"links"`
 }
 
 // memoryToExportRecord переводит доменную Memory в сериализуемую запись.
@@ -120,6 +125,7 @@ func memoryToExportRecord(m memory.Memory) exportRecord {
 		SupersededBy: m.SupersededBy,
 		Source:       m.Source,
 		ExpiresAt:    m.ExpiresAt,
+		Status:       string(m.Status),
 		Tags:         tags,
 		Links:        links,
 	}

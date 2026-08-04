@@ -99,7 +99,7 @@ func embedMetaFromDB(ctx context.Context, db *sql.DB) (string, int, error) {
 // живёт в вызывающих методах, а не здесь.
 func liveMemoriesFromDB(ctx context.Context, db *sql.DB) ([]memory.Memory, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at
+		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
 		FROM memories
 		WHERE superseded_by IS NULL
 	`)
