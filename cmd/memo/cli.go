@@ -36,7 +36,7 @@ func runRecall(args []string, out io.Writer) error {
 		fmt.Fprintln(out, "Использование: memo recall [флаги] \"<запрос>\"")
 		fs.PrintDefaults()
 	}
-	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
+	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально; если задан — обязан существовать)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	scopesFlag := fs.String("scopes", "", "пространства через запятую (пусто — дефолт инстанса из [scope])")
 	kindsFlag := fs.String("kinds", "", "типы через запятую: semantic,episodic,procedural,debt,task (пусто — все)")
@@ -147,7 +147,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 		fmt.Fprintln(out, "Использование: memo save -kind <kind> -content <текст|-> [флаги]")
 		fs.PrintDefaults()
 	}
-	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
+	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально; если задан — обязан существовать)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	kindFlag := fs.String("kind", "", "тип факта: semantic|episodic|procedural|debt|task (обязателен)")
 	contentFlag := fs.String("content", "", "текст факта (обязателен); \"-\" — читать из stdin")

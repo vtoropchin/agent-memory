@@ -279,16 +279,30 @@ func FilePath(path string) string {
 	return path
 }
 
-// Load читает TOML-конфиг из path и накладывает его поверх дефолтов. Если файл не
-// существует, возвращает чистые дефолты без ошибки — конфиг работает и без файла.
+// Load читает TOML-конфиг из path и накладывает его поверх дефолтов. Пустой
+// path (флаг -config не передан) — чистые дефолты без ошибки: конфиг
+// опционален. Но раз путь назван явно, он обязан существовать: отсутствующий
+// файл, несуществующий путь и каталог без FileName — ошибка с абсолютным
+// путём, а не тихие дефолты. Для сервера, который является единственным
+// хранилищем знаний проекта, опечатка в -config или пустая переменная
+// окружения иначе незаметно переключали бы сессию на чужую/пустую БД
+// (~/.agentmemory/memory.db из Default()).
 //
-// path может быть и каталогом проекта: тогда читается <dir>/FileName, а его
-// отсутствие — уже ошибка с именем искомого файла (пользователь явно назвал
-// проект, тихие дефолты здесь скрыли бы опечатку в пути), и относительный
-// store.path разрешается от этого каталога, а не от cwd процесса — иначе
-// `memo -config <dir>`, запущенный из другого места, открывал бы чужой файл.
-// Для пути к файлу контракт прежний: относительный store.path остаётся как
-// есть и резолвится потребителем (store.OpenSQLite — от cwd).
+// path может быть каталогом проекта: тогда читается <dir>/FileName, а
+// относительный store.path разрешается от этого каталога, а не от cwd
+// процесса — иначе `memo -config <dir>`, запущенный из другого места,
+// открывал бы чужой файл. Для пути к файлу контракт прежний: относительный
+// store.path остаётся как есть и резолвится потребителем (store.OpenSQLite —
+// от cwd).
+// absPath — путь для сообщения об ошибке: абсолютный, чтобы из лога MCP-сервера
+// (чей cwd не виден пользователю) было ясно, куда именно смотрел memo.
+func absPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
 func Load(path string) (Config, error) {
 	cfg := Default()
 
@@ -299,11 +313,14 @@ func Load(path string) (Config, error) {
 	file := FilePath(path)
 	fromDir := file != path
 
-	if _, err := os.Stat(file); os.IsNotExist(err) {
-		if fromDir {
-			return Config{}, fmt.Errorf("в каталоге %s нет файла конфига %s", path, file)
+	if _, err := os.Stat(file); err != nil {
+		if !os.IsNotExist(err) {
+			return Config{}, fmt.Errorf("конфиг %s: %w", absPath(file), err)
 		}
-		return cfg, nil
+		if fromDir {
+			return Config{}, fmt.Errorf("в каталоге %s нет %s", absPath(path), FileName)
+		}
+		return Config{}, fmt.Errorf("конфиг %s не найден", absPath(path))
 	}
 
 	if _, err := toml.DecodeFile(file, &cfg); err != nil {

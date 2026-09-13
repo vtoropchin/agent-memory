@@ -535,17 +535,29 @@ project = "fromdir"
 	}
 }
 
-// Каталог без agentmemory.toml — ошибка с именем искомого файла, а не тихие
-// дефолты (в отличие от отсутствующего ФАЙЛА, который по-прежнему даёт дефолты).
-func TestLoadFromDirectoryWithoutConfigFails(t *testing.T) {
+// Явно названный -config обязан существовать: каталог без agentmemory.toml,
+// несуществующий путь и отсутствующий файл — ошибка с абсолютным путём, а не
+// тихие дефолты (иначе опечатка в пути незаметно переключает сессию на
+// ~/.agentmemory/memory.db). Дефолты — только при пустом path.
+func TestLoadExplicitPathMustExist(t *testing.T) {
 	dir := t.TempDir()
-	_, err := Load(dir)
-	if err == nil {
-		t.Fatal("Load(dir без agentmemory.toml) = nil, want ошибка")
+	for _, tc := range []struct{ name, path, wantInErr string }{
+		{"dir without config", dir, "в каталоге " + dir + " нет " + FileName},
+		{"nonexistent path", filepath.Join(dir, "nope"), filepath.Join(dir, "nope")},
+		{"missing file", filepath.Join(dir, "x.toml"), filepath.Join(dir, "x.toml")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(tc.path)
+			if err == nil {
+				t.Fatalf("Load(%q) = nil, want ошибка", tc.path)
+			}
+			if !strings.Contains(err.Error(), tc.wantInErr) {
+				t.Errorf("ошибка %q не содержит %q", err, tc.wantInErr)
+			}
+		})
 	}
-	want := filepath.Join(dir, FileName)
-	if !strings.Contains(err.Error(), want) {
-		t.Errorf("ошибка %q не называет искомый файл %q", err, want)
+	if _, err := Load(""); err != nil {
+		t.Errorf("Load(\"\") = %v, want дефолты без ошибки", err)
 	}
 }
 

@@ -736,12 +736,9 @@ func resolveConfigRelativePath(configDir, path string) string {
 // подсказка про migrate напечатана, беспокоиться не о чем.
 func findExistingSqliteMemory(dir string) (path string, checkWarning string) {
 	var candidates []string
-	// config.Load("<dir>/agentmemory.toml") при отсутствующем файле тихо
-	// возвращает config.Default() без ошибки — Store.Path тогда равен
-	// defaultStorePath, то есть совпадёт со вторым кандидатом ниже и будет
-	// отфильтрован дедупом; ошибка возможна только на битом существующем
-	// файле — тогда просто не используем кандидата 1, до второго кандидата
-	// это не мешает дойти.
+	// config.Load("<dir>/agentmemory.toml") при отсутствующем или битом
+	// файле возвращает ошибку — тогда просто не используем кандидата 1, до
+	// второго кандидата это не мешает дойти.
 	if oldCfg, err := config.Load(filepath.Join(dir, "agentmemory.toml")); err == nil {
 		if (oldCfg.Store.Driver == "" || oldCfg.Store.Driver == storeDriverSQLite) && oldCfg.Store.Path != "" {
 			candidates = append(candidates, resolveConfigRelativePath(dir, oldCfg.Store.Path))

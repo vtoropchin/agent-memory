@@ -127,7 +127,7 @@ func runDoctor(args []string, out io.Writer) (exitCode int, err error) {
 		fmt.Fprintln(out, "Использование: memo doctor [-config path] [-db path] [-json] [-live]")
 		fs.PrintDefaults()
 	}
-	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
+	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально; если задан — обязан существовать)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	jsonOut := fs.Bool("json", false, "печатать машиночитаемый JSON вместо человекочитаемого списка секций")
 	live := fs.Bool("live", false, "выполнить пробный запрос к Reasoner (DeepSeek) — стоит денег, по умолчанию выключено")
