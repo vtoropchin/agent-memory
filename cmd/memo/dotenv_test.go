@@ -133,3 +133,21 @@ func TestLoadDotEnv_EmptyEnvOverriddenByDotEnv(t *testing.T) {
 		t.Errorf("DEEPSEEK_API_KEY = %q, хочу from-dotenv (пустой shell-env перекрывается .env)", got)
 	}
 }
+
+// -config с каталогом проекта: .env ищется В этом каталоге, а не в его
+// родителе (filepath.Dir от каталога дал бы родителя — регресс, который
+// закрывает этот тест).
+func TestLoadDotEnvForConfig_DirectoryConfig(t *testing.T) {
+	const key = "MEMO_TEST_DOTENV_DIR_KEY"
+	t.Setenv(key, "")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(key+"=fromdir\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loadDotEnvForConfig(dir, "test")
+
+	if got := os.Getenv(key); got != "fromdir" {
+		t.Errorf("%s = %q, want %q (.env из каталога -config не подхвачен)", key, got, "fromdir")
+	}
+}

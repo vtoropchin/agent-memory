@@ -151,7 +151,7 @@ func run(args []string) error {
 	log.SetFlags(log.LstdFlags)
 
 	fs := flag.NewFlagSet("memo", flag.ExitOnError)
-	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
+	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
 
@@ -366,7 +366,7 @@ func writeUsage(w io.Writer) {
 
 	fmt.Fprintln(w, "Режим сервера (по умолчанию):")
 	tw = tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "  -config <path>\tпуть к TOML-конфигу (опционально)")
+	fmt.Fprintln(tw, "  -config <path>\tпуть к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
 	fmt.Fprintln(tw, "  -db <path>\tпуть к файлу SQLite, переопределяет store.path из конфига")
 	tw.Flush()
 	fmt.Fprintln(w, "  ключ DeepSeek берётся из переменной окружения DEEPSEEK_API_KEY или из .env")

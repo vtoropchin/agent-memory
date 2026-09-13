@@ -514,3 +514,103 @@ project = "agentmemory"
 		t.Errorf("Scope.Shared = %v, want дефолт %v (shared не указан в TOML)", cfg.Scope.Shared, want)
 	}
 }
+
+// -config может быть каталогом проекта: тогда читается <dir>/agentmemory.toml.
+func TestLoadFromDirectoryReadsDefaultFileName(t *testing.T) {
+	dir := t.TempDir()
+	toml := `
+[scope]
+project = "fromdir"
+`
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(toml), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load(dir): %v", err)
+	}
+	if cfg.Scope.Project != "fromdir" {
+		t.Errorf("Scope.Project = %q, want %q", cfg.Scope.Project, "fromdir")
+	}
+}
+
+// Каталог без agentmemory.toml — ошибка с именем искомого файла, а не тихие
+// дефолты (в отличие от отсутствующего ФАЙЛА, который по-прежнему даёт дефолты).
+func TestLoadFromDirectoryWithoutConfigFails(t *testing.T) {
+	dir := t.TempDir()
+	_, err := Load(dir)
+	if err == nil {
+		t.Fatal("Load(dir без agentmemory.toml) = nil, want ошибка")
+	}
+	want := filepath.Join(dir, FileName)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("ошибка %q не называет искомый файл %q", err, want)
+	}
+}
+
+// Относительный store.path из конфига, загруженного по каталогу, разрешается
+// от этого каталога, а не от cwd процесса; абсолютный и ~-путь не трогаются.
+func TestLoadFromDirectoryResolvesRelativeStorePath(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		wantJoined bool
+	}{
+		{"relative", "./memory.db", true},
+		{"bare", "memory.db", true},
+		{"absolute", "/var/lib/memo/memory.db", false},
+		{"home", "~/.agentmemory/memory.db", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			toml := "[store]\npath = \"" + tc.path + "\"\n"
+			if err := os.WriteFile(filepath.Join(dir, FileName), []byte(toml), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			cfg, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load(dir): %v", err)
+			}
+			want := tc.path
+			if tc.wantJoined {
+				want = filepath.Join(dir, tc.path)
+			}
+			if cfg.Store.Path != want {
+				t.Errorf("Store.Path = %q, want %q", cfg.Store.Path, want)
+			}
+		})
+	}
+}
+
+// Путь к ФАЙЛУ работает как раньше: относительный store.path остаётся как есть
+// (его разрешает потребитель от cwd — контракт не менялся).
+func TestLoadFromFileKeepsRelativeStorePath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[store]\npath = \"./memory.db\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Store.Path != "./memory.db" {
+		t.Errorf("Store.Path = %q, want %q", cfg.Store.Path, "./memory.db")
+	}
+}
+
+// FilePath — единая точка ответа «какой файл конфига стоит за -config»:
+// для каталога — <dir>/agentmemory.toml, для файла и пустой строки — как есть.
+func TestFilePath(t *testing.T) {
+	dir := t.TempDir()
+	if got, want := FilePath(dir), filepath.Join(dir, FileName); got != want {
+		t.Errorf("FilePath(dir) = %q, want %q", got, want)
+	}
+	file := filepath.Join(dir, "x.toml")
+	if got := FilePath(file); got != file {
+		t.Errorf("FilePath(file) = %q, want %q", got, file)
+	}
+	if got := FilePath(""); got != "" {
+		t.Errorf("FilePath(\"\") = %q, want пусто", got)
+	}
+}

@@ -218,7 +218,7 @@ func runImport(args []string, out io.Writer) error {
 		fmt.Fprintln(out, "Использование: memo import [флаги] file.jsonl")
 		fs.PrintDefaults()
 	}
-	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
+	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	dryRun := fs.Bool("dry-run", false, "только разобрать файл и напечатать отчёт; БД не открывается вовсе")
 	overwrite := fs.Bool("overwrite", false, "заменять записи с конфликтующим id (по умолчанию — пропуск)")

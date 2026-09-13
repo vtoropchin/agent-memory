@@ -87,7 +87,7 @@ func runWeb(args []string, stdout io.Writer) error {
 		flagSet.PrintDefaults()
 	}
 	addr := flagSet.String("addr", defaultWebAddr, "адрес прослушивания HTTP")
-	configPath := flagSet.String("config", "", "путь к TOML-конфигу (опционально)")
+	configPath := flagSet.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
 	dbPath := flagSet.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	_ = flagSet.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора
 

@@ -142,7 +142,7 @@ func runExport(args []string, out io.Writer) error {
 		fmt.Fprintln(out, "Использование: memo export [флаги]")
 		fs.PrintDefaults()
 	}
-	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
+	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	oFlag := fs.String("o", "", "путь к выходному файлу (пусто — stdout)")
 	scopesFlag := fs.String("scopes", "", "пространства через запятую для частичного экспорта (пусто — вся БД)")

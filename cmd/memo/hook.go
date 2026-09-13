@@ -82,7 +82,7 @@ func runHook(args []string, stdin io.Reader, out io.Writer) error {
 		fs.PrintDefaults()
 	}
 	event := fs.String("event", "", "событие хука: session-start | prompt-submit")
-	configPath := fs.String("config", "", "путь к TOML-конфигу (опционально)")
+	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("hook: разбор флагов: %w", err)
 	}

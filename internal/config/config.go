@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -258,8 +260,35 @@ func Default() Config {
 	}
 }
 
+// FileName — имя файла конфига, которое ищется в каталоге проекта, когда
+// -config указывает на каталог, а не на файл (то же имя пишет `memo init`).
+const FileName = "agentmemory.toml"
+
+// FilePath отвечает, какой файл конфига стоит за путём из -config: для
+// каталога — <dir>/FileName, для файла (или несуществующего пути) и пустой
+// строки — path как есть. Единая точка для Load и для тех, кто ищет соседей
+// конфига (.env в cmd/memo): без неё filepath.Dir(<dir>) дал бы родителя
+// каталога проекта, а не сам каталог.
+func FilePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return filepath.Join(path, FileName)
+	}
+	return path
+}
+
 // Load читает TOML-конфиг из path и накладывает его поверх дефолтов. Если файл не
 // существует, возвращает чистые дефолты без ошибки — конфиг работает и без файла.
+//
+// path может быть и каталогом проекта: тогда читается <dir>/FileName, а его
+// отсутствие — уже ошибка с именем искомого файла (пользователь явно назвал
+// проект, тихие дефолты здесь скрыли бы опечатку в пути), и относительный
+// store.path разрешается от этого каталога, а не от cwd процесса — иначе
+// `memo -config <dir>`, запущенный из другого места, открывал бы чужой файл.
+// Для пути к файлу контракт прежний: относительный store.path остаётся как
+// есть и резолвится потребителем (store.OpenSQLite — от cwd).
 func Load(path string) (Config, error) {
 	cfg := Default()
 
@@ -267,24 +296,34 @@ func Load(path string) (Config, error) {
 		return cfg, nil
 	}
 
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	file := FilePath(path)
+	fromDir := file != path
+
+	if _, err := os.Stat(file); os.IsNotExist(err) {
+		if fromDir {
+			return Config{}, fmt.Errorf("в каталоге %s нет файла конфига %s", path, file)
+		}
 		return cfg, nil
 	}
 
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
+	if _, err := toml.DecodeFile(file, &cfg); err != nil {
+		return Config{}, fmt.Errorf("разбор конфига %s: %w", file, err)
+	}
+
+	if fromDir && cfg.Store.Path != "" && !filepath.IsAbs(cfg.Store.Path) && !strings.HasPrefix(cfg.Store.Path, "~") {
+		cfg.Store.Path = filepath.Join(path, cfg.Store.Path)
 	}
 
 	if _, _, err := cfg.Maint.Durations(); err != nil {
-		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
+		return Config{}, fmt.Errorf("разбор конфига %s: %w", file, err)
 	}
 
 	if err := cfg.Store.Validate(); err != nil {
-		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
+		return Config{}, fmt.Errorf("разбор конфига %s: %w", file, err)
 	}
 
 	if err := cfg.Recall.Validate(); err != nil {
-		return Config{}, fmt.Errorf("разбор конфига %s: %w", path, err)
+		return Config{}, fmt.Errorf("разбор конфига %s: %w", file, err)
 	}
 
 	return cfg, nil

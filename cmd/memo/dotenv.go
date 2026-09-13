@@ -12,10 +12,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"agentmemory/internal/config"
 )
 
 // loadDotEnvForConfig разрешает путь к .env рядом с configPath (или в текущем
-// каталоге, если configPath пуст) и подхватывает переменные окружения через
+// каталоге, если configPath пуст; если configPath — каталог проекта, то в нём
+// самом, см. config.FilePath) и подхватывает переменные окружения через
 // loadDotEnv, логируя результат через log.Printf (стандартный вывод log —
 // os.Stderr, что важно для one-shot CLI-подкоманд recall/save, задача 7.1: их
 // stdout не должен содержать ничего, кроме брифа/результата save). label —
@@ -25,7 +28,7 @@ import (
 func loadDotEnvForConfig(configPath, label string) {
 	dotenvDir := "."
 	if configPath != "" {
-		dotenvDir = filepath.Dir(configPath)
+		dotenvDir = filepath.Dir(config.FilePath(configPath))
 	}
 	dotenvPath := filepath.Join(dotenvDir, ".env")
 	if loaded, err := loadDotEnv(dotenvPath); err != nil {
