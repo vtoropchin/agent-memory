@@ -287,7 +287,7 @@ type Store interface {
     Get(ctx context.Context, id string) (Memory, error)
     SearchLexical(ctx context.Context, q Query) ([]Candidate, error)
     SearchVector(ctx context.Context, vec []float32, q Query) ([]Candidate, error) // no-op пока нет Embedder
-    Neighbors(ctx context.Context, id string) ([]Memory, error)                    // граф-обход
+    Neighbors(ctx context.Context, id string) ([]Memory, error)                    // граф-обход; Tags и Links соседей загружены (Этап 15)
     Supersede(ctx context.Context, oldID, newID string) error
     Touch(ctx context.Context, id string) error                                    // accessed_at++, access_count++
     // maintenance-выборки (§11); Tags/Links не заполняются
@@ -986,7 +986,8 @@ git-ветке и к процессу (`workflow`). Все решения ниж
   человека». Направление — от заблокированной к блокеру (так, как думает
   пользователь: «на этой карточке — кем заблокирована»), одно каноническое
   значение `rel`, без зеркального `blocks`; обратный список («что блокирует эта
-  задача») — обратный запрос по графу (`Store.IncomingLinks`). Правило write
+  задача») — `Store.Neighbors` с Links соседей (см. ниже; отдельный
+  `IncomingLinks` не заводится). Правило write
   path: заблокированную задачу нельзя перевести дальше `todo` (в `doing` и далее)
   — `write.ErrTaskBlocked` с перечнем живых блокеров; `backlog`/`todo` разрешены.
   Правило — **валидация пост-состояния**, а не «перехода»: после применения

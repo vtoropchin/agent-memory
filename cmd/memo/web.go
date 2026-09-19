@@ -380,12 +380,68 @@ type semanticNeighborDTO struct {
 	Distance float64 `json:"distance"`
 }
 
-// memoryCardResponse — тело ответа GET /api/memories/{id}.
+// taskRefDTO — краткая ссылка на задачу в иерархии карточки (родитель/дети,
+// задача 15.3): ровно то, что нужно строке списка и переходу на карточку.
+type taskRefDTO struct {
+	Id      string  `json:"id"`
+	Summary *string `json:"summary"`
+	Status  string  `json:"status"`
+	Type    string  `json:"type"`
+}
+
+// progressDTO — прогресс родителя по живым детям (memory.Progress).
+type progressDTO struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
+}
+
+// memoryCardResponse — тело ответа GET /api/memories/{id}. Parent/Children/
+// Progress — иерархия задачи (kind=task, DESIGN.md §14 Этап 15, задача 15.3):
+// родитель по первому ребру part_of (memory.ParentOf), дети — задачи с ребром
+// part_of на эту запись (memory.ChildrenOf поверх тех же Neighbors), в порядке
+// доски (memory.SortByStage). У записей прочих kind parent/progress — null,
+// children — пустой массив. Read-only: смена родителя — доска (15.5/15.6).
 type memoryCardResponse struct {
 	Memory            memoryDTO             `json:"memory"`
 	Neighbors         []memoryDTO           `json:"neighbors"`
 	Embedding         embeddingStatusDTO    `json:"embedding"`
 	SemanticNeighbors []semanticNeighborDTO `json:"semanticNeighbors"`
+	Parent            *taskRefDTO           `json:"parent"`
+	Children          []taskRefDTO          `json:"children"`
+	Progress          *progressDTO          `json:"progress"`
+}
+
+func toTaskRef(m memory.Memory) taskRefDTO {
+	return taskRefDTO{Id: m.Id, Summary: m.Summary, Status: string(m.Status), Type: string(m.Type)}
+}
+
+// taskHierarchy собирает родителя, детей и прогресс задачи m из её Links и уже
+// загруженных соседей (Store.Neighbors отдаёт их с Links). Для не-задач —
+// (nil, [], nil): их part_of — тематическая связь, не иерархия. Родитель,
+// удалённый физически (висячее ребро), опускается; прочие ошибки Get — наружу.
+func taskHierarchy(ctx context.Context, s store.Store, m memory.Memory, neighbors []memory.Memory) (parent *taskRefDTO, children []taskRefDTO, progress *progressDTO, err error) {
+	children = []taskRefDTO{}
+	if m.Kind != memory.KindTask {
+		return nil, children, nil, nil
+	}
+	if parentID, ok := memory.ParentOf(m); ok {
+		p, err := s.Get(ctx, parentID)
+		switch {
+		case err == nil:
+			ref := toTaskRef(p)
+			parent = &ref
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			return nil, nil, nil, fmt.Errorf("родитель %q: %w", parentID, err)
+		}
+	}
+	kids := memory.ChildrenOf(m.Id, neighbors)
+	memory.SortByStage(kids)
+	for _, c := range kids {
+		children = append(children, toTaskRef(c))
+	}
+	done, total := memory.Progress(kids)
+	return parent, children, &progressDTO{Done: done, Total: total}, nil
 }
 
 func handleGetMemory(s store.Store) http.HandlerFunc {
@@ -428,6 +484,12 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 			})
 		}
 
+		parent, children, progress, err := taskHierarchy(r.Context(), s, m, neighbors)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("hierarchy %q: %w", id, err))
+			return
+		}
+
 		writeJSON(w, http.StatusOK, memoryCardResponse{
 			Memory:    toDTO(m),
 			Neighbors: toDTOs(neighbors),
@@ -437,6 +499,9 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 				Dim:      vecStatus.Dim,
 			},
 			SemanticNeighbors: semanticNeighbors,
+			Parent:            parent,
+			Children:          children,
+			Progress:          progress,
 		})
 	}
 }

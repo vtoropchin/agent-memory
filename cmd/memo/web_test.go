@@ -326,6 +326,68 @@ func TestHandleGetMemory(t *testing.T) {
 	}
 }
 
+// TestHandleGetMemory_TaskHierarchy: карточка эпика несёт детей (задачи с
+// part_of на эпик, в порядке доски) и прогресс; карточка истории — родителя;
+// карточка не-задачи — parent/progress null и пустой children (задача 15.3).
+func TestHandleGetMemory_TaskHierarchy(t *testing.T) {
+	s := newTestWebStore(t)
+	title := func(v string) *string { return &v }
+	epic := putTestMemory(t, s, func(m *memory.Memory) {
+		m.Kind, m.Status, m.Type, m.Summary = memory.KindTask, memory.StatusDoing, memory.TaskTypeEpic, title("Kanban-доска")
+	})
+	storyDone := putTestMemory(t, s, func(m *memory.Memory) {
+		m.Kind, m.Status, m.Type, m.Summary = memory.KindTask, memory.StatusDone, memory.TaskTypeStory, title("Модель v2")
+		m.Importance = 5
+		m.Links = []memory.Link{{Dst: epic.Id, Rel: memory.RelPartOf}}
+	})
+	storyOpen := putTestMemory(t, s, func(m *memory.Memory) {
+		m.Kind, m.Status, m.Type, m.Summary = memory.KindTask, memory.StatusTodo, memory.TaskTypeStory, title("Иерархия")
+		m.Links = []memory.Link{{Dst: epic.Id, Rel: memory.RelPartOf}}
+	})
+	// related-сосед и не-задача с part_of — не дети.
+	putTestMemory(t, s, func(m *memory.Memory) {
+		m.Links = []memory.Link{{Dst: epic.Id, Rel: memory.RelRelated}}
+	})
+	fact := putTestMemory(t, s, func(m *memory.Memory) {
+		m.Links = []memory.Link{{Dst: epic.Id, Rel: memory.RelPartOf}}
+	})
+
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var card memoryCardResponse
+	if resp := getJSON(t, srv.URL+"/api/memories/"+epic.Id, &card); resp.StatusCode != http.StatusOK {
+		t.Fatalf("статус = %d, хочу 200", resp.StatusCode)
+	}
+	if card.Parent != nil {
+		t.Errorf("Parent эпика = %+v, хочу nil", card.Parent)
+	}
+	if len(card.Children) != 2 || card.Children[0].Id != storyOpen.Id || card.Children[1].Id != storyDone.Id {
+		t.Errorf("Children = %+v, хочу [%s (todo), %s (done)] в порядке стадий", card.Children, storyOpen.Id, storyDone.Id)
+	}
+	if len(card.Children) == 2 && (card.Children[0].Status != "todo" || card.Children[0].Type != "story" || card.Children[0].Summary == nil || *card.Children[0].Summary != "Иерархия") {
+		t.Errorf("Children[0] = %+v, хочу {todo story Иерархия}", card.Children[0])
+	}
+	if card.Progress == nil || card.Progress.Done != 1 || card.Progress.Total != 2 {
+		t.Errorf("Progress = %+v, хочу {1 2}", card.Progress)
+	}
+
+	var storyCard memoryCardResponse
+	getJSON(t, srv.URL+"/api/memories/"+storyOpen.Id, &storyCard)
+	if storyCard.Parent == nil || storyCard.Parent.Id != epic.Id || storyCard.Parent.Type != "epic" || storyCard.Parent.Status != "doing" {
+		t.Errorf("Parent истории = %+v, хочу эпик %s (epic, doing)", storyCard.Parent, epic.Id)
+	}
+	if len(storyCard.Children) != 0 || storyCard.Progress == nil || storyCard.Progress.Total != 0 {
+		t.Errorf("у истории без детей Children = %+v, Progress = %+v; хочу [] и {0 0}", storyCard.Children, storyCard.Progress)
+	}
+
+	var factCard memoryCardResponse
+	getJSON(t, srv.URL+"/api/memories/"+fact.Id, &factCard)
+	if factCard.Parent != nil || factCard.Progress != nil || factCard.Children == nil || len(factCard.Children) != 0 {
+		t.Errorf("у не-задачи Parent/Progress = %+v/%+v, Children = %+v; хочу null/null/[]", factCard.Parent, factCard.Progress, factCard.Children)
+	}
+}
+
 // deleteJSON шлёт DELETE и декодирует JSON-тело ответа в out (если не nil).
 func deleteJSON(t *testing.T, url string, out any) *http.Response {
 	t.Helper()

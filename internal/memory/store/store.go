@@ -61,7 +61,13 @@ type Store interface {
 	Get(ctx context.Context, id string) (memory.Memory, error)
 	SearchLexical(ctx context.Context, q memory.Query) ([]memory.Candidate, error)
 	SearchVector(ctx context.Context, vec []float32, q memory.Query) ([]memory.Candidate, error) // no-op пока нет Embedder
-	Neighbors(ctx context.Context, id string) ([]memory.Memory, error)                           // граф-обход
+	// Neighbors возвращает живые записи, связанные с id рёбрами links в любом
+	// направлении (граф-обход). Tags и Links соседей загружены: по Links соседа
+	// потребитель восстанавливает направление и rel ребра к id — так строится
+	// обратный обход (дети эпика по part_of — memory.ChildrenOf, задача 15.3;
+	// блокеры по blocked_by — 15.4) без отдельного «входящего» запроса, пока
+	// множества соседей малы (признак пересмотра — Neighbors стал дорогим).
+	Neighbors(ctx context.Context, id string) ([]memory.Memory, error)
 	Supersede(ctx context.Context, oldID, newID string) error
 	Touch(ctx context.Context, id string) error // accessed_at++, access_count++
 	// List возвращает страницу записей под фильтр (для browse-морды), отсортированную

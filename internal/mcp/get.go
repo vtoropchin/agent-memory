@@ -40,14 +40,20 @@ func (s *Server) handleGet(ctx context.Context, _ *sdkmcp.CallToolRequest, in ge
 		}
 		return nil, nil, fmt.Errorf("memory_get: %w", err)
 	}
-	return textResult(formatMemory(m)), nil, nil
+	hierarchy, err := s.hierarchySections(ctx, m)
+	if err != nil {
+		return nil, nil, fmt.Errorf("memory_get: %w", err)
+	}
+	return textResult(formatMemory(m, hierarchy)), nil, nil
 }
 
 // formatMemory рендерит запись в Markdown для ответа memory_get: сперва шапка с
 // метаданными (по одной строке на поле, пустые поля опускаются — шум в ответе
 // инструмента дороже полноты), затем полный текст записи. Тот же принцип, что у
 // recall-брифа: агенту отдаётся читаемый Markdown, а не JSON-простыня.
-func formatMemory(m memory.Memory) string {
+// sections — уже отрендеренные дополнительные секции (иерархия задачи,
+// hierarchySections), вставляются между метаданными и текстом; пусто — ничего.
+func formatMemory(m memory.Memory, sections string) string {
 	var b strings.Builder
 
 	title := m.Id
@@ -99,6 +105,9 @@ func formatMemory(m memory.Memory) string {
 	}
 
 	b.WriteString("\n")
+	if sections != "" {
+		b.WriteString(sections)
+	}
 	b.WriteString(m.Content)
 	b.WriteString("\n")
 	return b.String()

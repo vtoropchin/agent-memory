@@ -973,6 +973,11 @@ function renderCardModal(card) {
     content.appendChild(el("p", { class: "mt-1 text-sm text-slate-800 dark:text-slate-200", text: m.summary }));
   }
 
+  // --- иерархия задачи (kind=task, задача 15.3): родитель по part_of и дети с
+  // прогрессом — read-only, клик открывает карточку; смена родителя — доска (15.5/15.6).
+  // Для не-задач сервер отдаёт parent/progress = null и пустой children — секция не рисуется. ---
+  renderHierarchySection(content, card);
+
   content.appendChild(el("h3", { class: "mt-3 text-sm font-semibold text-slate-500 dark:text-slate-400", text: "Теги" }));
   if (isLive) {
     // Живая запись — редактируемые чипы (добавить/убрать, «Сохранить теги» =
@@ -1063,6 +1068,47 @@ function renderCardModal(card) {
         text: "нет семантических соседей / векторный слой выключен",
       })
     );
+  }
+}
+
+// renderTaskRef — строка задачи в секциях иерархии: бейджи стадии/типа + заголовок
+// (summary, иначе id) кнопкой, открывающей карточку.
+function renderTaskRef(ref) {
+  const badges = [statusBadge(ref.status), taskTypeBadge(ref.type)];
+  return el("div", { class: "flex flex-wrap items-center gap-2" }, [
+    el("div", { class: "flex items-center gap-1" }, badges),
+    el("button", {
+      class: "text-sm text-blue-600 underline hover:text-blue-800 dark:text-blue-400",
+      attrs: { type: "button" },
+      text: ref.summary || ref.id,
+      onClick: function () {
+        openCard(ref.id);
+      },
+    }),
+  ]);
+}
+
+// renderHierarchySection добавляет в content секции «Родитель» и «Дети (n, готово k)»
+// карточки задачи; пустые секции не рисуются.
+function renderHierarchySection(content, card) {
+  if (card.parent) {
+    content.appendChild(el("h3", { class: "mt-3 text-sm font-semibold text-slate-500 dark:text-slate-400", text: "Родитель" }));
+    content.appendChild(el("div", { class: "mt-1" }, [renderTaskRef(card.parent)]));
+  }
+  const children = card.children || [];
+  if (children.length > 0) {
+    const progress = card.progress || { done: 0, total: children.length };
+    content.appendChild(
+      el("h3", {
+        class: "mt-3 text-sm font-semibold text-slate-500 dark:text-slate-400",
+        text: "Дети (" + progress.total + ", готово " + progress.done + ")",
+      })
+    );
+    const list = el("div", { class: "mt-1 space-y-1" });
+    children.forEach(function (c) {
+      list.appendChild(renderTaskRef(c));
+    });
+    content.appendChild(list);
   }
 }
 

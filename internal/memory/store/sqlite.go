@@ -724,11 +724,12 @@ func (s *sqliteStore) loadTags(ctx context.Context, id string) ([]string, error)
 
 // loadTagsBatch грузит теги сразу для набора id одним запросом (memory_id IN (...))
 // — в отличие от loadTags (одна запись), нужна там, где потребителю отдаётся
-// страница записей и построчная загрузка была бы N+1 (List). Читает внутри той же
-// транзакции, что и страница List, — для консистентности пары (items, total).
+// страница записей и построчная загрузка была бы N+1 (List, Neighbors). q — *sql.Tx
+// (List читает внутри той же транзакции, что и страница, — для консистентности
+// пары (items, total)) или *sql.DB (Neighbors, вне транзакции), см. dbQueryer.
 // Возвращает map с пустым срезом отсутствующим — вызывающая сторона обращается к ней
 // по id и получает nil для записей без тегов, что для memory.Memory.Tags эквивалентно.
-func (s *sqliteStore) loadTagsBatch(ctx context.Context, tx *sql.Tx, ids []string) (map[string][]string, error) {
+func (s *sqliteStore) loadTagsBatch(ctx context.Context, q dbQueryer, ids []string) (map[string][]string, error) {
 	result := make(map[string][]string, len(ids))
 	if len(ids) == 0 {
 		return result, nil
@@ -741,7 +742,7 @@ func (s *sqliteStore) loadTagsBatch(ctx context.Context, tx *sql.Tx, ids []strin
 		args[i] = id
 	}
 
-	rows, err := tx.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT memory_id, tag FROM tags WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
 		ORDER BY memory_id, tag
 	`, args...)
@@ -756,6 +757,45 @@ func (s *sqliteStore) loadTagsBatch(ctx context.Context, tx *sql.Tx, ids []strin
 			return nil, fmt.Errorf("сканирование tag (батч): %w", err)
 		}
 		result[id] = append(result[id], tag)
+	}
+	return result, rows.Err()
+}
+
+// loadLinksBatch — симметричный loadTagsBatch аналог для исходящих связей: грузит
+// links сразу для набора id одним запросом (src IN (...)), вместо построчных
+// loadLinks в цикле (N+1). Порядок внутри записи — (dst, rel), как у loadLinks:
+// на стабильность порядка опирается memory.ParentOf. Возвращает map с
+// отсутствующим ключом для записей без исходящих связей — вызывающая сторона
+// получает nil (тот же контракт, что у loadTagsBatch).
+func (s *sqliteStore) loadLinksBatch(ctx context.Context, q dbQueryer, ids []string) (map[string][]memory.Link, error) {
+	result := make(map[string][]memory.Link, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	rows, err := q.QueryContext(ctx, `
+		SELECT src, dst, rel FROM links WHERE src IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY src, dst, rel
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("батч-чтение links: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var src string
+		var l memory.Link
+		if err := rows.Scan(&src, &l.Dst, &l.Rel); err != nil {
+			return nil, fmt.Errorf("сканирование link (батч): %w", err)
+		}
+		result[src] = append(result[src], l)
 	}
 	return result, rows.Err()
 }
@@ -1203,7 +1243,11 @@ func (s *sqliteStore) SemanticNeighbors(ctx context.Context, id string, k int) (
 
 // Neighbors возвращает записи, связанные с id рёбрами links (в любом направлении),
 // исключая мягко забытые (superseded_by IS NOT NULL) — как и SearchLexical, соседи
-// не должны включать тумстоуны.
+// не должны включать тумстоуны. Tags и Links соседей загружены (каждое — одним
+// батч-запросом, loadTagsBatch/loadLinksBatch, не N+1): по Links соседа
+// восстанавливаются направление и rel ребра к id — на этом строится обратный обход
+// графа (дети эпика по part_of, задача 15.3; блокеры по blocked_by, 15.4) без
+// отдельного «входящего» запроса к хранилищу.
 func (s *sqliteStore) Neighbors(ctx context.Context, id string) ([]memory.Memory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT `+memoryColumns+`
@@ -1222,12 +1266,29 @@ func (s *sqliteStore) Neighbors(ctx context.Context, id string) ([]memory.Memory
 		if err != nil {
 			return nil, fmt.Errorf("сканирование соседа %q: %w", id, err)
 		}
-		if m.Tags, err = s.loadTags(ctx, m.Id); err != nil {
-			return nil, err
-		}
 		neighbors = append(neighbors, m)
 	}
-	return neighbors, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("чтение соседей %q: %w", id, err)
+	}
+
+	ids := make([]string, len(neighbors))
+	for i, m := range neighbors {
+		ids[i] = m.Id
+	}
+	tagsByID, err := s.loadTagsBatch(ctx, s.db, ids)
+	if err != nil {
+		return nil, err
+	}
+	linksByID, err := s.loadLinksBatch(ctx, s.db, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range neighbors {
+		neighbors[i].Tags = tagsByID[neighbors[i].Id]
+		neighbors[i].Links = linksByID[neighbors[i].Id]
+	}
+	return neighbors, nil
 }
 
 // Supersede помечает oldID как заменённый записью newID (мягкое забывание).

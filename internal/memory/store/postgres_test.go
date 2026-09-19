@@ -1087,6 +1087,76 @@ func TestParityNeighbors(t *testing.T) {
 	})
 }
 
+// TestParityNeighborsLoadsLinks: Neighbors отдаёт соседей с их Links (и Tags) в
+// обе стороны ребра — по ним потребитель различает направление и rel (задача
+// 15.3: дети эпика = соседи с ребром {Dst: эпик, Rel: part_of}, memory.ChildrenOf).
+func TestParityNeighborsLoadsLinks(t *testing.T) {
+	runParity(t, "NeighborsLoadsLinks", func(t *testing.T, s Store) {
+		ctx := context.Background()
+
+		epic, story, related, far := newID(t), newID(t), newID(t), newID(t)
+		if err := s.Put(ctx, memory.Memory{Id: far, Kind: memory.KindSemantic, Scope: "s", Content: "далёкая", CreatedAt: 1, UpdatedAt: 1}); err != nil {
+			t.Fatalf("Put far: %v", err)
+		}
+		// related — исходящий сосед эпика (эпик -> related); у него своя связь на
+		// far, которая должна прийти целиком, хотя far эпику не сосед.
+		if err := s.Put(ctx, memory.Memory{
+			Id: related, Kind: memory.KindSemantic, Scope: "s", Content: "смежный факт", CreatedAt: 2, UpdatedAt: 2,
+			Tags:  []string{"ctx"},
+			Links: []memory.Link{{Dst: far, Rel: memory.RelRelated}},
+		}); err != nil {
+			t.Fatalf("Put related: %v", err)
+		}
+		if err := s.Put(ctx, memory.Memory{
+			Id: epic, Kind: memory.KindTask, Scope: "s", Content: "эпик", Status: memory.StatusTodo, Type: memory.TaskTypeEpic, CreatedAt: 3, UpdatedAt: 3,
+			Links: []memory.Link{{Dst: related, Rel: memory.RelRelated}},
+		}); err != nil {
+			t.Fatalf("Put epic: %v", err)
+		}
+		// story — входящий сосед (story -> epic, part_of: дочь -> родитель).
+		if err := s.Put(ctx, memory.Memory{
+			Id: story, Kind: memory.KindTask, Scope: "s", Content: "история", Status: memory.StatusDoing, Type: memory.TaskTypeStory, CreatedAt: 4, UpdatedAt: 4,
+			Links: []memory.Link{{Dst: epic, Rel: memory.RelPartOf}},
+		}); err != nil {
+			t.Fatalf("Put story: %v", err)
+		}
+
+		neighbors, err := s.Neighbors(ctx, epic)
+		if err != nil {
+			t.Fatalf("Neighbors: %v", err)
+		}
+		if len(neighbors) != 2 {
+			t.Fatalf("neighbors = %+v, want 2 (story и related)", neighbors)
+		}
+		byID := map[string]memory.Memory{}
+		for _, n := range neighbors {
+			byID[n.Id] = n
+		}
+		st, ok := byID[story]
+		if !ok {
+			t.Fatalf("story %q нет среди соседей: %+v", story, neighbors)
+		}
+		if len(st.Links) != 1 || st.Links[0].Dst != epic || st.Links[0].Rel != memory.RelPartOf {
+			t.Errorf("Links входящего соседа = %+v, want [{%s part_of}]", st.Links, epic)
+		}
+		rl, ok := byID[related]
+		if !ok {
+			t.Fatalf("related %q нет среди соседей: %+v", related, neighbors)
+		}
+		if len(rl.Links) != 1 || rl.Links[0].Dst != far || rl.Links[0].Rel != memory.RelRelated {
+			t.Errorf("Links исходящего соседа = %+v, want [{%s related}] (все его исходящие, не только к якорю)", rl.Links, far)
+		}
+		if len(rl.Tags) != 1 || rl.Tags[0] != "ctx" {
+			t.Errorf("Tags соседа = %v, want [ctx]", rl.Tags)
+		}
+
+		children := memory.ChildrenOf(epic, neighbors)
+		if len(children) != 1 || children[0].Id != story {
+			t.Errorf("ChildrenOf(epic) = %+v, want [story]", children)
+		}
+	})
+}
+
 func TestParitySupersedeTouch(t *testing.T) {
 	runParity(t, "SupersedeTouch", func(t *testing.T, s Store) {
 		ctx := context.Background()

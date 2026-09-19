@@ -249,10 +249,11 @@ func (s *pgStore) loadLinks(ctx context.Context, id string) ([]memory.Link, erro
 // Neighbors возвращает записи, связанные с id рёбрами links (в любом направлении),
 // исключая мягко забытые. $1 используется дважды (обе стороны ребра) — id один и тот
 // же, поэтому одного параметра достаточно (в отличие от sqlite.go, где ? позиционные
-// и id передаётся аргументом дважды). Tags подгружаются одним батч-запросом
-// (loadTagsBatch) на всех соседей сразу, а не построчно в цикле — та же логика, что и
-// у List (Links здесь исторически не грузятся вовсе, это сохранённое поведение, не
-// упущение).
+// и id передаётся аргументом дважды). Tags и Links подгружаются батчем
+// (loadTagsAndLinksBatch — по одному запросу на всех соседей, не построчно): по
+// Links соседа восстанавливаются направление и rel ребра к id — обратный обход
+// графа (дети по part_of, задача 15.3; блокеры по blocked_by, 15.4). Паритет со
+// sqliteStore.Neighbors.
 func (s *pgStore) Neighbors(ctx context.Context, id string) ([]memory.Memory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT `+memoryColumns+`
@@ -277,16 +278,8 @@ func (s *pgStore) Neighbors(ctx context.Context, id string) ([]memory.Memory, er
 		return nil, fmt.Errorf("чтение соседей %q: %w", id, err)
 	}
 
-	ids := make([]string, len(neighbors))
-	for i, m := range neighbors {
-		ids[i] = m.Id
-	}
-	tagsByID, err := s.loadTagsBatch(ctx, s.db, ids)
-	if err != nil {
+	if err := s.loadTagsAndLinksBatch(ctx, neighbors); err != nil {
 		return nil, err
-	}
-	for i := range neighbors {
-		neighbors[i].Tags = tagsByID[neighbors[i].Id]
 	}
 	return neighbors, nil
 }
@@ -418,10 +411,10 @@ func (s *pgStore) Stats(ctx context.Context) (Stats, error) {
 // loadTagsAndLinksBatch подгружает Tags и Links для all батчем (loadTagsBatch +
 // loadLinksBatch, по одному round-trip'у на весь срез каждая — не по одному на
 // запись) и раскладывает результат обратно по all[i]. Общая хвостовая часть
-// AllForExport и AllForReindex — единственное, чем они отличаются от sqliteStore.
-// AllForExport/AllForReindex (там та же надстройка построчная, loadTags/loadLinks в
-// цикле — дёшево для локального файла, дорого для сетевого postgres, см. постатейный
-// комментарий у loadLinksBatch).
+// AllForExport, AllForReindex и Neighbors — единственное, чем первые две отличаются
+// от sqliteStore.AllForExport/AllForReindex (там та же надстройка построчная,
+// loadTags/loadLinks в цикле — дёшево для локального файла, дорого для сетевого
+// postgres, см. постатейный комментарий у loadLinksBatch).
 func (s *pgStore) loadTagsAndLinksBatch(ctx context.Context, all []memory.Memory) error {
 	ids := make([]string, len(all))
 	for i, m := range all {
