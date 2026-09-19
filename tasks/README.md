@@ -173,7 +173,7 @@ review → testing → release → done`, тип `epic|story|task`, иерарх
 | 15.3 Иерархия epic/story/task: обратный запрос по графу, родитель/дети в `memory_get` | [15.3-task-hierarchy.md](15.3-task-hierarchy.md) | ✅ выполнена |
 | 15.4 Блокировка задач задачами (`blocked_by`, `unlinks`, правило пост-состояния) | [15.4-task-blocking.md](15.4-task-blocking.md) | ✅ выполнена (2026-09-20): `LiveBlockers`/`BlockedBy` в ядре, `Store.GetMany` (sqlite+pg), `ErrTaskBlocked`/`Unlinks`/пост-состояние в write, `⛔` в recall, `blocked_by`/`unlinks`/секции `memory_get` в MCP, скиллы; build/vet/тесты `memory`+`mcp`+`cmd/memo` зелёные, e2e живого бинаря не выполнялся |
 | 15.5 Вариант использования «доска» + JSON API морды | [15.5-board-usecase-api.md](15.5-board-usecase-api.md) | ✅ выполнена (2026-09-20): `Store.ListTasks`, пакет `board` (`Build`, `Describe`; 0 в `TestDependencyRule`), `GET /api/board`, PATCH со status/type/branch/workflow/links/unlinks и 409 на блокировку, карточка через `board.Describe` (долг дубля mcp/web закрыт); build/vet/тесты зелёные, curl к живому `memo web` не выполнялся |
-| 15.6 Фронтенд доски: колонки, drag&drop, фильтры, карточка задачи | [15.6-board-frontend.md](15.6-board-frontend.md) | ⬜ ожидает |
+| 15.6 Фронтенд доски: колонки, drag&drop, фильтры, карточка задачи | [15.6-board-frontend.md](15.6-board-frontend.md) | ✅ выполнена (2026-09-20): `#/board` — hash-роутер, фильтры в URL-хэше, 7 колонок/свимлейны, нативный DnD с откатом и тостом блокеров, модалка задачи (стадия/тип/ветка/workflow/родитель/блокеры), `tailwind.css` пересобран; build/тесты `cmd/memo` зелёные, `node --check` чист; ручная проверка в браузере — ожидает |
 
 ### Отклонённые идеи (чтобы не возвращаться)
 

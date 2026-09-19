@@ -636,6 +636,15 @@ blockers:[{id, summary, status, type}]}`, `ErrUnknownStatus`/`ErrUnknownTaskType
 `ErrStatusNotApplicable`/`ErrTaskFieldNotApplicable`/`ErrBlockerNotTask` → 400,
 тумстоун → 409, как прежде. Пикер блокера/родителя на фронте — существующий
 `GET /api/search?q=…&mode=lexical&kind=task`, отдельного эндпоинта нет.
+**Экран доски (задача 15.6)** — `#/board?scope=…&type=…&parent=…&branch=…&workflow=…&tag=…&doneLimit=N&group=epic`
+в той же одностраничной морде (vanilla JS + Tailwind, без сторонних библиотек):
+hash-роутер с переключателем «Память | Доска», состояние фильтров живёт только в
+URL-хэше (смена фильтра пишет хэш, `hashchange` грузит доску — ссылка
+воспроизводит экран), семь колонок, свимлейны по ближайшему родителю, нативный
+HTML5 drag&drop с оптимистичным переносом (`PATCH {status}`; 409/400 — откат
+карточки и тост с перечнем блокеров), модалка задачи правит стадию/тип/ветку/
+workflow/родителя/блокеров тем же PATCH; логики доски на фронте нет — он рисует
+ответ `board.Build`/`board.Describe` и маппит ошибки сервера в сообщения.
 
 **Суженный инвариант оффлайновости (задача 10.1).** До этой задачи морда была строгим
 read-only-читателем: ни одного вызова Embedder/Reasoner. `/api/search?mode=semantic` вводит

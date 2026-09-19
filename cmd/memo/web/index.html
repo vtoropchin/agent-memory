@@ -7,12 +7,23 @@
   <link rel="stylesheet" href="/tailwind.css">
 </head>
 <body class="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100">
-  <div class="mx-auto max-w-5xl px-4 py-6">
+  <div id="page" class="mx-auto max-w-5xl px-4 py-6">
     <header>
-      <h1 class="text-xl font-semibold">AgentMemory — просмотр памяти</h1>
-      <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">просмотр памяти · удаление архивирует запись (soft-delete, история сохраняется)</p>
-      <div id="dashboard" class="mt-4"></div>
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h1 class="text-xl font-semibold">AgentMemory</h1>
+        <!-- переключатель вида (задача 15.6): hash-роутинг #/ (память) и #/board (доска);
+             активная вкладка подсвечивается из app.js по location.hash -->
+        <nav id="view-nav" class="flex items-center gap-0.5 rounded-md border border-slate-300 p-0.5 text-sm dark:border-slate-600" aria-label="вид">
+          <a href="#/" data-view="list" class="rounded px-3 py-1 hover:bg-slate-100 dark:hover:bg-slate-700">Память</a>
+          <a href="#/board" data-view="board" class="rounded px-3 py-1 hover:bg-slate-100 dark:hover:bg-slate-700">Доска</a>
+        </nav>
+      </div>
     </header>
+
+  <!-- вид «Память»: дашборд + поиск/фильтры + список (задачи 6.3–10.2) -->
+  <div id="list-view">
+    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">просмотр памяти · удаление архивирует запись (soft-delete, история сохраняется)</p>
+    <div id="dashboard" class="mt-4"></div>
 
     <section class="mt-6 rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -65,6 +76,19 @@
       <div id="pagination" class="mt-4 flex justify-center"></div>
     </section>
   </div>
+
+  <!-- вид «Доска» (задача 15.6, DESIGN.md §12/§14 Этап 15): панель фильтров и
+       сетка колонок генерируются app.js (renderBoardFilters/renderBoard) -->
+  <div id="board-view" class="hidden">
+    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">kanban-доска задач · перетащи карточку в другую колонку, чтобы сменить стадию</p>
+    <section id="board-filters" class="mt-4 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800"></section>
+    <div id="board-summary" class="mt-3 text-sm text-slate-500 dark:text-slate-400"></div>
+    <section id="board-grid" class="mt-2 overflow-x-auto pb-2"></section>
+  </div>
+  </div>
+
+  <!-- тосты ошибок (общий компонент, задача 15.6): показываются из showToast() -->
+  <div id="toasts" class="pointer-events-none fixed bottom-4 right-4 z-20 flex w-full max-w-sm flex-col gap-2" aria-live="polite"></div>
 
   <!-- модалка карточки записи -->
   <div id="modal-backdrop" class="hidden fixed inset-0 z-10 flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:items-center">
