@@ -168,7 +168,7 @@ review → testing → release → done`, тип `epic|story|task`, иерарх
 
 | Задача | Файл | Статус |
 |--------|------|--------|
-| 15.1 Модель задачи v2: стадии-колонки, `type`/`branch`/`workflow`, миграция `3 → 4` | [15.1-task-model-v2.md](15.1-task-model-v2.md) | ⬜ ожидает |
+| 15.1 Модель задачи v2: стадии-колонки, `type`/`branch`/`workflow`, миграция `3 → 4` | [15.1-task-model-v2.md](15.1-task-model-v2.md) | ✅ выполнена |
 | 15.2 Поверхность агента: MCP/CLI/скиллы для новых полей задачи | [15.2-task-agent-surface.md](15.2-task-agent-surface.md) | ⬜ ожидает |
 | 15.3 Иерархия epic/story/task: обратный запрос по графу, родитель/дети в `memory_get` | [15.3-task-hierarchy.md](15.3-task-hierarchy.md) | ⬜ ожидает |
 | 15.4 Блокировка задач задачами (`blocked_by`, `unlinks`, правило перехода) | [15.4-task-blocking.md](15.4-task-blocking.md) | ⬜ ожидает |

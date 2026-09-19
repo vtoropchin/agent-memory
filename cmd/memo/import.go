@@ -94,8 +94,53 @@ func recordToMemory(rec exportRecord) memory.Memory {
 		Source:       rec.Source,
 		ExpiresAt:    rec.ExpiresAt,
 		Status:       memory.Status(rec.Status),
+		Type:         memory.TaskType(rec.Type),
+		Branch:       rec.Branch,
+		Workflow:     rec.Workflow,
 		Tags:         rec.Tags,
 	}
+}
+
+// legacyBlockedStatus — статус задачи из бэкапов до Этапа 15: перечень
+// memory.Statuses его больше не содержит (блокировка стала вычисляемым
+// свойством из связей blocked_by, см. memory.Status), и Put такой записи дал бы
+// БД значение вне перечня, которое затем споткнулось бы о write.ErrUnknownStatus
+// при первой же правке. Поэтому импорт маппит его в todo — так же, как миграция
+// схемы 3 -> 4 поступает с уже существующими строками (store.migrateTaskModel).
+const legacyBlockedStatus = "blocked"
+
+// remapLegacyTaskFields приводит задачи (kind=task) из бэкапов до Этапа 15 к
+// текущей модели прямо в разобранных записях — до dry-run и до реального
+// импорта, одно место для обоих путей; зеркало data-шагов миграции схемы
+// (store.taskModelDataSteps), потому что импорт кладёт запись через store.Put
+// напрямую, минуя write.normalizeTaskType/normalizeStatus:
+//   - status "blocked" -> todo (с предупреждением на запись в warn — stderr в
+//     runImport: смысл записи меняется, пользователь должен это увидеть);
+//   - пустой type -> task (молча: это дефолт, а не потеря информации). Без
+//     этого инвариант «у задачи task_type не NULL», на котором держится
+//     фильтр Query.Types и доска (Этап 15), нарушался бы третьей точкой входа
+//     данных.
+//
+// Возвращает число записей, у которых переписан status.
+func remapLegacyTaskFields(records []lineRecord, warn io.Writer) int {
+	n := 0
+	for i := range records {
+		rec := &records[i].rec
+		if rec.Kind != string(memory.KindTask) {
+			continue
+		}
+		if rec.Type == "" {
+			rec.Type = string(memory.TaskTypeTask)
+		}
+		if rec.Status != legacyBlockedStatus {
+			continue
+		}
+		rec.Status = string(memory.StatusTodo)
+		n++
+		fmt.Fprintf(warn, "memo import: строка %d: %s: status %q упразднён (Этап 15) — записано как %q\n",
+			records[i].line, rec.Id, legacyBlockedStatus, memory.StatusTodo)
+	}
+	return n
 }
 
 // importSummary — итог одного прогона `memo import` (см. printImportSummary).
@@ -259,6 +304,7 @@ func runImport(args []string, out io.Writer) error {
 			}
 		}
 	}
+	remapLegacyTaskFields(records, os.Stderr)
 
 	if *dryRun {
 		printImportSummary(out, dryRunSummary(records))

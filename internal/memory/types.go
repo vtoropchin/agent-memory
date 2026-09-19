@@ -35,34 +35,70 @@ const (
 	// агент забирает по id (mcp memory_get). Живёт до явного закрытия: decay/
 	// consolidate работают только с episodic, дедуп задачи не сливает (разные
 	// задачи легитимно похожи текстуально, см. write.Writer.dedup и
-	// maint.DedupSweeper).
+	// maint.DedupSweeper). С Этапа 15 у задачи, помимо стадии доски (Status),
+	// есть тип (Type: эпик/история/задача), git-ветка (Branch) и имя процесса,
+	// которым она выполняется (Workflow) — все четыре поля только у этого kind.
 	KindTask Kind = "task"
 )
 
-// Status — состояние единицы работы (Kind == KindTask). Для остальных kind
-// пусто: статус не универсальное свойство памяти, а часть модели задачи.
-// Завершённая задача (StatusDone) остаётся живой записью — историю работы не
-// стирают, — но по умолчанию не попадает в recall (см. Query.Statuses); отмена
-// задачи, наоборот, — обычный тумстоун через write.Writer.Forget.
+// Status — стадия kanban-доски для единицы работы (Kind == KindTask, DESIGN.md
+// §14 Этап 15). Для остальных kind пусто: статус не универсальное свойство
+// памяти, а часть модели задачи. Стадии идут в порядке жизненного цикла
+// «бэклог → к выполнению → в работе → ревью → тестирование → к релизу →
+// готово», но переходы порядком не ограничены — карточку можно вернуть назад.
+// Блокировка задачи — НЕ стадия, а вычисляемое свойство из связей
+// rel=blocked_by (задача 15.4): прежний статус blocked удалён (миграция схемы
+// 3 -> 4 переводит его в todo). Завершённая задача (StatusDone) остаётся
+// живой записью — историю работы не стирают, — но по умолчанию не попадает в
+// recall (см. Query.Statuses); отмена задачи, наоборот, — обычный тумстоун
+// через write.Writer.Forget.
 type Status string
 
 const (
-	// StatusTodo — задача заведена, работа не начата. Дефолт при сохранении task.
+	// StatusBacklog — сырая идея: агент завёл, человек ещё не отобрал в работу.
+	StatusBacklog Status = "backlog"
+	// StatusTodo — задача отобрана к выполнению, работа не начата. Дефолт при
+	// сохранении task.
 	StatusTodo Status = "todo"
 	// StatusDoing — задача взята в работу.
 	StatusDoing Status = "doing"
-	// StatusBlocked — работа начата или запланирована, но заблокирована внешним
-	// обстоятельством (ждёт решения, чужой задачи, ответа).
-	StatusBlocked Status = "blocked"
-	// StatusDone — задача выполнена. Запись живёт дальше (история), но из
-	// дефолтной выдачи recall исключается.
+	// StatusReview — результат на ревью.
+	StatusReview Status = "review"
+	// StatusTesting — результат тестируется (очередь и активная стадия
+	// сознательно склеены: WIP-лимитов нет).
+	StatusTesting Status = "testing"
+	// StatusRelease — готово к релизу, ждёт выкатки.
+	StatusRelease Status = "release"
+	// StatusDone — задача выполнена (в релизе). Запись живёт дальше (история),
+	// но из дефолтной выдачи recall исключается.
 	StatusDone Status = "done"
 )
 
-// Statuses — все допустимые значения Status в порядке жизненного цикла.
-// Единственный перечень: валидация write path, enum MCP-схем и фильтры store
-// ссылаются на него, а не заводят свои копии.
-var Statuses = []Status{StatusTodo, StatusDoing, StatusBlocked, StatusDone}
+// Statuses — все допустимые значения Status в порядке жизненного цикла; это же
+// порядок колонок kanban-доски. Единственный перечень: валидация write path,
+// enum MCP-схем и фильтры store ссылаются на него, а не заводят свои копии.
+var Statuses = []Status{StatusBacklog, StatusTodo, StatusDoing, StatusReview, StatusTesting, StatusRelease, StatusDone}
+
+// TaskType — тип единицы работы (Kind == KindTask, DESIGN.md §14 Этап 15):
+// эпик, история или задача. Поле, а не тег — доска и фильтры опираются на
+// него, а теги агенты ставили вразнобой (epic/эпик/История). Иерархия между
+// ними — существующие связи rel=part_of строго от дочерней к родительской
+// (задача part_of истории, история part_of эпика).
+type TaskType string
+
+const (
+	// TaskTypeEpic — крупная цель, объединяющая истории/задачи. Обычная
+	// карточка со своим хранимым статусом, ходит по колонкам как все.
+	TaskTypeEpic TaskType = "epic"
+	// TaskTypeStory — пользовательская история внутри эпика.
+	TaskTypeStory TaskType = "story"
+	// TaskTypeTask — обычная задача. Дефолт при сохранении task.
+	TaskTypeTask TaskType = "task"
+)
+
+// TaskTypes — все допустимые значения TaskType. Единственный перечень для
+// валидации write path и enum MCP-схем, как Statuses.
+var TaskTypes = []TaskType{TaskTypeEpic, TaskTypeStory, TaskTypeTask}
 
 // Значения Link.Rel — тип связи между записями в графе links.
 const (
@@ -101,12 +137,23 @@ type Memory struct {
 	// сразу (Store.SearchLexical/SearchVector), фоновый ExpireSweep превращает
 	// их в тумстоун (Supersede) при следующем прогоне планировщика.
 	ExpiresAt int64
-	// Status — состояние задачи (см. Status): заполняется только у Kind ==
+	// Status — стадия задачи (см. Status): заполняется только у Kind ==
 	// KindTask, у остальных типов памяти пусто. В БД — nullable-колонка status
 	// (пусто хранится как NULL).
 	Status Status
-	Tags   []string
-	Links  []Link
+	// Type — тип задачи (см. TaskType): только у Kind == KindTask (дефолт
+	// TaskTypeTask), у остальных пусто. В БД — nullable-колонка task_type.
+	Type TaskType
+	// Branch — имя git-ветки, в которой ведётся задача (свободная строка без
+	// валидации, напр. "feat/kanban-board"): только у Kind == KindTask, у
+	// остальных пусто. В БД — nullable-колонка branch.
+	Branch string
+	// Workflow — имя процесса, которым задача выполняется ("dev", "ultracode",
+	// "code-review", …), не id запуска: только у Kind == KindTask, у остальных
+	// пусто. В БД — nullable-колонка workflow.
+	Workflow string
+	Tags     []string
+	Links    []Link
 }
 
 // Query — параметры поиска для recall.
@@ -132,6 +179,11 @@ type Query struct {
 	// видна в листинге. При непустом Statuses флаг не действует — явный набор
 	// состояний сам по себе точен.
 	IncludeDone bool
+	// Types — фильтр по типу задачи (Memory.Type, Этап 15): вернуть только
+	// задачи с одним из перечисленных типов (OR). Пусто = без фильтра. Записи
+	// прочих kind (у них тип NULL) фильтр не пропускает — как Statuses с
+	// явным набором: непустой Types сам по себе означает «только задачи».
+	Types []string
 	// Tags — фильтр по тегам: запись проходит, если имеет хотя бы один из
 	// перечисленных тегов (OR-семантика, задача 8.2). Пусто = без фильтра.
 	Tags        []string

@@ -149,6 +149,17 @@ CREATE TRIGGER tags_ad AFTER DELETE ON tags BEGIN
 END;
 `
 
+// dropFTSTriggers снимает все триггеры ftsTriggers — выполняется в migrate()
+// перед шагами миграции (см. комментарий там); ftsTriggers затем создаёт их
+// заново. Перечень имён обязан совпадать с ftsTriggers.
+const dropFTSTriggers = `
+DROP TRIGGER IF EXISTS memories_ai;
+DROP TRIGGER IF EXISTS memories_au;
+DROP TRIGGER IF EXISTS memories_ad;
+DROP TRIGGER IF EXISTS tags_ai;
+DROP TRIGGER IF EXISTS tags_ad;
+`
+
 // createMemoriesFTS — целевая (текущая) форма memories_fts: задача 8.3 добавляет
 // content_stemmed к исходным content/summary/tags. Используется и для свежей БД
 // (создаёт таблицу напрямую), и как целевая форма при миграции существующей БД со
@@ -164,7 +175,9 @@ const createMemoriesFTS = `CREATE VIRTUAL TABLE memories_fts USING fts5(content,
 // (content, summary, tags) без content_stemmed (пересобрать и перегнать контент).
 // Задача 9.4 (TTL) добавила migrations[1]/schemaVersion=2 тем же механизмом, не
 // трогая migrate()/этот комментарий про сам механизм — см. migrateExpiresAt.
-const schemaVersion = 3
+// Задача 14.1 — migrations[2]/3 (status), Этап 15 — migrations[3]/4 (модель
+// задачи v2: task_type/branch/workflow + data-шаги, см. migrateTaskModel).
+const schemaVersion = 4
 
 // migrationStep — один шаг миграции схемы: переводит БД с версии i на версию i+1.
 // Выполняется целиком в одной транзакции.
@@ -176,6 +189,7 @@ var migrations = []migrationStep{
 	migrateStemmedFTS, // 0 -> 1 (задача 8.3): memories_fts + колонка content_stemmed
 	migrateExpiresAt,  // 1 -> 2 (задача 9.4): memories + колонка expires_at (TTL)
 	migrateStatus,     // 2 -> 3 (задача 14.1): memories + колонка status (состояние задачи)
+	migrateTaskModel,  // 3 -> 4 (Этап 15): memories + task_type/branch/workflow, blocked -> todo, backfill task_type
 }
 
 // migrate применяет по порядку шаги migrations, начиная с версии, прочитанной из
@@ -187,6 +201,24 @@ func (s *sqliteStore) migrate(ctx context.Context) error {
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("чтение user_version: %w", err)
+	}
+	if version >= schemaVersion {
+		return nil
+	}
+
+	// На время миграций FTS-триггеры снимаются целиком: после rename в
+	// migrateStemmedFTS тела старых триггеров ссылаются на memories_fts_old
+	// (см. комментарий к ftsTriggers), и любой data-UPDATE по memories в более
+	// позднем шаге (migrateTaskModel) споткнулся бы о несуществующую таблицу —
+	// SQLite компилирует тело триггера при подготовке UPDATE, даже если строк
+	// он не затронет. Шаги миграции синхронизацию FTS делают сами (явные INSERT
+	// в migrateStemmedFTS) либо не трогают индексируемых полей, а Open
+	// безусловно пересоздаёт актуальные триггеры сразу после migrate()
+	// (ftsTriggers), поэтому ни обрыв между снятием и миграцией, ни сама
+	// миграция состояния индекса не теряют. Правило общее для всех будущих
+	// шагов: data-UPDATE внутри миграции не требует знать о старых триггерах.
+	if _, err := s.db.ExecContext(ctx, dropFTSTriggers); err != nil {
+		return fmt.Errorf("снятие FTS-триггеров на время миграции: %w", err)
 	}
 
 	for version < schemaVersion {
@@ -412,6 +444,52 @@ func migrateStatus(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// migrateTaskModel — миграция 3 -> 4 (Этап 15, DESIGN.md §4/§14): модель задачи v2.
+// Одна транзакция, два вида шагов:
+//   - схема: три nullable TEXT-колонки memories — task_type, branch, workflow —
+//     каждая со своей проверкой hasColumn. Проверка на каждую колонку, а не одна
+//     на все: миграция идёт в транзакции, но проверка «колонка уже есть»
+//     обязана держаться и для БД, где по какой-то причине часть колонок уже
+//     появилась (ручная правка, оборванный прогон старой сборки) — иначе
+//     повторный Open упёрся бы в duplicate column;
+//   - данные (только kind='task'): статус blocked упразднён (блокировка — не
+//     стадия, а вычисляемое свойство из связей blocked_by, задача 15.4) —
+//     существующие задачи переводятся в todo; backfill task_type по тегам,
+//     которыми агенты помечали эпики/истории до появления поля (epic/эпик →
+//     epic, story/История → story), остальные задачи → task; сами теги не
+//     трогаются. Все UPDATE идемпотентны (WHERE по старому значению / IS NULL),
+//     но повторно и не выполняются — user_version после успешной транзакции
+//     равен 4.
+//
+// Как и status, новые колонки в baseSchema не объявляются: единая точка правды
+// о форме memories после Этапа 15 — здесь; существующие строки прочих kind
+// получают NULL и ни в чём не нуждаются.
+func migrateTaskModel(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range []string{"task_type", "branch", "workflow"} {
+		has, err := hasColumn(ctx, tx, "memories", column)
+		if err != nil {
+			return fmt.Errorf("проверка колонки %s: %w", column, err)
+		}
+		if has {
+			continue
+		}
+		// column — константа из списка выше, не пользовательский ввод; DDL не
+		// принимает bind-параметры для имени колонки.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE memories ADD COLUMN %s TEXT`, column)); err != nil {
+			return fmt.Errorf("добавление колонки %s: %w", column, err)
+		}
+	}
+	// Data-шаги — UPDATE memories; FTS-триггеры на время миграции сняты
+	// migrate() (см. dropFTSTriggers), иначе на БД, идущей с версии 0, старый
+	// memories_au споткнулся бы о memories_fts_old.
+	for _, step := range taskModelDataSteps {
+		if _, err := tx.ExecContext(ctx, step.sql, step.args...); err != nil {
+			return fmt.Errorf("%s: %w", step.name, err)
+		}
+	}
+	return nil
+}
+
 // sqliteStore — реализация Store поверх SQLite (метаданные + FTS5 + sqlite-vec).
 type sqliteStore struct {
 	db  *sql.DB
@@ -537,17 +615,20 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 	if m.Status != "" {
 		status = string(m.Status)
 	}
+	// task_type/branch/workflow (Этап 15) — по тому же правилу, что status:
+	// пусто хранится как NULL.
+	taskType, branch, workflow := nullIfEmpty(string(m.Type)), nullIfEmpty(m.Branch), nullIfEmpty(m.Workflow)
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			kind=excluded.kind, scope=excluded.scope, content=excluded.content, summary=excluded.summary,
 			importance=excluded.importance, created_at=excluded.created_at, updated_at=excluded.updated_at,
 			accessed_at=excluded.accessed_at, access_count=excluded.access_count,
 			superseded_by=excluded.superseded_by, source=excluded.source, expires_at=excluded.expires_at,
-			status=excluded.status
-	`, m.Id, string(m.Kind), m.Scope, m.Content, m.Summary, m.Importance, m.CreatedAt, m.UpdatedAt, m.AccessedAt, m.AccessCount, m.SupersededBy, m.Source, expiresAt, status)
+			status=excluded.status, task_type=excluded.task_type, branch=excluded.branch, workflow=excluded.workflow
+	`, m.Id, string(m.Kind), m.Scope, m.Content, m.Summary, m.Importance, m.CreatedAt, m.UpdatedAt, m.AccessedAt, m.AccessCount, m.SupersededBy, m.Source, expiresAt, status, taskType, branch, workflow)
 	if err != nil {
 		return fmt.Errorf("upsert memories: %w", err)
 	}
@@ -602,8 +683,8 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 // Get возвращает запись по id вместе с её тегами и исходящими связями.
 func (s *sqliteStore) Get(ctx context.Context, id string) (memory.Memory, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories WHERE id = ?
+		SELECT `+memoryColumns+`
+		FROM memories m WHERE m.id = ?
 	`, id)
 
 	m, err := scanMemory(row)
@@ -697,50 +778,6 @@ func (s *sqliteStore) loadLinks(ctx context.Context, id string) ([]memory.Link, 
 	return links, rows.Err()
 }
 
-// rowScanner — общий интерфейс *sql.Row и *sql.Rows, используемый scanMemory.
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanMemory(row rowScanner) (memory.Memory, error) {
-	var (
-		m          memory.Memory
-		kind       string
-		summary    sql.NullString
-		accessedAt sql.NullInt64
-		superseded sql.NullString
-		source     sql.NullString
-		expiresAt  sql.NullInt64
-		status     sql.NullString
-	)
-
-	if err := row.Scan(&m.Id, &kind, &m.Scope, &m.Content, &summary, &m.Importance,
-		&m.CreatedAt, &m.UpdatedAt, &accessedAt, &m.AccessCount, &superseded, &source, &expiresAt, &status); err != nil {
-		return memory.Memory{}, err
-	}
-
-	m.Kind = memory.Kind(kind)
-	if summary.Valid {
-		m.Summary = &summary.String
-	}
-	if accessedAt.Valid {
-		m.AccessedAt = &accessedAt.Int64
-	}
-	if superseded.Valid {
-		m.SupersededBy = &superseded.String
-	}
-	if source.Valid {
-		m.Source = &source.String
-	}
-	if expiresAt.Valid {
-		m.ExpiresAt = expiresAt.Int64
-	}
-	if status.Valid {
-		m.Status = memory.Status(status.String)
-	}
-	return m, nil
-}
-
 // scopePredicate строит условие фильтра по scope (DESIGN.md §2.1) для использования в
 // SearchLexical и (в дальнейшем, Этап 3.2) SearchVector — единая точка, чтобы оба
 // источника поиска фильтровали scope одинаково.
@@ -806,6 +843,23 @@ func statusPredicate(statuses []string, includeDone bool) (clause string, args [
 	return "m.status IN (" + strings.Join(placeholders, ",") + ")", args
 }
 
+// typePredicate строит условие фильтра по типу задачи (Query.Types, Этап 15):
+// m.task_type IN (...). Пустой набор → пустой clause (без фильтра). Непустой
+// набор отбирает только задачи — у записей прочих kind task_type = NULL, и
+// IN их не пропускает, как и явный перечень Statuses (см. statusPredicate).
+func typePredicate(types []string) (clause string, args []any) {
+	if len(types) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, len(types))
+	args = make([]any, len(types))
+	for i, t := range types {
+		placeholders[i] = "?"
+		args[i] = t
+	}
+	return "m.task_type IN (" + strings.Join(placeholders, ",") + ")", args
+}
+
 // tagsPredicate строит условие "хотя бы один из тегов" (OR-семантика, Query.Tags,
 // задача 8.2) через EXISTS-подзапрос к таблице tags — единая точка для metaFilters,
 // как и scopePredicate/kindPredicate, чтобы SearchLexical и SearchVector фильтровали
@@ -858,6 +912,10 @@ func metaFilters(q memory.Query, now int64) (conds []string, args []any) {
 		conds = append(conds, clause)
 		args = append(args, statusArgs...)
 	}
+	if clause, typeArgs := typePredicate(q.Types); clause != "" {
+		conds = append(conds, clause)
+		args = append(args, typeArgs...)
+	}
 	if q.SinceTs > 0 {
 		conds = append(conds, "m.created_at >= ?")
 		args = append(args, q.SinceTs)
@@ -893,7 +951,7 @@ func (s *sqliteStore) SearchLexical(ctx context.Context, q memory.Query) ([]memo
 	matchQuery := sanitizeFTSQuery(q.Text)
 	useMatch := matchQuery != ""
 
-	query := "SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status"
+	query := "SELECT " + memoryColumns
 	if useMatch {
 		query += ", -bm25(memories_fts) AS score FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid"
 		conds = append(conds, "memories_fts MATCH ?")
@@ -932,19 +990,6 @@ func (s *sqliteStore) SearchLexical(ctx context.Context, q memory.Query) ([]memo
 		candidates = append(candidates, memory.Candidate{Memory: m, Score: score, Source: "lexical"})
 	}
 	return candidates, rows.Err()
-}
-
-// rowWithExtra адаптирует rowScanner так, чтобы scanMemory (рассчитанный на ровно
-// 12 колонок memories) можно было переиспользовать для запросов, добавляющих
-// дополнительные колонки после стандартных 12 (например, score в SearchLexical):
-// dest от scanMemory дополняется extra перед вызовом настоящего Scan.
-type rowWithExtra struct {
-	row   rowScanner
-	extra []any
-}
-
-func (r rowWithExtra) Scan(dest ...any) error {
-	return r.row.Scan(append(dest, r.extra...)...)
 }
 
 // sanitizeFTSQuery превращает произвольный пользовательский текст в безопасное
@@ -1044,7 +1089,7 @@ func (s *sqliteStore) SearchVector(ctx context.Context, vec []float32, q memory.
 		WITH knn AS (
 			SELECT memory_id, distance FROM memories_vec WHERE embedding MATCH ? AND k = ?
 		)
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status, knn.distance
+		SELECT ` + memoryColumns + `, knn.distance
 		FROM knn JOIN memories m ON m.id = knn.memory_id
 		WHERE ` + strings.Join(conds, " AND ") + `
 		ORDER BY knn.distance ASC
@@ -1125,7 +1170,7 @@ func (s *sqliteStore) SemanticNeighbors(ctx context.Context, id string, k int) (
 			SELECT memory_id, distance FROM memories_vec
 			WHERE embedding MATCH (SELECT embedding FROM memories_vec WHERE memory_id = ?) AND k = ?
 		)
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status, knn.distance
+		SELECT ` + memoryColumns + `, knn.distance
 		FROM knn JOIN memories m ON m.id = knn.memory_id
 		ORDER BY knn.distance ASC
 	`
@@ -1161,7 +1206,7 @@ func (s *sqliteStore) SemanticNeighbors(ctx context.Context, id string, k int) (
 // не должны включать тумстоуны.
 func (s *sqliteStore) Neighbors(ctx context.Context, id string) ([]memory.Memory, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
+		SELECT DISTINCT `+memoryColumns+`
 		FROM memories m
 		JOIN links l ON (l.dst = m.id AND l.src = ?) OR (l.src = m.id AND l.dst = ?)
 		WHERE m.superseded_by IS NULL
@@ -1263,7 +1308,7 @@ func (s *sqliteStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory
 	}
 
 	query := `
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
+		SELECT ` + memoryColumns + `
 		FROM memories m` + where + `
 		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT ? OFFSET ?
@@ -1423,7 +1468,7 @@ func (s *sqliteStore) AllForExport(ctx context.Context, scopes []string) ([]memo
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
+		SELECT `+memoryColumns+`
 		FROM memories m`+where+`
 		ORDER BY m.id ASC
 	`, args...)
@@ -1527,7 +1572,7 @@ func (s *sqliteStore) ListMissingVectors(ctx context.Context, limit int) ([]memo
 	}
 
 	query := `
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
+		SELECT ` + memoryColumns + `
 		FROM memories m
 		LEFT JOIN memories_vec v ON v.memory_id = m.id
 		WHERE m.superseded_by IS NULL AND v.memory_id IS NULL
@@ -1565,8 +1610,8 @@ func (s *sqliteStore) ListMissingVectors(ctx context.Context, limit int) ([]memo
 // подгрузка тегов/связей на каждую запись была бы N+1 запросом без пользы.
 func (s *sqliteStore) ListEpisodicForConsolidation(ctx context.Context, olderThan int64, limit int) ([]memory.Memory, error) {
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories
+		SELECT ` + memoryColumns + `
+		FROM memories m
 		WHERE kind = ? AND superseded_by IS NULL AND created_at < ?
 		ORDER BY scope, created_at
 	`
@@ -1603,8 +1648,8 @@ func (s *sqliteStore) ListEpisodicForConsolidation(ctx context.Context, olderTha
 // (maint.Decayer) использует только Id/Importance/CreatedAt/AccessedAt.
 func (s *sqliteStore) ListEpisodicForDecay(ctx context.Context, notAccessedSince int64, limit int) ([]memory.Memory, error) {
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories
+		SELECT ` + memoryColumns + `
+		FROM memories m
 		WHERE kind = ? AND superseded_by IS NULL AND COALESCE(accessed_at, created_at) < ?
 		ORDER BY COALESCE(accessed_at, created_at)
 	`
@@ -1643,8 +1688,8 @@ func (s *sqliteStore) ListEpisodicForDecay(ctx context.Context, notAccessedSince
 // Tags/Links не подгружаются — Expirer использует только Id.
 func (s *sqliteStore) ListExpired(ctx context.Context, now int64, limit int) ([]memory.Memory, error) {
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories
+		SELECT ` + memoryColumns + `
+		FROM memories m
 		WHERE superseded_by IS NULL AND expires_at IS NOT NULL AND expires_at > 0 AND expires_at < ?
 		ORDER BY expires_at
 	`

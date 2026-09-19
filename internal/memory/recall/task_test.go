@@ -131,3 +131,77 @@ func TestRecall_DoneTaskHiddenByDefault(t *testing.T) {
 		t.Errorf("явный фильтр по статусу отбирает только задачи, факт не должен попасть:\n%s", done.Markdown)
 	}
 }
+
+// TestRecall_TaskLineShowsTypeAndBranch: тип задачи (Этап 15) печатается в
+// скобках только для epic/story, ветка — хвостом строки; обычная задача (task)
+// без ветки выглядит как раньше.
+func TestRecall_TaskLineShowsTypeAndBranch(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:task-type-line"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindTask, Scope: scope, Status: memory.StatusDoing,
+		Type: memory.TaskTypeEpic, Branch: "feat/kanban-board",
+		Content: "Полный текст эпика про доску задач", Summary: strPtr("Kanban-доска"),
+		Importance: 4, CreatedAt: 1, UpdatedAt: 1,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindTask, Scope: scope, Status: memory.StatusTodo,
+		Type:    memory.TaskTypeTask,
+		Content: "Полный текст обычной задачи про доску", Summary: strPtr("Колонка done"),
+		Importance: 3, CreatedAt: 2, UpdatedAt: 2,
+	})
+
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "доска задач", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if !strings.Contains(brief.Markdown, "- [doing] (epic) Kanban-доска [★4] · ветка feat/kanban-board") {
+		t.Errorf("строка эпика должна нести тип и ветку, got:\n%s", brief.Markdown)
+	}
+	// Обычная задача (тип task — дефолт) без ветки печатается как раньше: ни
+	// "(task)", ни хвоста с веткой (проверка по строке целиком, а не по
+	// вхождению — заголовок секции "### Tasks (task)" содержит те же скобки).
+	if !strings.Contains("\n"+brief.Markdown+"\n", "\n- [todo] Колонка done [★3]\n") {
+		t.Errorf("обычная задача без ветки печатается как раньше, got:\n%s", brief.Markdown)
+	}
+}
+
+// TestRecall_FilterByTypes: Query.Types пробрасывается в store — в бриф
+// попадают только задачи запрошенных типов.
+func TestRecall_FilterByTypes(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:task-types-filter"
+
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindTask, Scope: scope, Status: memory.StatusTodo, Type: memory.TaskTypeEpic,
+		Content: "общий текст про фильтр типов", Summary: strPtr("Эпик фильтра"), Importance: 3, CreatedAt: 1, UpdatedAt: 1,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindTask, Scope: scope, Status: memory.StatusTodo, Type: memory.TaskTypeTask,
+		Content: "общий текст про фильтр типов", Summary: strPtr("Задача фильтра"), Importance: 3, CreatedAt: 2, UpdatedAt: 2,
+	})
+	putMemory(t, ctx, s, memory.Memory{
+		Id: newID(t), Kind: memory.KindSemantic, Scope: scope,
+		Content: "общий текст про фильтр типов", Summary: strPtr("Факт фильтра"), Importance: 3, CreatedAt: 3, UpdatedAt: 3,
+	})
+
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+
+	brief, err := r.Recall(ctx, memory.Query{Text: "фильтр типов", Scope: scope, Types: []string{"epic"}})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if !strings.Contains(brief.Markdown, "Эпик фильтра") {
+		t.Errorf("эпик обязан попасть в бриф при Types=[epic]:\n%s", brief.Markdown)
+	}
+	if strings.Contains(brief.Markdown, "Задача фильтра") || strings.Contains(brief.Markdown, "Факт фильтра") {
+		t.Errorf("Types=[epic] не должен пропускать обычную задачу и факт:\n%s", brief.Markdown)
+	}
+}

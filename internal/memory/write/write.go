@@ -37,6 +37,14 @@ var (
 	// молчаливое отбрасывание, — иначе агент, перепутавший kind, считал бы, что
 	// завёл задачу, и не нашёл бы её ни по одному фильтру статуса.
 	ErrStatusNotApplicable = errors.New("write: status допустим только для kind=task")
+	// ErrUnknownTaskType — type не входит в memory.TaskTypes (Этап 15).
+	ErrUnknownTaskType = errors.New("write: неизвестный type задачи")
+	// ErrTaskFieldNotApplicable — type/branch/workflow передано для записи, у
+	// которой их не бывает (kind != task). Одна ошибка на три поля, имя поля —
+	// в тексте обёртки (см. taskFieldNotApplicable); тот же fail-fast, что и у
+	// ErrStatusNotApplicable, — молчаливое отбрасывание скрыло бы перепутанный
+	// kind.
+	ErrTaskFieldNotApplicable = errors.New("write: поле допустимо только для kind=task")
 	// ErrTaskSummaryRequired — у задачи (kind=task) не задан summary. Content
 	// задачи — документ целиком, в бриф recall выводится Summary (см.
 	// recall.formatLine), поэтому заголовок задачи обязателен: без него бриф
@@ -123,7 +131,18 @@ type SaveInput struct {
 	// Status — состояние задачи (memory.Status), только для Kind == KindTask:
 	// пусто → memory.StatusTodo (задача заводится не начатой). Для остальных
 	// kind непустое значение — ErrStatusNotApplicable (см. normalizeStatus).
-	Status     string
+	Status string
+	// Type — тип задачи (memory.TaskType), только для Kind == KindTask: пусто →
+	// memory.TaskTypeTask, значение вне memory.TaskTypes — ErrUnknownTaskType.
+	// Для остальных kind непустое значение — ErrTaskFieldNotApplicable (см.
+	// normalizeTaskType).
+	Type string
+	// Branch/Workflow — git-ветка и имя процесса задачи (Этап 15): свободные
+	// строки без валидации, только для Kind == KindTask (иначе непустое
+	// значение — ErrTaskFieldNotApplicable, см. normalizeTaskText); пусто — не
+	// заданы.
+	Branch     string
+	Workflow   string
 	Importance int // 1..5; 0 трактуется как «не указано» → дефолт 3
 	Tags       []string
 	Links      []LinkInput // связи с целевыми записями; висячие ссылки пропускаются молча (см. Save)
@@ -161,7 +180,17 @@ type UpdateInput struct {
 	// задача без состояния бессмысленна, поэтому пустой status — та же ошибка,
 	// что и неизвестный.
 	Status *string
-	Links  []LinkInput // связи, добавляемые к текущим links записи (пустой Rel -> related);
+	// Type — новый тип задачи (memory.TaskType, Этап 15): nil — не менять;
+	// пустая строка — вернуть дефолт memory.TaskTypeTask (в отличие от Status:
+	// у типа есть осмысленное значение по умолчанию, у стадии — нет). Применим
+	// только к записи с Kind == KindTask (иначе ErrTaskFieldNotApplicable).
+	Type *string
+	// Branch/Workflow — git-ветка и имя процесса задачи (Этап 15): nil — не
+	// менять; пустая строка — очистить поле (тот же сентинел, что у Summary/
+	// TTL). Применимы только к Kind == KindTask (иначе ErrTaskFieldNotApplicable).
+	Branch   *string
+	Workflow *string
+	Links    []LinkInput // связи, добавляемые к текущим links записи (пустой Rel -> related);
 	// висячие ссылки пропускаются молча, как в Save (см. resolveLinks); nil — не менять.
 	// TTL продлевает или снимает срок жизни записи (задача 9.4): nil — не менять
 	// текущий ExpiresAt; "" или "0" — снять срок (запись становится вечной,
@@ -229,6 +258,18 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 	if err != nil {
 		return "", false, err
 	}
+	taskType, err := normalizeTaskType(in.Kind, in.Type)
+	if err != nil {
+		return "", false, err
+	}
+	branch, err := normalizeTaskText(in.Kind, "branch", in.Branch)
+	if err != nil {
+		return "", false, err
+	}
+	workflow, err := normalizeTaskText(in.Kind, "workflow", in.Workflow)
+	if err != nil {
+		return "", false, err
+	}
 	now := w.now()
 	expiresAt, err := parseTTL(in.TTL, now)
 	if err != nil {
@@ -274,6 +315,9 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		Source:     sourcePtr,
 		ExpiresAt:  expiresAt,
 		Status:     status,
+		Type:       taskType,
+		Branch:     branch,
+		Workflow:   workflow,
 		Tags:       tags,
 		Links:      links,
 	}
@@ -555,6 +599,33 @@ func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 		m.Status = status
 		changed = true
 	}
+	// Применимость type/branch/workflow проверяется по Kind самой записи —
+	// смена Kind через Update не поддерживается, так что kind здесь тот же,
+	// под который поля и валидировались при Save.
+	if in.Type != nil {
+		taskType, err := normalizeTaskType(m.Kind, *in.Type)
+		if err != nil {
+			return err
+		}
+		m.Type = taskType
+		changed = true
+	}
+	if in.Branch != nil {
+		branch, err := normalizeTaskText(m.Kind, "branch", *in.Branch)
+		if err != nil {
+			return err
+		}
+		m.Branch = branch
+		changed = true
+	}
+	if in.Workflow != nil {
+		workflow, err := normalizeTaskText(m.Kind, "workflow", *in.Workflow)
+		if err != nil {
+			return err
+		}
+		m.Workflow = workflow
+		changed = true
+	}
 	if in.Tags != nil {
 		m.Tags = unionTags(nil, in.Tags)
 		changed = true
@@ -670,11 +741,65 @@ func normalizeStatus(kind memory.Kind, status string) (memory.Status, error) {
 // statusList перечисляет допустимые статусы через запятую — для текста ошибки
 // (тот же перечень memory.Statuses, что и в валидации; не расходится).
 func statusList() string {
-	out := make([]string, len(memory.Statuses))
-	for i, s := range memory.Statuses {
-		out[i] = string(s)
+	return enumList(memory.Statuses)
+}
+
+// taskTypeList — то же для memory.TaskTypes.
+func taskTypeList() string {
+	return enumList(memory.TaskTypes)
+}
+
+// enumList перечисляет значения строкового перечня через запятую (для текста
+// ошибок валидации): один хелпер на Statuses и TaskTypes.
+func enumList[T ~string](values []T) string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = string(v)
 	}
 	return strings.Join(out, ", ")
+}
+
+// normalizeTaskType приводит переданный type к memory.TaskType с учётом kind
+// записи (Этап 15) — единственное место этого правила для Save и Update, по
+// образцу normalizeStatus:
+//   - kind != task: непустой type — ErrTaskFieldNotApplicable, пустой — "";
+//   - kind == task: пустой type — дефолт memory.TaskTypeTask (и при Save, и при
+//     Update — у типа, в отличие от стадии, есть осмысленное умолчание),
+//     значение вне memory.TaskTypes — ErrUnknownTaskType.
+func normalizeTaskType(kind memory.Kind, typ string) (memory.TaskType, error) {
+	typ = strings.TrimSpace(typ)
+	if kind != memory.KindTask {
+		if typ != "" {
+			return "", taskFieldNotApplicable("type", typ, kind)
+		}
+		return "", nil
+	}
+	if typ == "" {
+		return memory.TaskTypeTask, nil
+	}
+	if !slices.Contains(memory.TaskTypes, memory.TaskType(typ)) {
+		return "", fmt.Errorf("%w: %q, допустимые значения: %s", ErrUnknownTaskType, typ, taskTypeList())
+	}
+	return memory.TaskType(typ), nil
+}
+
+// normalizeTaskText — общая проверка свободных task-only строк branch/workflow
+// (Этап 15): значение только обрезается по пробелам, без валидации формы
+// (имя git-ветки и имя процесса — соглашения агентов, не перечень); у записи
+// kind != task непустое значение — ErrTaskFieldNotApplicable, пустое — "".
+// field — имя поля для текста ошибки.
+func normalizeTaskText(kind memory.Kind, field, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if kind != memory.KindTask && value != "" {
+		return "", taskFieldNotApplicable(field, value, kind)
+	}
+	return value, nil
+}
+
+// taskFieldNotApplicable оборачивает ErrTaskFieldNotApplicable именем поля и
+// полученным значением — единый текст для type/branch/workflow.
+func taskFieldNotApplicable(field, value string, kind memory.Kind) error {
+	return fmt.Errorf("%w: %s (получен %q для kind=%q)", ErrTaskFieldNotApplicable, field, value, kind)
 }
 
 // ClampImportance приводит importance к диапазону [1,5]; 0 (не указано) → дефолт 3.

@@ -487,18 +487,33 @@ func estimateTokens(s string) int {
 
 // formatLine форматирует одну строку брифа: краткая форма (Summary), если задана,
 // иначе Content, плюс маркер важности. У задач (memory.KindTask) строка
-// дополнительно начинается с маркера состояния — `- [doing] Заголовок [★4]`:
+// дополнительно начинается с маркера стадии — `- [doing] Заголовок [★4]`:
 // список задач без статусов бесполезен, а сам статус в бриф иначе не попадает
-// (в строку выводится только текст записи). Для задачи Summary — её заголовок и
-// он обязателен (write.ErrTaskSummaryRequired), поэтому многокилобайтный content
-// задачи в бриф не просачивается; полный текст агент забирает по id (memory_get).
+// (в строку выводится только текст записи). Тип задачи (Этап 15) печатается в
+// скобках после стадии только для epic/story — `- [doing] (epic) Заголовок [★4]`;
+// обычная задача (task, подавляющее большинство) выглядит как раньше, чтобы не
+// платить токенами за значение по умолчанию. Ветка, если задана, — хвостом
+// `· ветка feat/x`: агенту, восстанавливающему контекст, важно знать, где
+// ведётся работа. Маркер блокировки — задача 15.4. Для задачи Summary — её
+// заголовок и он обязателен (write.ErrTaskSummaryRequired), поэтому
+// многокилобайтный content задачи в бриф не просачивается; полный текст агент
+// забирает по id (memory_get).
 func formatLine(m memory.Memory) string {
 	text := m.Content
 	if m.Summary != nil && strings.TrimSpace(*m.Summary) != "" {
 		text = *m.Summary
 	}
 	if m.Kind == memory.KindTask && m.Status != "" {
-		return fmt.Sprintf("- [%s] %s [★%d]", m.Status, text, m.Importance)
+		var b strings.Builder
+		fmt.Fprintf(&b, "- [%s] ", m.Status)
+		if m.Type != "" && m.Type != memory.TaskTypeTask {
+			fmt.Fprintf(&b, "(%s) ", m.Type)
+		}
+		fmt.Fprintf(&b, "%s [★%d]", text, m.Importance)
+		if m.Branch != "" {
+			fmt.Fprintf(&b, " · ветка %s", m.Branch)
+		}
+		return b.String()
 	}
 	return fmt.Sprintf("- %s [★%d]", text, m.Importance)
 }

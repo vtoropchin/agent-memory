@@ -5,8 +5,9 @@
 // стиль работы с *sql.DB/*sql.Tx, что и в sqlite.go, вместо отдельного pgx-native API.
 //
 // Общее со sqlite.go: доменная модель (memory.Memory), контракты методов Store
-// (DESIGN.md §6), ErrNotFound, listDefaultLimit, scanMemory/rowWithExtra (переиспользуются
-// как есть — они оперируют абстрактным rowScanner и не зависят от драйвера).
+// (DESIGN.md §6), ErrNotFound, listDefaultLimit, memoryColumns/scanMemory/rowWithExtra
+// (common.go; переиспользуются как есть — они оперируют абстрактным rowScanner и не
+// зависят от драйвера).
 // Расхождения — только там, где их явно допускает DESIGN.md §4 (таблица «SQLite vs
 // PostgreSQL»): стемминг силами СУБД (`to_tsvector('russian', ...)` вместо
 // content_stemmed/normalizeForFTS), отсутствие k-before-filter у pgvector (см.
@@ -25,6 +26,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // регистрирует database/sql-драйвер "pgx"
@@ -224,8 +227,11 @@ var baseSchemaStatements = []string{
 	// status добавляется ещё и отдельным ALTER (не только в CREATE TABLE выше) —
 	// идемпотентно и для БД, созданных до появления задач (kind=task, задача
 	// 14.1): в SQLite ту же роль играет шаг миграции migrateStatus, здесь
-	// достаточно ADD COLUMN IF NOT EXISTS (тот же приём, что у
-	// schema_version.triggers_checksum), поэтому pgMigrations не заводится.
+	// хватило ADD COLUMN IF NOT EXISTS (тот же приём, что у
+	// schema_version.triggers_checksum), потому что data-шагов у той задачи не
+	// было. Task-поля Этапа 15 (task_type/branch/workflow) сюда НЕ добавляются —
+	// они идут версионным шагом pgMigrations[0] вместе со своими data-UPDATE
+	// (см. migrateTaskModelPG).
 	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS status text`,
 	`CREATE INDEX IF NOT EXISTS memories_search_vec_idx ON memories USING GIN (search_vec)`,
 	`CREATE TABLE IF NOT EXISTS tags (
@@ -316,18 +322,65 @@ var searchVecTriggerStatements = []string{
 }
 
 // pgSchemaVersion — целевая версия схемы (см. таблицу schema_version). В отличие от
-// sqlite.go (где pgSchemaVersion=2 отражает уже прожитую историю миграций FTS5/TTL),
-// PostgreSQL-бэкенд вводится сразу с целевой схемой (задача, поставившая эту
-// реализацию, прямо этого требует — не тащить исторические миграции SQLite) —
-// поэтому стартовое значение 0 и пустой migrations: механизм версионирования
-// присутствует и готов к использованию, но применять пока нечего. Первая будущая
-// миграция добавляется как migrations[0] (переход 0 -> 1) и поднимает pgSchemaVersion
-// до 1 — тем же способом, каким sqlite.go в своё время завела миграции 8.3/9.4.
-const pgSchemaVersion = 0
+// sqlite.go (где schemaVersion отражает уже прожитую историю миграций FTS5/TTL/
+// status), PostgreSQL-бэкенд был введён сразу с целевой схемой (задача, поставившая
+// эту реализацию, прямо этого требует — не тащить исторические миграции SQLite) —
+// поэтому стартовое значение было 0 при пустом pgMigrations. Первый реальный шаг —
+// Этап 15 (migrateTaskModelPG, 0 -> 1): нумерация версий SQLite (4) и PostgreSQL (1)
+// намеренно не совпадает — у них разная история, общая только форма memories на
+// выходе. Следующая миграция добавляется как pgMigrations[1] (1 -> 2) и поднимает
+// эту константу до 2.
+const pgSchemaVersion = 1
 
 // pgMigrations — упорядоченный список шагов миграции схемы, pgMigrations[i] соответствует
-// переходу версии i -> i+1 (см. pgSchemaVersion). Пуст на момент введения бэкенда.
-var pgMigrations = []migrationStep{}
+// переходу версии i -> i+1 (см. pgSchemaVersion).
+var pgMigrations = []migrationStep{
+	migrateTaskModelPG, // 0 -> 1 (Этап 15): memories + task_type/branch/workflow, blocked -> todo, backfill task_type
+}
+
+// migrateTaskModelPG — миграция 0 -> 1 (Этап 15): модель задачи v2, паритет с
+// migrateTaskModel (sqlite.go). Колонки task_type/branch/workflow живут ТОЛЬКО
+// здесь, а не в baseSchemaStatements (в отличие от status, добавленной там через
+// ADD COLUMN IF NOT EXISTS): миграция несёт data-шаги (blocked -> todo, backfill
+// task_type по тегам), а baseSchemaStatements накатывается на каждом Open, и
+// UPDATE по всей таблице при каждом старте недопустим даже идемпотентный
+// (DESIGN.md §14 Этап 15). Раз data-шаги версионные — и колонки рядом с ними,
+// в одном месте: свежая БД получает memories из baseSchemaStatements без новых
+// колонок и тут же, в том же init, проходит этот шаг. ADD COLUMN IF NOT EXISTS
+// — на случай, если колонка уже есть (ручная правка); data-шаги — те же
+// taskModelDataSteps, что и у SQLite, с перенумерованными плейсхолдерами.
+func migrateTaskModelPG(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range []string{"task_type", "branch", "workflow"} {
+		// column — константа из списка выше, не пользовательский ввод.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE memories ADD COLUMN IF NOT EXISTS %s text`, column)); err != nil {
+			return fmt.Errorf("добавление колонки %s: %w", column, err)
+		}
+	}
+	for _, step := range taskModelDataSteps {
+		if _, err := tx.ExecContext(ctx, pgPlaceholders(step.sql), step.args...); err != nil {
+			return fmt.Errorf("%s: %w", step.name, err)
+		}
+	}
+	return nil
+}
+
+// pgPlaceholders перенумеровывает позиционные плейсхолдеры ? (SQLite) в $1, $2, …
+// (PostgreSQL) слева направо — для SQL, общего для обоих драйверов
+// (taskModelDataSteps). Применять только к тексту, где каждый ? — плейсхолдер
+// (литералов с ? в таких запросах нет).
+func pgPlaceholders(query string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range query {
+		if r == '?' {
+			n++
+			b.WriteString("$" + strconv.Itoa(n))
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // schemaInitLockKey — ключ Postgres advisory-лока (pg_advisory_lock), которым init
 // сериализует применение схемы между КОНКУРЕНТНЫМИ Open. Значение — произвольная
@@ -518,12 +571,10 @@ func applySearchVecTriggers(ctx context.Context, conn *sql.Conn) error {
 		}
 	}
 
-	// version по умолчанию 0 при отсутствии строки согласуется с pgSchemaVersion:
-	// если migrate() выше строку ещё не создал (пуст pgMigrations, целевая версия
-	// уже 0), это первая запись в schema_version, и 0 — корректное текущее значение;
-	// если migrate() строку уже создал (есть реальные миграции) — ON CONFLICT ниже
-	// трогает только triggers_checksum, version из excluded не берётся и остаётся
-	// прежним.
+	// migrate() выше уже создал строку schema_version (pgMigrations непуст с Этапа
+	// 15) — ON CONFLICT ниже трогает только triggers_checksum, version из excluded
+	// не берётся и остаётся прежним; 0 в VALUES — лишь на случай, когда строки
+	// почему-то нет (согласуется с версией свежей, ещё не мигрированной БД).
 	if _, err := conn.ExecContext(ctx, `
 		INSERT INTO schema_version (id, version, triggers_checksum) VALUES (1, 0, $1)
 		ON CONFLICT (id) DO UPDATE SET triggers_checksum = excluded.triggers_checksum

@@ -218,9 +218,15 @@ type memoryDTO struct {
 	// прочих типов. Read-only, как и ExpiresAt: смена статуса — работа агента
 	// через MCP, web-морда остаётся чтением + курированием метаданных
 	// (importance/tags, DESIGN.md §12).
-	Status string    `json:"status"`
-	Tags   []string  `json:"tags"`
-	Links  []linkDTO `json:"links"`
+	Status string `json:"status"`
+	// Type/Branch/Workflow — тип задачи (epic|story|task), git-ветка и процесс
+	// (kind=task, Этап 15): пусты у прочих типов. Read-only в этой версии —
+	// правка из web-морды (доска, PATCH) — задача 15.5.
+	Type     string    `json:"type"`
+	Branch   string    `json:"branch"`
+	Workflow string    `json:"workflow"`
+	Tags     []string  `json:"tags"`
+	Links    []linkDTO `json:"links"`
 }
 
 // linkDTO — представление memory.Link ({dst, rel}) для JSON API.
@@ -275,6 +281,9 @@ func toDTO(m memory.Memory) memoryDTO {
 		Source:       m.Source,
 		ExpiresAt:    m.ExpiresAt,
 		Status:       string(m.Status),
+		Type:         string(m.Type),
+		Branch:       m.Branch,
+		Workflow:     m.Workflow,
 		Tags:         tags,
 		Links:        links,
 	}

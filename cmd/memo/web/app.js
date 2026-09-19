@@ -19,18 +19,30 @@ const KIND_BADGE_CLASS_DEFAULT = "bg-slate-100 text-slate-800 dark:bg-slate-700 
 
 const KIND_LABEL = { semantic: "семантика", episodic: "эпизод", procedural: "процедура", debt: "тех-долг", task: "задача" };
 
-// --- бейдж состояния задачи (kind=task, задача 14.1): memory.Status -> подпись
-// и цвет. Литеральные классы — для Tailwind-сканера @source, как и у KIND_BADGE_CLASS. ---
-const STATUS_LABEL = { todo: "к работе", doing: "в работе", blocked: "заблокирована", done: "выполнена" };
+// --- бейдж стадии задачи (kind=task, задача 14.1, стадии доски — Этап 15):
+// memory.Status -> подпись и цвет. Литеральные классы — для Tailwind-сканера
+// @source, как и у KIND_BADGE_CLASS. ---
+const STATUS_LABEL = {
+  backlog: "бэклог",
+  todo: "к работе",
+  doing: "в работе",
+  review: "ревью",
+  testing: "тестирование",
+  release: "к релизу",
+  done: "готово",
+};
 const STATUS_BADGE_CLASS = {
+  backlog: "border-dashed border-slate-300 text-slate-500 dark:border-slate-600 dark:text-slate-400",
   todo: "border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-400",
   doing: "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400",
-  blocked: "border-rose-300 text-rose-700 dark:border-rose-700 dark:text-rose-400",
+  review: "border-violet-300 text-violet-700 dark:border-violet-700 dark:text-violet-400",
+  testing: "border-amber-300 text-amber-700 dark:border-amber-700 dark:text-amber-400",
+  release: "border-teal-300 text-teal-700 dark:border-teal-700 dark:text-teal-400",
   done: "border-emerald-300 text-emerald-700 dark:border-emerald-700 dark:text-emerald-400",
 };
 const STATUS_BADGE_CLASS_DEFAULT = "border-slate-300 text-slate-600 dark:border-slate-600 dark:text-slate-400";
 
-// statusBadge — чип состояния задачи или null, если у записи статуса нет (все
+// statusBadge — чип стадии задачи или null, если у записи статуса нет (все
 // kind, кроме task). Вызывающий код добавляет результат только при непустом
 // значении — чтобы карточки прочих типов памяти выглядели ровно как раньше.
 function statusBadge(status) {
@@ -38,6 +50,24 @@ function statusBadge(status) {
   return el("span", {
     class: "rounded-full border px-2 py-0.5 text-xs font-medium " + (STATUS_BADGE_CLASS[status] || STATUS_BADGE_CLASS_DEFAULT),
     text: STATUS_LABEL[status] || status,
+  });
+}
+
+// --- бейдж типа задачи (memory.TaskType, Этап 15): показывается только для
+// epic/story — обычная задача (task, значение по умолчанию) бейджа не получает,
+// как и в строке брифа recall. Read-only; правка типа — доска (15.5). ---
+const TASK_TYPE_LABEL = { epic: "эпик", story: "история" };
+const TASK_TYPE_BADGE_CLASS = {
+  epic: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
+  story: "bg-sky-100 text-sky-800 dark:bg-sky-900 dark:text-sky-200",
+};
+
+// taskTypeBadge — чип типа задачи или null (не задача, либо тип task).
+function taskTypeBadge(type) {
+  if (!TASK_TYPE_LABEL[type]) return null;
+  return el("span", {
+    class: "rounded-full px-2 py-0.5 text-xs font-medium " + TASK_TYPE_BADGE_CLASS[type],
+    text: TASK_TYPE_LABEL[type],
   });
 }
 
@@ -546,6 +576,8 @@ function renderCard(item, isSearch) {
 
   const status = statusBadge(item.status);
   if (status) topRow.appendChild(status);
+  const taskType = taskTypeBadge(item.type);
+  if (taskType) topRow.appendChild(taskType);
 
   if (item.supersededBy) {
     topRow.appendChild(
@@ -920,6 +952,8 @@ function renderCardModal(card) {
   const badges = [kindBadge, scopeBadge, importanceEl, vectorStatusBadge(card.embedding)];
   const statusEl = statusBadge(m.status);
   if (statusEl) badges.splice(2, 0, statusEl);
+  const taskTypeEl = taskTypeBadge(m.type);
+  if (taskTypeEl) badges.splice(statusEl ? 3 : 2, 0, taskTypeEl);
   content.appendChild(el("div", { class: "flex flex-wrap items-center gap-2" }, badges));
 
   if (m.supersededBy) {

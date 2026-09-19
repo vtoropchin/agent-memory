@@ -1,9 +1,10 @@
 package store
 
 // common.go собирает код, буквально совпадающий между sqliteStore и pgStore — запросы
-// без единого диалектного плейсхолдера, работающие через один и тот же *sql.DB и
-// scanMemory (rowScanner, определённый в sqlite.go — общая точка для обоих бэкендов,
-// см. её комментарий). Здесь — не о том, ЧТО запрашивается (это по-прежнему решает
+// без единого диалектного плейсхолдера, работающие через один и тот же *sql.DB, и
+// общий row-mapping записи (memoryColumns/scanMemory/rowWithExtra — единая точка
+// формы memories для обоих бэкендов, см. их комментарии) вместе с
+// драйверо-нейтральными data-шагами миграций (taskModelDataSteps). Здесь — не о том, ЧТО запрашивается (это по-прежнему решает
 // каждый Store-метод), а о том, чтобы один и тот же SQL-текст не жил в двух файлах,
 // расходясь при будущих правках одного и забытом втором.
 //
@@ -99,9 +100,9 @@ func embedMetaFromDB(ctx context.Context, db *sql.DB) (string, int, error) {
 // живёт в вызывающих методах, а не здесь.
 func liveMemoriesFromDB(ctx context.Context, db *sql.DB) ([]memory.Memory, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories
-		WHERE superseded_by IS NULL
+		SELECT `+memoryColumns+`
+		FROM memories m
+		WHERE m.superseded_by IS NULL
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("чтение записей для reindex: %w", err)
@@ -117,4 +118,126 @@ func liveMemoriesFromDB(ctx context.Context, db *sql.DB) ([]memory.Memory, error
 		all = append(all, m)
 	}
 	return all, rows.Err()
+}
+
+// memoryColumns — список колонок memories в том порядке, в каком их читает
+// scanMemory; единственное место этого перечня для обоих драйверов (sqlite.go и
+// postgres_*.go): каждый SELECT записи собирается как "SELECT " + memoryColumns
+// (при необходимости с довеском вроде knn.distance — см. rowWithExtra), а
+// таблица в нём обязана иметь алиас m. Новая колонка добавляется здесь, в Put
+// обоих драйверов и в scanMemory — и ни в одном из ~20 запросов по отдельности
+// (до Этапа 15 список был продублирован в каждом, и одна забытая копия молча
+// теряла бы поле на одном из путей чтения).
+const memoryColumns = "m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status, m.task_type, m.branch, m.workflow"
+
+// nullIfEmpty — пустая строка -> SQL NULL для nullable-колонок task-полей
+// (status/task_type/branch/workflow; см. довод про NULL в Put).
+func nullIfEmpty(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+
+// rowScanner — общий интерфейс *sql.Row и *sql.Rows, используемый scanMemory.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanMemory читает одну строку memories в порядке memoryColumns.
+func scanMemory(row rowScanner) (memory.Memory, error) {
+	var (
+		m          memory.Memory
+		kind       string
+		summary    sql.NullString
+		accessedAt sql.NullInt64
+		superseded sql.NullString
+		source     sql.NullString
+		expiresAt  sql.NullInt64
+		status     sql.NullString
+		taskType   sql.NullString
+		branch     sql.NullString
+		workflow   sql.NullString
+	)
+
+	if err := row.Scan(&m.Id, &kind, &m.Scope, &m.Content, &summary, &m.Importance,
+		&m.CreatedAt, &m.UpdatedAt, &accessedAt, &m.AccessCount, &superseded, &source, &expiresAt, &status,
+		&taskType, &branch, &workflow); err != nil {
+		return memory.Memory{}, err
+	}
+
+	m.Kind = memory.Kind(kind)
+	if summary.Valid {
+		m.Summary = &summary.String
+	}
+	if accessedAt.Valid {
+		m.AccessedAt = &accessedAt.Int64
+	}
+	if superseded.Valid {
+		m.SupersededBy = &superseded.String
+	}
+	if source.Valid {
+		m.Source = &source.String
+	}
+	if expiresAt.Valid {
+		m.ExpiresAt = expiresAt.Int64
+	}
+	if status.Valid {
+		m.Status = memory.Status(status.String)
+	}
+	if taskType.Valid {
+		m.Type = memory.TaskType(taskType.String)
+	}
+	m.Branch = branch.String     // NULL -> "" (sql.NullString.String пуст при !Valid)
+	m.Workflow = workflow.String // то же
+	return m, nil
+}
+
+// rowWithExtra адаптирует rowScanner так, чтобы scanMemory (рассчитанный ровно на
+// memoryColumns) можно было переиспользовать для запросов, добавляющих
+// дополнительные колонки после стандартных (например, score в SearchLexical):
+// dest от scanMemory дополняется extra перед вызовом настоящего Scan.
+type rowWithExtra struct {
+	row   rowScanner
+	extra []any
+}
+
+func (r rowWithExtra) Scan(dest ...any) error {
+	return r.row.Scan(append(dest, r.extra...)...)
+}
+
+// taskModelDataSteps — data-шаги миграции модели задачи v2 (Этап 15; SQLite
+// migrateTaskModel 3 -> 4, PostgreSQL migrateTaskModelPG 0 -> 1) в порядке
+// применения. Плейсхолдер ? — SQLite; PostgreSQL применяет тот же перечень
+// через pgPlaceholders (postgres.go), чтобы
+// правила blocked -> todo и backfill task_type не расходились между
+// драйверами. Порядок существенен: сперва теги эпиков/историй, затем
+// «всё остальное → task» — иначе последний шаг перекрыл бы первые два.
+var taskModelDataSteps = []struct {
+	name string
+	sql  string
+	args []any
+}{
+	{
+		name: "перевод задач blocked -> todo",
+		sql:  `UPDATE memories SET status = ? WHERE kind = ? AND status = 'blocked'`,
+		args: []any{string(memory.StatusTodo), string(memory.KindTask)},
+	},
+	{
+		name: "backfill task_type=epic по тегам",
+		sql: `UPDATE memories SET task_type = ? WHERE kind = ? AND task_type IS NULL
+			AND EXISTS (SELECT 1 FROM tags t WHERE t.memory_id = memories.id AND t.tag IN ('epic', 'эпик'))`,
+		args: []any{string(memory.TaskTypeEpic), string(memory.KindTask)},
+	},
+	{
+		name: "backfill task_type=story по тегам",
+		sql: `UPDATE memories SET task_type = ? WHERE kind = ? AND task_type IS NULL
+			AND EXISTS (SELECT 1 FROM tags t WHERE t.memory_id = memories.id AND t.tag IN ('story', 'История'))`,
+		args: []any{string(memory.TaskTypeStory), string(memory.KindTask)},
+	},
+	{
+		name: "backfill task_type=task для остальных задач",
+		sql:  `UPDATE memories SET task_type = ? WHERE kind = ? AND task_type IS NULL`,
+		args: []any{string(memory.TaskTypeTask), string(memory.KindTask)},
+	},
 }

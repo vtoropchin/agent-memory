@@ -48,10 +48,10 @@ func (s *pgStore) SearchLexical(ctx context.Context, q memory.Query) ([]memory.C
 	var query string
 	if hasQuery {
 		conds = append(conds, "m.search_vec @@ "+tsExpr)
-		query = "SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status" +
+		query = "SELECT " + memoryColumns +
 			", ts_rank(m.search_vec, " + tsExpr + ") AS score FROM memories m"
 	} else {
-		query = "SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status" +
+		query = "SELECT " + memoryColumns +
 			", 0.0 AS score FROM memories m"
 	}
 
@@ -128,7 +128,7 @@ func (s *pgStore) SearchVector(ctx context.Context, vec []float32, q memory.Quer
 	limitPh := a.add(limit)
 
 	query := `
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status,
+		SELECT ` + memoryColumns + `,
 			(v.embedding <=> ` + vecPh + `::vector) AS distance
 		FROM ` + s.vecTable() + ` v
 		JOIN memories m ON m.id = v.memory_id
@@ -189,7 +189,7 @@ func (s *pgStore) SemanticNeighbors(ctx context.Context, id string, k int) ([]me
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status,
+		SELECT `+memoryColumns+`,
 			(v.embedding <=> anchor.embedding) AS distance
 		FROM `+s.vecTable()+` v
 		JOIN memories m ON m.id = v.memory_id

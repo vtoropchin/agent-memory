@@ -54,22 +54,21 @@ func (s *pgStore) Put(ctx context.Context, m memory.Memory) error {
 	if m.AccessedAt != nil {
 		accessedAt = *m.AccessedAt
 	}
-	// status: пусто -> SQL NULL (тот же довод, что в sqliteStore.Put).
-	var status any
-	if m.Status != "" {
-		status = string(m.Status)
-	}
+	// status/task_type/branch/workflow: пусто -> SQL NULL (тот же довод, что в
+	// sqliteStore.Put).
+	status := nullIfEmpty(string(m.Status))
+	taskType, branch, workflow := nullIfEmpty(string(m.Type)), nullIfEmpty(m.Branch), nullIfEmpty(m.Workflow)
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		ON CONFLICT (id) DO UPDATE SET
 			kind=excluded.kind, scope=excluded.scope, content=excluded.content, summary=excluded.summary,
 			importance=excluded.importance, created_at=excluded.created_at, updated_at=excluded.updated_at,
 			accessed_at=excluded.accessed_at, access_count=excluded.access_count,
 			superseded_by=excluded.superseded_by, source=excluded.source, expires_at=excluded.expires_at,
-			status=excluded.status
-	`, m.Id, string(m.Kind), m.Scope, m.Content, summary, m.Importance, m.CreatedAt, m.UpdatedAt, accessedAt, m.AccessCount, superseded, source, expiresAt, status)
+			status=excluded.status, task_type=excluded.task_type, branch=excluded.branch, workflow=excluded.workflow
+	`, m.Id, string(m.Kind), m.Scope, m.Content, summary, m.Importance, m.CreatedAt, m.UpdatedAt, accessedAt, m.AccessCount, superseded, source, expiresAt, status, taskType, branch, workflow)
 	if err != nil {
 		return fmt.Errorf("upsert memories: %w", err)
 	}
@@ -105,8 +104,8 @@ func (s *pgStore) Put(ctx context.Context, m memory.Memory) error {
 // Get возвращает запись по id вместе с её тегами и исходящими связями.
 func (s *pgStore) Get(ctx context.Context, id string) (memory.Memory, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories WHERE id = $1
+		SELECT `+memoryColumns+`
+		FROM memories m WHERE m.id = $1
 	`, id)
 
 	m, err := scanMemory(row)
@@ -256,7 +255,7 @@ func (s *pgStore) loadLinks(ctx context.Context, id string) ([]memory.Link, erro
 // упущение).
 func (s *pgStore) Neighbors(ctx context.Context, id string) ([]memory.Memory, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT DISTINCT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
+		SELECT DISTINCT `+memoryColumns+`
 		FROM memories m
 		JOIN links l ON (l.dst = m.id AND l.src = $1) OR (l.src = m.id AND l.dst = $1)
 		WHERE m.superseded_by IS NULL
@@ -368,7 +367,7 @@ func (s *pgStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory, in
 	limitPh := a.add(limit)
 	offsetPh := a.add(offset)
 	query := `
-		SELECT m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status
+		SELECT ` + memoryColumns + `
 		FROM memories m` + where + `
 		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT ` + limitPh + ` OFFSET ` + offsetPh
@@ -455,7 +454,7 @@ func (s *pgStore) AllForExport(ctx context.Context, scopes []string) ([]memory.M
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
+		SELECT `+memoryColumns+`
 		FROM memories m`+where+`
 		ORDER BY m.id ASC
 	`, a.args...)

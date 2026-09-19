@@ -16,8 +16,8 @@ func (s *pgStore) ListEpisodicForConsolidation(ctx context.Context, olderThan in
 	kindPh := a.add(string(memory.KindEpisodic))
 	olderPh := a.add(olderThan)
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories
+		SELECT ` + memoryColumns + `
+		FROM memories m
 		WHERE kind = ` + kindPh + ` AND superseded_by IS NULL AND created_at < ` + olderPh + `
 		ORDER BY scope, created_at
 	`
@@ -51,8 +51,8 @@ func (s *pgStore) ListEpisodicForDecay(ctx context.Context, notAccessedSince int
 	kindPh := a.add(string(memory.KindEpisodic))
 	sincePh := a.add(notAccessedSince)
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories
+		SELECT ` + memoryColumns + `
+		FROM memories m
 		WHERE kind = ` + kindPh + ` AND superseded_by IS NULL AND COALESCE(accessed_at, created_at) < ` + sincePh + `
 		ORDER BY COALESCE(accessed_at, created_at)
 	`
@@ -85,8 +85,8 @@ func (s *pgStore) ListExpired(ctx context.Context, now int64, limit int) ([]memo
 	a := &argList{}
 	nowPh := a.add(now)
 	query := `
-		SELECT id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status
-		FROM memories
+		SELECT ` + memoryColumns + `
+		FROM memories m
 		WHERE superseded_by IS NULL AND expires_at IS NOT NULL AND expires_at > 0 AND expires_at < ` + nowPh + `
 		ORDER BY expires_at
 	`

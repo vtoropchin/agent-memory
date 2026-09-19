@@ -70,6 +70,21 @@ func statusPredicatePG(a *argList, statuses []string, includeDone bool) string {
 	return "m.status IN (" + strings.Join(placeholders, ",") + ")"
 }
 
+// typePredicatePG — аналог typePredicate (sqlite.go) для $N-плейсхолдеров:
+// фильтр по типу задачи (Query.Types, Этап 15), m.task_type IN (...). Пустой
+// набор -> без фильтра; непустой отбирает только задачи (у прочих kind
+// task_type = NULL).
+func typePredicatePG(a *argList, types []string) string {
+	if len(types) == 0 {
+		return ""
+	}
+	placeholders := make([]string, len(types))
+	for i, t := range types {
+		placeholders[i] = a.add(t)
+	}
+	return "m.task_type IN (" + strings.Join(placeholders, ",") + ")"
+}
+
 // tagsPredicatePG — аналог tagsPredicate (sqlite.go) для $N-плейсхолдеров: условие
 // "хотя бы один из тегов" (OR-семантика, Query.Tags, задача 8.2) через EXISTS —
 // запись не задваивается, если совпало несколько перечисленных тегов.
@@ -102,6 +117,9 @@ func metaFiltersPG(a *argList, q memory.Query, now int64) []string {
 		conds = append(conds, clause)
 	}
 	if clause := statusPredicatePG(a, q.Statuses, q.IncludeDone); clause != "" {
+		conds = append(conds, clause)
+	}
+	if clause := typePredicatePG(a, q.Types); clause != "" {
 		conds = append(conds, clause)
 	}
 	if q.SinceTs > 0 {

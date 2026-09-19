@@ -91,9 +91,16 @@ type exportRecord struct {
 	// причинам, что и у ExpiresAt: у записей прочих kind статуса нет, и поле не
 	// должно засорять бэкап пустой строкой; отсутствие поля в старых бэкапах
 	// читается как пустой статус — аддитивно, exportVersion не меняется.
-	Status string       `json:"status,omitempty"`
-	Tags   []string     `json:"tags"`
-	Links  []exportLink `json:"links"`
+	Status string `json:"status,omitempty"`
+	// Type/Branch/Workflow — тип задачи, git-ветка и процесс (kind=task, Этап
+	// 15). Аддитивны и omitempty по тем же причинам, что и Status: у прочих
+	// kind пусты, в старых бэкапах отсутствуют и читаются как пустые
+	// (recordToMemory); exportVersion не меняется.
+	Type     string       `json:"type,omitempty"`
+	Branch   string       `json:"branch,omitempty"`
+	Workflow string       `json:"workflow,omitempty"`
+	Tags     []string     `json:"tags"`
+	Links    []exportLink `json:"links"`
 }
 
 // memoryToExportRecord переводит доменную Memory в сериализуемую запись.
@@ -126,6 +133,9 @@ func memoryToExportRecord(m memory.Memory) exportRecord {
 		Source:       m.Source,
 		ExpiresAt:    m.ExpiresAt,
 		Status:       string(m.Status),
+		Type:         string(m.Type),
+		Branch:       m.Branch,
+		Workflow:     m.Workflow,
 		Tags:         tags,
 		Links:        links,
 	}

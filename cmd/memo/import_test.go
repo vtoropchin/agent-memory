@@ -393,3 +393,122 @@ func mustPut(t *testing.T, s store.Store, r memoryRec) {
 		t.Fatalf("Put %s: %v", r.id, err)
 	}
 }
+
+// TestRunImport_TaskFieldsRoundTrip: аддитивные поля задачи (status/type/
+// branch/workflow, Этап 15) переживают export -> import, а у записи без них
+// отсутствуют в JSONL (omitempty).
+func TestRunImport_TaskFieldsRoundTrip(t *testing.T) {
+	srcDBPath, srcStore := newExportTestStore(t)
+	taskID, factID := ulid.Make().String(), ulid.Make().String()
+	if err := srcStore.Put(context.Background(), memory.Memory{
+		Id: taskID, Kind: memory.KindTask, Scope: "project:agentmemory", Content: "полный текст задачи",
+		Summary: strPtr("Заголовок задачи"), Importance: 3, CreatedAt: 1000, UpdatedAt: 1000,
+		Status: memory.StatusReview, Type: memory.TaskTypeStory, Branch: "feat/x", Workflow: "dev",
+	}); err != nil {
+		t.Fatalf("Put task: %v", err)
+	}
+	if err := srcStore.Put(context.Background(), memory.Memory{
+		Id: factID, Kind: memory.KindSemantic, Scope: "project:agentmemory", Content: "факт без task-полей",
+		Importance: 3, CreatedAt: 1001, UpdatedAt: 1001,
+	}); err != nil {
+		t.Fatalf("Put semantic: %v", err)
+	}
+
+	var exported bytes.Buffer
+	if err := runExport([]string{"-db", srcDBPath}, &exported); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	for _, line := range strings.Split(exported.String(), "\n") {
+		if strings.Contains(line, factID) && strings.Contains(line, `"type"`) {
+			t.Errorf("у записи без task-полей поле type не должно печататься (omitempty): %s", line)
+		}
+		if strings.Contains(line, taskID) && !strings.Contains(line, `"type":"story"`) {
+			t.Errorf("у задачи должен быть type: %s", line)
+		}
+	}
+
+	dir := t.TempDir()
+	exportPath := filepath.Join(dir, "export.jsonl")
+	if err := os.WriteFile(exportPath, exported.Bytes(), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	dstDBPath := filepath.Join(dir, "dst.db")
+	var out bytes.Buffer
+	if err := runImport([]string{"-db", dstDBPath, exportPath}, &out); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	s, err := store.OpenSQLite(dstDBPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+	got, err := s.Get(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != memory.StatusReview || got.Type != memory.TaskTypeStory || got.Branch != "feat/x" || got.Workflow != "dev" {
+		t.Errorf("после import: status=%q type=%q branch=%q workflow=%q, want review/story/feat/x/dev", got.Status, got.Type, got.Branch, got.Workflow)
+	}
+}
+
+// TestRemapLegacyTaskFields: бэкап до Этапа 15 — status "blocked"
+// импортируется как todo с предупреждением на строку, пустой type у задачи —
+// как task (молча); остальные записи и уже заданный type не трогаются.
+func TestRemapLegacyTaskFields(t *testing.T) {
+	records := []lineRecord{
+		{line: 2, rec: exportRecord{Id: "A", Kind: "task", Status: "blocked"}},
+		{line: 3, rec: exportRecord{Id: "B", Kind: "task", Status: "doing", Type: "epic"}},
+		{line: 4, rec: exportRecord{Id: "C", Kind: "semantic"}},
+	}
+	var warn bytes.Buffer
+	if n := remapLegacyTaskFields(records, &warn); n != 1 {
+		t.Errorf("переписано %d записей, want 1", n)
+	}
+	if records[0].rec.Status != string(memory.StatusTodo) || records[0].rec.Type != string(memory.TaskTypeTask) {
+		t.Errorf("запись A: status=%q type=%q, want todo/task", records[0].rec.Status, records[0].rec.Type)
+	}
+	if records[1].rec.Status != "doing" || records[1].rec.Type != "epic" {
+		t.Errorf("запись B не должна меняться: status=%q type=%q", records[1].rec.Status, records[1].rec.Type)
+	}
+	if records[2].rec.Status != "" || records[2].rec.Type != "" {
+		t.Errorf("запись не-task не должна получать task-полей: status=%q type=%q", records[2].rec.Status, records[2].rec.Type)
+	}
+	if !strings.Contains(warn.String(), "строка 2: A") || !strings.Contains(warn.String(), `"blocked"`) {
+		t.Errorf("ожидалось предупреждение про строку 2 и статус blocked, got %q", warn.String())
+	}
+	if strings.Count(warn.String(), "\n") != 1 {
+		t.Errorf("ровно одно предупреждение, got %q", warn.String())
+	}
+}
+
+// TestRunImport_LegacyBlockedStatusBecomesTodo: сквозная проверка через
+// runImport — легаси-задача со status "blocked" и без type попадает в БД как
+// todo/task.
+func TestRunImport_LegacyBlockedStatusBecomesTodo(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "memory.db")
+	id := ulid.Make().String()
+	rec := minimalRecord(id, "project:agentmemory", "задача из старого бэкапа")
+	rec.Kind, rec.Status, rec.Summary = "task", "blocked", strPtr("Старая задача")
+	path := writeExportFileRaw(t, dir, []string{headerLine(t), recordLine(t, rec)})
+
+	var out bytes.Buffer
+	if err := runImport([]string{"-db", dbPath, path}, &out); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	s, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+	got, err := s.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != memory.StatusTodo {
+		t.Errorf("Status = %q, want todo (blocked упразднён)", got.Status)
+	}
+	if got.Type != memory.TaskTypeTask {
+		t.Errorf("Type = %q, want task (легаси-задача без type получает дефолт, как в миграции)", got.Type)
+	}
+}

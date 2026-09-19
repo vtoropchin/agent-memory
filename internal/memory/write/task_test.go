@@ -49,7 +49,7 @@ func TestSaveTaskExplicitStatus(t *testing.T) {
 	w, st := newTestWriter(t)
 
 	in := taskInput("Починить дедуп задач", "Дедуп задач")
-	in.Status = string(memory.StatusBlocked)
+	in.Status = string(memory.StatusReview)
 	id, _, err := w.Save(ctx, in)
 	if err != nil {
 		t.Fatalf("Save: %v", err)
@@ -58,8 +58,198 @@ func TestSaveTaskExplicitStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if m.Status != memory.StatusBlocked {
-		t.Errorf("Status = %q, want %q", m.Status, memory.StatusBlocked)
+	if m.Status != memory.StatusReview {
+		t.Errorf("Status = %q, want %q", m.Status, memory.StatusReview)
+	}
+}
+
+// TestSaveTaskAcceptsEveryStage: каждая из стадий доски (Этап 15) принимается
+// Save и переживает round-trip; бывший статус blocked — больше не стадия и
+// отвергается как неизвестный (блокировка — свойство из связей, задача 15.4).
+func TestSaveTaskAcceptsEveryStage(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	if len(memory.Statuses) != 7 {
+		t.Fatalf("memory.Statuses = %v, want 7 стадий доски", memory.Statuses)
+	}
+	for _, stage := range memory.Statuses {
+		in := taskInput("Задача на стадии "+string(stage), "Стадия "+string(stage))
+		in.Status = string(stage)
+		id, _, err := w.Save(ctx, in)
+		if err != nil {
+			t.Fatalf("Save(%s): %v", stage, err)
+		}
+		m, err := st.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", stage, err)
+		}
+		if m.Status != stage {
+			t.Errorf("Status = %q, want %q", m.Status, stage)
+		}
+	}
+
+	in := taskInput("Задача со старым статусом", "Старый статус")
+	in.Status = "blocked"
+	if _, _, err := w.Save(ctx, in); !errors.Is(err, ErrUnknownStatus) {
+		t.Errorf("Save со status=blocked: err = %v, want ErrUnknownStatus (стадия упразднена)", err)
+	}
+}
+
+// TestSaveTaskTypeDefaultsAndValidation: дефолт type=task; epic/story
+// принимаются; значение вне перечня — ErrUnknownTaskType с подсказкой.
+func TestSaveTaskTypeDefaultsAndValidation(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	id, _, err := w.Save(ctx, taskInput("Задача без явного типа", "Без типа"))
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	m, err := st.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.Type != memory.TaskTypeTask {
+		t.Errorf("Type = %q, want %q (дефолт)", m.Type, memory.TaskTypeTask)
+	}
+
+	for _, typ := range memory.TaskTypes {
+		in := taskInput("Задача типа "+string(typ), "Тип "+string(typ))
+		in.Type = string(typ)
+		id, _, err := w.Save(ctx, in)
+		if err != nil {
+			t.Fatalf("Save(type=%s): %v", typ, err)
+		}
+		m, err := st.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if m.Type != typ {
+			t.Errorf("Type = %q, want %q", m.Type, typ)
+		}
+	}
+
+	in := taskInput("Задача с неизвестным типом", "Неизвестный тип")
+	in.Type = "bug"
+	_, _, err = w.Save(ctx, in)
+	if !errors.Is(err, ErrUnknownTaskType) {
+		t.Fatalf("Save с type=bug: err = %v, want ErrUnknownTaskType", err)
+	}
+	if !strings.Contains(err.Error(), "story") {
+		t.Errorf("ошибка должна перечислять допустимые типы, got %v", err)
+	}
+}
+
+// TestSaveTaskBranchWorkflowRoundTrip: branch/workflow — свободные строки, без
+// валидации, обрезаются по пробелам и переживают round-trip.
+func TestSaveTaskBranchWorkflowRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	in := taskInput("Задача с веткой и процессом", "Ветка и процесс")
+	in.Branch = "  feat/kanban-board "
+	in.Workflow = "ultracode"
+	id, _, err := w.Save(ctx, in)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	m, err := st.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.Branch != "feat/kanban-board" {
+		t.Errorf("Branch = %q, want %q", m.Branch, "feat/kanban-board")
+	}
+	if m.Workflow != "ultracode" {
+		t.Errorf("Workflow = %q, want %q", m.Workflow, "ultracode")
+	}
+}
+
+// TestSaveTaskFieldsRejectedForNonTask: type/branch/workflow у записи kind !=
+// task — ErrTaskFieldNotApplicable с именем поля в тексте (fail-fast, не
+// молчаливое отбрасывание).
+func TestSaveTaskFieldsRejectedForNonTask(t *testing.T) {
+	ctx := context.Background()
+	w, _ := newTestWriter(t)
+
+	cases := []struct {
+		field string
+		in    SaveInput
+	}{
+		{"type", SaveInput{Kind: memory.KindSemantic, Scope: "project:tasks", Content: "Факт с типом", Type: "epic"}},
+		{"branch", SaveInput{Kind: memory.KindSemantic, Scope: "project:tasks", Content: "Факт с веткой", Branch: "main"}},
+		{"workflow", SaveInput{Kind: memory.KindSemantic, Scope: "project:tasks", Content: "Факт с процессом", Workflow: "dev"}},
+	}
+	for _, c := range cases {
+		_, _, err := w.Save(ctx, c.in)
+		if !errors.Is(err, ErrTaskFieldNotApplicable) {
+			t.Errorf("Save с %s у semantic: err = %v, want ErrTaskFieldNotApplicable", c.field, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.field) {
+			t.Errorf("ошибка должна называть поле %q, got %v", c.field, err)
+		}
+	}
+
+	// Пустые значения у не-задачи — не ошибка (поля просто не заданы).
+	if _, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "project:tasks", Content: "Факт без task-полей"}); err != nil {
+		t.Errorf("Save semantic без task-полей: %v", err)
+	}
+}
+
+// TestUpdateTaskFields: Update меняет type/branch/workflow; пустая строка у
+// Branch/Workflow очищает поле, у Type — возвращает дефолт task; nil — не
+// трогает; у записи kind != task — ErrTaskFieldNotApplicable.
+func TestUpdateTaskFields(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+
+	in := taskInput("Задача для правки task-полей", "Правка task-полей")
+	in.Type, in.Branch, in.Workflow = "story", "feat/x", "dev"
+	id, _, err := w.Save(ctx, in)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	epic, branch := "epic", "feat/y"
+	if err := w.Update(ctx, UpdateInput{Id: id, Type: &epic, Branch: &branch}); err != nil {
+		t.Fatalf("Update(type, branch): %v", err)
+	}
+	m, err := st.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.Type != memory.TaskTypeEpic || m.Branch != "feat/y" || m.Workflow != "dev" {
+		t.Errorf("после Update: type=%q branch=%q workflow=%q, want epic/feat/y/dev (workflow не тронут)", m.Type, m.Branch, m.Workflow)
+	}
+
+	empty := ""
+	if err := w.Update(ctx, UpdateInput{Id: id, Type: &empty, Branch: &empty, Workflow: &empty}); err != nil {
+		t.Fatalf("Update(пустые): %v", err)
+	}
+	m, err = st.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if m.Type != memory.TaskTypeTask {
+		t.Errorf("Type после пустого Update = %q, want %q (дефолт)", m.Type, memory.TaskTypeTask)
+	}
+	if m.Branch != "" || m.Workflow != "" {
+		t.Errorf("Branch/Workflow после пустого Update = %q/%q, want очищены", m.Branch, m.Workflow)
+	}
+
+	bad := "bug"
+	if err := w.Update(ctx, UpdateInput{Id: id, Type: &bad}); !errors.Is(err, ErrUnknownTaskType) {
+		t.Errorf("Update(type=bug): err = %v, want ErrUnknownTaskType", err)
+	}
+
+	factID, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "project:tasks", Content: "Факт для правки task-полей"})
+	if err != nil {
+		t.Fatalf("Save semantic: %v", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: factID, Branch: &branch}); !errors.Is(err, ErrTaskFieldNotApplicable) {
+		t.Errorf("Update(branch) у semantic: err = %v, want ErrTaskFieldNotApplicable", err)
 	}
 }
 
