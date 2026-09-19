@@ -131,7 +131,7 @@ func runWeb(args []string, stdout io.Writer) error {
 
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: newWebHandler(s, w, rc, embedder),
+		Handler: newWebHandler(s, w, rc, embedder, cfg.Scope.SaveScope()),
 	}
 
 	errCh := make(chan error, 1)
@@ -164,10 +164,12 @@ func runWeb(args []string, stdout io.Writer) error {
 // для обеих write-операций (DELETE — мягкое удаление, PATCH — правка
 // importance/tags, задача 10.2); rc/embedder — только для /api/search в
 // режиме semantic (задача 10.1) — остальные роуты целиком read-only поверх s.
-func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder memembed.Embedder) http.Handler {
+// homeScope — домашний scope инстанса ("project:<name>" из [scope], пусто при
+// выключенной мультипроектности): морда открывает доску на нём по умолчанию.
+func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder memembed.Embedder, homeScope string) http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /api/stats", handleStats(s))
+	mux.HandleFunc("GET /api/stats", handleStats(s, homeScope))
 	mux.HandleFunc("GET /api/memories", handleListMemories(s))
 	mux.HandleFunc("GET /api/memories/{id}", handleGetMemory(s))
 	mux.HandleFunc("PATCH /api/memories/{id}", handlePatchMemory(s, w))
@@ -298,9 +300,10 @@ type statsResponse struct {
 	Superseded int            `json:"superseded"`
 	ByScope    map[string]int `json:"byScope"`
 	ByKind     map[string]int `json:"byKind"`
+	HomeScope  string         `json:"homeScope,omitempty"` // домашний scope инстанса ([scope] project)
 }
 
-func handleStats(s store.Store) http.HandlerFunc {
+func handleStats(s store.Store, homeScope string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		stats, err := s.Stats(r.Context())
 		if err != nil {
@@ -312,6 +315,7 @@ func handleStats(s store.Store) http.HandlerFunc {
 			Superseded: stats.Superseded,
 			ByScope:    stats.ByScope,
 			ByKind:     stats.ByKind,
+			HomeScope:  homeScope,
 		})
 	}
 }

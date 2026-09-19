@@ -1602,10 +1602,12 @@ function navigateBoard() {
   else location.hash = h;
 }
 
-// defaultBoardScope — проект по умолчанию для доски: первый (по алфавиту)
+// defaultBoardScope — проект по умолчанию для доски: домашний scope инстанса
+// (stats.homeScope, если в нём есть записи), иначе первый (по алфавиту)
 // project:* из статистики, иначе первый scope вообще, иначе "" (задач нет).
 function defaultBoardScope(stats) {
   if (!stats || !stats.byScope) return "";
+  if (stats.homeScope && stats.byScope[stats.homeScope]) return stats.homeScope;
   const scopes = Object.keys(stats.byScope).sort();
   for (let i = 0; i < scopes.length; i++) {
     if (scopes[i].indexOf("project:") === 0) return scopes[i];

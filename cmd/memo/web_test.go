@@ -57,7 +57,7 @@ func newTestWebHandler(s store.Store) http.Handler {
 func newTestWebHandlerWithEmbedder(s store.Store, embedder embed.Embedder) http.Handler {
 	w := write.New(s, embed.NewNoop())
 	rc := recall.New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: testRecallWeights()}, reason.NewNoop(), embedder)
-	return newWebHandler(s, w, rc, embedder)
+	return newWebHandler(s, w, rc, embedder, "")
 }
 
 // fakeEmbedder — тестовая реализация embed.Embedder (тот же паттерн, что в
@@ -83,6 +83,21 @@ var _ embed.Embedder = (*fakeEmbedder)(nil)
 
 // putTestMemory кладёт в s запись памяти с разумными дефолтами, переопределяя
 // только поля, важные для конкретного теста (через mutate).
+// TestHandleStats_HomeScope — /api/stats отдаёт домашний scope инстанса, на котором
+// морда открывает доску по умолчанию (дефект D1 ручной проверки Этапа 15).
+func TestHandleStats_HomeScope(t *testing.T) {
+	s := newTestWebStore(t)
+	w := write.New(s, embed.NewNoop())
+	rc := recall.New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: testRecallWeights()}, reason.NewNoop(), embed.NewNoop())
+	srv := httptest.NewServer(newWebHandler(s, w, rc, embed.NewNoop(), "project:home"))
+	defer srv.Close()
+	var got statsResponse
+	getJSON(t, srv.URL+"/api/stats", &got)
+	if got.HomeScope != "project:home" {
+		t.Fatalf("homeScope = %q, want project:home", got.HomeScope)
+	}
+}
+
 func putTestMemory(t *testing.T, s store.Store, mutate func(*memory.Memory)) memory.Memory {
 	t.Helper()
 	m := memory.Memory{
