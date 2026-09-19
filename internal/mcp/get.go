@@ -61,6 +61,17 @@ func formatMemory(m memory.Memory) string {
 		fmt.Fprintf(&b, " (status: %s)", m.Status)
 	}
 	b.WriteString("\n")
+	// Task-only поля Этапа 15 — отдельными строками, пустые опускаются (у
+	// записей kind != task их нет вовсе; у задачи type всегда заполнен).
+	if m.Type != "" {
+		fmt.Fprintf(&b, "- type: %s\n", m.Type)
+	}
+	if m.Branch != "" {
+		fmt.Fprintf(&b, "- branch: %s\n", m.Branch)
+	}
+	if m.Workflow != "" {
+		fmt.Fprintf(&b, "- workflow: %s\n", m.Workflow)
+	}
 	fmt.Fprintf(&b, "- scope: %s\n", m.Scope)
 	fmt.Fprintf(&b, "- importance: %d\n", m.Importance)
 	if len(m.Tags) > 0 {

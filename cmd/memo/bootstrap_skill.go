@@ -50,7 +50,9 @@ const bootstrapSkillBodyTemplate = `# Первичная инициализац�
 - ` + "`kind: debt`" + ` — для известного техдолга (что не так, где, почему отложено,
   критерий закрытия);
 - ` + "`kind: task`" + ` — для задач вместо файлов TODO (` + "`content`" + ` — текст задачи,
-  ` + "`summary`" + ` — обязательный заголовок, ` + "`status`" + ` — todo/doing/blocked/done);
+  ` + "`summary`" + ` — обязательный заголовок, ` + "`status`" + ` — стадия доски
+  backlog/todo/doing/review/testing/release/done, ` + "`type`" + ` — epic/story/task;
+  иерархия — ` + "`links`" + ` с ` + "`rel: part_of`" + ` от дочерней к родительской);
 - ` + "`importance`" + ` — по значимости факта;
 - связывай родственные факты через ` + "`links`" + `.
 

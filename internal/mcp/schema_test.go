@@ -2,8 +2,11 @@ package mcp
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"agentmemory/internal/memory"
 )
@@ -178,5 +181,66 @@ func TestKindEnumIncludesDebt(t *testing.T) {
 	}
 	if err := recallResolved.Validate(recallArgs); err != nil {
 		t.Errorf("memory_recall schema Validate(kinds=[debt]): %v, want nil", err)
+	}
+}
+
+// TestStatusEnumIsBoardStages: enum status/statuses во всех трёх схемах — ровно
+// семь стадий доски в порядке колонок (memory.Statuses, Этап 15); прежнего
+// blocked в нём нет (блокировка — связь, а не стадия).
+func TestStatusEnumIsBoardStages(t *testing.T) {
+	want := []any{"backlog", "todo", "doing", "review", "testing", "release", "done"}
+
+	check := func(name string, got []any) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("%s: enum status = %v, want %v", name, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s: enum status[%d] = %v, want %v (порядок колонок)", name, i, got[i], want[i])
+			}
+		}
+		for _, v := range got {
+			if v == "blocked" {
+				t.Errorf("%s: enum status содержит упразднённый blocked", name)
+			}
+		}
+	}
+	check("memory_save.status", saveInputSchema().Properties["status"].Enum)
+	check("memory_update.status", updateInputSchema().Properties["status"].Enum)
+	check("memory_recall.statuses", recallInputSchema().Properties["statuses"].Items.Enum)
+}
+
+// TestTaskTypeEnumInSchemas: enum type/types выводится из memory.TaskTypes и
+// присутствует в memory_save, memory_update и memory_recall.
+func TestTaskTypeEnumInSchemas(t *testing.T) {
+	want := []any{"epic", "story", "task"}
+	for name, got := range map[string][]any{
+		"memory_save.type":    saveInputSchema().Properties["type"].Enum,
+		"memory_update.type":  updateInputSchema().Properties["type"].Enum,
+		"memory_recall.types": recallInputSchema().Properties["types"].Items.Enum,
+	} {
+		if len(got) != len(want) {
+			t.Errorf("%s: enum = %v, want %v", name, got, want)
+			continue
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s: enum[%d] = %v, want %v", name, i, got[i], want[i])
+			}
+		}
+	}
+	for name, s := range map[string]*jsonschema.Schema{
+		"memory_save":   saveInputSchema(),
+		"memory_update": updateInputSchema(),
+	} {
+		for _, f := range []string{"branch", "workflow"} {
+			// У memory_update поля — указатели (*string), jsonschema-go выводит
+			// для них Types ["string","null"], а не Type "string".
+			p := s.Properties[f]
+			if p == nil || p.Description == "" || (p.Type != "string" && !slices.Contains(p.Types, "string")) {
+				t.Errorf("%s: поле %s должно быть строкой с описанием, got %+v", name, f, p)
+			}
+		}
 	}
 }

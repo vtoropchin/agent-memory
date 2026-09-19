@@ -120,3 +120,28 @@ func TestNewServer_PublishesInstructions(t *testing.T) {
 		t.Fatal("NewServer вернул nil")
 	}
 }
+
+// TestBuildInstructions_TaskConventions фиксирует конвенции Этапа 15 в
+// серверных инструкциях — главном канале конвенций для любого MCP-клиента:
+// все семь стадий доски, типы задач с направлением part_of «дочь → родитель»,
+// branch/workflow при переводе в doing, примеры recall по statuses/types.
+// Упразднённого статуса blocked быть не должно.
+func TestBuildInstructions_TaskConventions(t *testing.T) {
+	got := buildInstructions(config.ScopeConfig{Project: "agentmemory", Shared: []string{"user:*"}})
+
+	for _, want := range []string{
+		"backlog", "todo", "doing", "review", "testing", "release", "done",
+		"epic", "story", "part_of", "дочерней", "родительской",
+		"branch", "workflow",
+		`statuses:["todo","doing"]`, `types:["epic"]`, `statuses:["done"]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("инструкции не содержат %q:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{`"blocked"`, "status = todo|doing|blocked", "ждёшь чего-то — blocked"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("инструкции содержат упразднённый статус blocked (%q):\n%s", bad, got)
+		}
+	}
+}

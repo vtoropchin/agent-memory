@@ -40,7 +40,8 @@ func runRecall(args []string, out io.Writer) error {
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	scopesFlag := fs.String("scopes", "", "пространства через запятую (пусто — дефолт инстанса из [scope])")
 	kindsFlag := fs.String("kinds", "", "типы через запятую: semantic,episodic,procedural,debt,task (пусто — все)")
-	statusesFlag := fs.String("statuses", "", "состояния задач через запятую: todo,doing,blocked,done (пусто — все записи, кроме выполненных задач)")
+	statusesFlag := fs.String("statuses", "", "стадии задач через запятую: backlog,todo,doing,review,testing,release,done (пусто — все записи, кроме выполненных задач)")
+	typesFlag := fs.String("types", "", "типы задач через запятую: epic,story,task (непусто — только задачи; пусто — без фильтра)")
 	budget := fs.Int("budget", 0, "бюджет токенов брифа (0 — дефолт из [recall])")
 	jsonOut := fs.Bool("json", false, "печатать сырой JSON вместо Markdown")
 	quiet := fs.Bool("quiet", false, "при пустой выдаче — пустой stdout и exit 0 (для хуков)")
@@ -78,6 +79,7 @@ func runRecall(args []string, out io.Writer) error {
 		Scopes:      scopes,
 		Kinds:       splitCSV(*kindsFlag),
 		Statuses:    splitCSV(*statusesFlag),
+		Types:       splitCSV(*typesFlag),
 		TokenBudget: *budget,
 		Summarize:   *summarize,
 	})
@@ -152,7 +154,10 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 	kindFlag := fs.String("kind", "", "тип факта: semantic|episodic|procedural|debt|task (обязателен)")
 	contentFlag := fs.String("content", "", "текст факта (обязателен); \"-\" — читать из stdin")
 	summaryFlag := fs.String("summary", "", "краткая форма для брифа; для -kind task это заголовок задачи и он обязателен")
-	statusFlag := fs.String("status", "", "состояние задачи: todo|doing|blocked|done (только для -kind task; пусто — todo)")
+	statusFlag := fs.String("status", "", "стадия задачи: backlog|todo|doing|review|testing|release|done (только для -kind task; пусто — todo)")
+	typeFlag := fs.String("type", "", "тип задачи: epic|story|task (только для -kind task; пусто — task)")
+	branchFlag := fs.String("branch", "", "git-ветка задачи, напр. feat/x (только для -kind task)")
+	workflowFlag := fs.String("workflow", "", "имя процесса задачи: dev, ultracode, code-review, … (только для -kind task)")
 	importance := fs.Int("importance", 0, "важность 1..5 (0 — дефолт 3)")
 	tagsFlag := fs.String("tags", "", "теги через запятую")
 	scopeFlag := fs.String("scope", "", "пространство записи (пусто — домашний scope инстанса из [scope])")
@@ -219,6 +224,9 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 		Content:    content,
 		Summary:    *summaryFlag,
 		Status:     *statusFlag,
+		Type:       *typeFlag,
+		Branch:     *branchFlag,
+		Workflow:   *workflowFlag,
 		Importance: *importance,
 		Tags:       splitCSV(*tagsFlag),
 		Source:     source,
@@ -239,7 +247,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 // splitCSV разбирает список через запятую в срез: обрезает пробелы вокруг
 // каждого элемента и отбрасывает пустые (в т.ч. на пустом входе — тогда
 // возвращает nil, а не срез из одной пустой строки). Общий разбор для флагов
-// -scopes/-kinds/-tags.
+// -scopes/-kinds/-tags/-statuses/-types.
 func splitCSV(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return nil

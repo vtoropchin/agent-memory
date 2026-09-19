@@ -27,9 +27,11 @@ func buildInstructions(scope config.ScopeConfig) string {
 	b.WriteString("- memory_forget — мягкое удаление (тумстоун): запись перестаёт участвовать в recall, история сохраняется.\n")
 	b.WriteString("- memory_get — прочитать запись целиком по id (полный content); memory_recall показывает только краткую форму.\n")
 	b.WriteString("- kind=debt — техдолг: известная проблема, отложенная осознанно; в отличие от episodic сам не затухает — закрывай явно через memory_forget(id, replaced_by=<id записи о фиксе>).\n")
-	b.WriteString("- kind=task — задача агента вместо файла TODO: content — полный текст задачи (что сделать, границы, критерий приёмки), summary ОБЯЗАТЕЛЕН и служит заголовком в брифе, status = todo|doing|blocked|done (по умолчанию todo).\n")
-	b.WriteString("- ход работы веди через memory_update(id, status=...): взял — doing, ждёшь чего-то — blocked, закончил — done; отменённую задачу убирай через memory_forget. Подзадачи и зависимости — обычные links (part_of/causes).\n")
-	b.WriteString("- memory_recall без фильтра НЕ показывает выполненные задачи (status=done); чтобы увидеть сделанное, передай statuses=[\"done\"], чтобы получить свой список дел — statuses=[\"todo\",\"doing\",\"blocked\"].\n\n")
+	b.WriteString("- kind=task — задача агента вместо файла TODO: content — полный текст задачи (что сделать, границы, критерий приёмки), summary ОБЯЗАТЕЛЕН и служит заголовком в брифе, importance — приоритет.\n")
+	b.WriteString("- status задачи — стадия kanban-доски: backlog — сырая идея | todo — готова к работе (по умолчанию) | doing — в работе | review — ревью кода (PR открыт) | testing — проверка/тестирование | release — влито, ждёт релиза | done — в релизе. Переходы назад допустимы; стадии blocked нет — блокировка это связь.\n")
+	b.WriteString("- type задачи: epic — крупная цель, дробится на story | story — пользовательская история, дробится на task | task — атомарная единица работы (по умолчанию). Иерархия — links с rel=part_of ОТ дочерней К родительской: задача part_of истории, история part_of эпика; теги epic/эпик/История для этого не нужны.\n")
+	b.WriteString("- ход работы веди через memory_update(id, status=...): взял — doing (заодно проставь branch = текущая git-ветка и workflow = имя процесса: dev, ultracode, code-review, …), открыл PR — review, влил — release, в релизе — done; отменённую задачу убирай через memory_forget.\n")
+	b.WriteString("- memory_recall без фильтра НЕ показывает выполненные задачи (status=done); сделанное — memory_recall(statuses:[\"done\"]), свой список дел — memory_recall(statuses:[\"todo\",\"doing\"]), список эпиков — memory_recall(types:[\"epic\"]).\n\n")
 
 	if scope.Project == "" {
 		b.WriteString("Мультипроектность выключена (adhoc-режим):\n")

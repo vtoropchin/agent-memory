@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/store"
 	"agentmemory/internal/memory/write"
 )
 
@@ -239,5 +242,72 @@ func TestSplitCSV(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+// TestCLISaveTaskFieldsAndRecallTypes (Этап 15, задача 15.2): `memo save`
+// пробрасывает -type/-branch/-workflow в write path один в один (проверяется
+// чтением записи из хранилища), а `memo recall -types epic` показывает только
+// эпик — фильтр Query.Types доходит из CSV-флага.
+func TestCLISaveTaskFieldsAndRecallTypes(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeTestConfig(t, dir, "alpha", []string{"user:*"}, "")
+	dbPath := filepath.Join(dir, "memory.db")
+
+	var epicOut bytes.Buffer
+	epicArgs := []string{"-config", cfgPath, "-db", dbPath, "-kind", "task", "-summary", "Эпик доски задач CLI",
+		"-type", "epic", "-content", "крупная цель: kanban-доска задач через CLI"}
+	if err := runSave(epicArgs, strings.NewReader(""), &epicOut); err != nil {
+		t.Fatalf("runSave(epic): %v", err)
+	}
+
+	var storyOut bytes.Buffer
+	storyArgs := []string{"-config", cfgPath, "-db", dbPath, "-kind", "task", "-summary", "История поверхности CLI",
+		"-type", "story", "-status", "doing", "-branch", "feat/15.2", "-workflow", "dev",
+		"-content", "история: агент задаёт поля задачи через флаги kanban-доски CLI"}
+	if err := runSave(storyArgs, strings.NewReader(""), &storyOut); err != nil {
+		t.Fatalf("runSave(story): %v", err)
+	}
+	storyID := strings.TrimSpace(strings.TrimPrefix(storyOut.String(), "saved "))
+
+	s, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	defer s.Close()
+	got, err := s.Get(context.Background(), storyID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", storyID, err)
+	}
+	if got.Type != memory.TaskTypeStory || got.Status != memory.StatusDoing || got.Branch != "feat/15.2" || got.Workflow != "dev" {
+		t.Errorf("сохранённая задача = type=%q status=%q branch=%q workflow=%q, want story/doing/feat/15.2/dev", got.Type, got.Status, got.Branch, got.Workflow)
+	}
+
+	var recallOut bytes.Buffer
+	recallArgs := []string{"-config", cfgPath, "-db", dbPath, "-types", "epic", "kanban-доска задач CLI"}
+	if err := runRecall(recallArgs, &recallOut); err != nil {
+		t.Fatalf("runRecall(-types epic): %v", err)
+	}
+	if md := recallOut.String(); !strings.Contains(md, "Эпик доски задач CLI") || strings.Contains(md, "История поверхности CLI") {
+		t.Errorf("runRecall -types epic должен показать только эпик, got:\n%s", md)
+	}
+}
+
+// TestCLISaveTaskFieldsRejectedForNonTask: -type у не-задачи — ошибка write
+// path (write.ErrTaskFieldNotApplicable) как есть, без молчаливого отбрасывания;
+// неизвестный -type — write.ErrUnknownTaskType.
+func TestCLISaveTaskFieldsRejectedForNonTask(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := writeTestConfig(t, dir, "alpha", []string{"user:*"}, "")
+	dbPath := filepath.Join(dir, "memory.db")
+
+	args := []string{"-config", cfgPath, "-db", dbPath, "-kind", "semantic", "-branch", "feat/x", "-content", "факт с веткой"}
+	if err := runSave(args, strings.NewReader(""), &bytes.Buffer{}); !errors.Is(err, write.ErrTaskFieldNotApplicable) {
+		t.Errorf("runSave(-kind semantic -branch) err = %v, want обёрнутый write.ErrTaskFieldNotApplicable", err)
+	}
+
+	args = []string{"-config", cfgPath, "-db", dbPath, "-kind", "task", "-summary", "h", "-type", "bug", "-content", "задача с неизвестным типом"}
+	if err := runSave(args, strings.NewReader(""), &bytes.Buffer{}); !errors.Is(err, write.ErrUnknownTaskType) {
+		t.Errorf("runSave(-type bug) err = %v, want обёрнутый write.ErrUnknownTaskType", err)
 	}
 }

@@ -28,8 +28,32 @@ var statusEnum = func() []any {
 }()
 
 // statusDescription — общее описание поля status для memory_save/memory_update
-// (задача 14.1).
-const statusDescription = "состояние задачи (только для kind=task): todo — заведена, работа не начата (по умолчанию) | doing — взята в работу | blocked — ждёт внешнего разблокирования | done — выполнена (запись остаётся в истории, но перестаёт попадать в дефолтную выдачу memory_recall). Для остальных типов памяти поле не задаётся."
+// (задача 14.1; стадии доски — Этап 15). Порядок перечисления = порядок
+// колонок kanban-доски (memory.Statuses); переходы назад допустимы. Блокировка
+// задачи — не стадия, а связь rel=blocked_by (задача 15.4), поэтому прежнего
+// blocked в перечне нет.
+const statusDescription = "стадия задачи на kanban-доске (только для kind=task): backlog — сырая идея, ещё не отобрана в работу | todo — готова к работе, не начата (по умолчанию) | doing — в работе | review — ревью кода (PR открыт) | testing — проверка/тестирование | release — влито, ждёт релиза | done — в релизе (запись остаётся в истории, но перестаёт попадать в дефолтную выдачу memory_recall). Переходы назад допустимы. Для остальных типов памяти поле не задаётся."
+
+// taskTypeEnum — допустимые значения type/types во входных схемах (Этап 15).
+// Выводится из memory.TaskTypes по той же причине, что statusEnum из
+// memory.Statuses: один перечень на валидацию write path и схему инструмента.
+var taskTypeEnum = func() []any {
+	out := make([]any, len(memory.TaskTypes))
+	for i, tt := range memory.TaskTypes {
+		out[i] = string(tt)
+	}
+	return out
+}()
+
+// Описания task-only полей type/branch/workflow — общие для memory_save и
+// memory_update (Этап 15, DESIGN.md §12/§14). Конвенции, которые здесь
+// зафиксированы: иерархия — links с rel=part_of строго от дочерней к
+// родительской; branch/workflow агент проставляет при переводе задачи в doing.
+const (
+	taskTypeDescription = "тип задачи (только для kind=task): epic — крупная цель, дробится на истории | story — пользовательская история, дробится на задачи | task — атомарная единица работы (по умолчанию). Иерархия — через links с rel=part_of ОТ дочерней К родительской: задача part_of истории, история part_of эпика (теги epic/эпик/История для этого больше не нужны)."
+	branchDescription   = "git-ветка, в которой ведётся задача (только для kind=task), напр. \"feat/kanban-board\"; свободная строка. Проставляй при переводе задачи в doing."
+	workflowDescription = "имя процесса, которым выполняется задача (только для kind=task): dev, ultracode, code-review, … — имя процесса, а не id запуска. Проставляй при переводе задачи в doing."
+)
 
 // linkRelValues — допустимые значения rel во входном links (DESIGN.md §4: типы
 // рёбер графа связей). Используются и для валидации (normalizeLinks), и для
@@ -139,11 +163,16 @@ func mustSchema[T any]() *jsonschema.Schema {
 
 // saveInput — вход инструмента memory_save (DESIGN.md §12).
 type saveInput struct {
-	Kind       string      `json:"kind" jsonschema:"тип памяти: semantic (факт/знание/предпочтение) | episodic (событие сессии) | procedural (рецепт/воркфлоу) | debt (техдолг: известная проблема, отложенная осознанно; content — атомарно: что не так + где (пакет/файл) + почему отложено + критерий закрытия; importance — приоритет долга; tags — область, напр. \"pkg:store\") | task (задача: единица работы вместо файла TODO; content — полный документ задачи (что сделать, границы, критерий приёмки), summary ОБЯЗАТЕЛЕН и служит заголовком, status — состояние, importance — приоритет)"`
-	Content    string      `json:"content" jsonschema:"сам факт, атомарно — 1-3 предложения; для kind=task — полный текст задачи (описание, границы, критерий приёмки), объём не ограничен"`
-	Scope      string      `json:"scope" jsonschema:"пространство имён записи: user:*, project:<name> или agent:self"`
-	Summary    string      `json:"summary,omitempty" jsonschema:"краткая форма для брифа recall — вместо content выводится именно она; для kind=task это заголовок задачи и он обязателен"`
-	Status     string      `json:"status,omitempty" jsonschema:"состояние задачи (см. описание поля)"`
+	Kind    string `json:"kind" jsonschema:"тип памяти: semantic (факт/знание/предпочтение) | episodic (событие сессии) | procedural (рецепт/воркфлоу) | debt (техдолг: известная проблема, отложенная осознанно; content — атомарно: что не так + где (пакет/файл) + почему отложено + критерий закрытия; importance — приоритет долга; tags — область, напр. \"pkg:store\") | task (задача: единица работы вместо файла TODO; content — полный документ задачи (что сделать, границы, критерий приёмки), summary ОБЯЗАТЕЛЕН и служит заголовком, status — стадия доски, type — epic|story|task, branch/workflow — ветка и процесс, importance — приоритет)"`
+	Content string `json:"content" jsonschema:"сам факт, атомарно — 1-3 предложения; для kind=task — полный текст задачи (описание, границы, критерий приёмки), объём не ограничен"`
+	Scope   string `json:"scope" jsonschema:"пространство имён записи: user:*, project:<name> или agent:self"`
+	Summary string `json:"summary,omitempty" jsonschema:"краткая форма для брифа recall — вместо content выводится именно она; для kind=task это заголовок задачи и он обязателен"`
+	Status  string `json:"status,omitempty" jsonschema:"стадия задачи (см. описание поля)"`
+	// Type/Branch/Workflow — task-only поля Этапа 15; описания и enum
+	// навешиваются в saveInputSchema (общие константы с memory_update).
+	Type       string      `json:"type,omitempty" jsonschema:"тип задачи (см. описание поля)"`
+	Branch     string      `json:"branch,omitempty" jsonschema:"git-ветка задачи (см. описание поля)"`
+	Workflow   string      `json:"workflow,omitempty" jsonschema:"процесс задачи (см. описание поля)"`
 	Importance int         `json:"importance,omitempty" jsonschema:"важность 1..5 (по умолчанию 3, если не указано)"`
 	Tags       []string    `json:"tags,omitempty" jsonschema:"теги для группировки и поиска"`
 	Links      []linkEntry `json:"links,omitempty"`
@@ -156,6 +185,10 @@ func saveInputSchema() *jsonschema.Schema {
 	s.Properties["kind"].Enum = kindEnum
 	s.Properties["status"].Enum = statusEnum
 	s.Properties["status"].Description = statusDescription
+	s.Properties["type"].Enum = taskTypeEnum
+	s.Properties["type"].Description = taskTypeDescription
+	s.Properties["branch"].Description = branchDescription
+	s.Properties["workflow"].Description = workflowDescription
 	s.Properties["links"] = &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription}
 	s.Properties["ttl"].Description = ttlDescription
 	return s
@@ -169,8 +202,11 @@ type recallInput struct {
 	Kinds  []string `json:"kinds,omitempty" jsonschema:"фильтр по типу памяти; пусто — искать по всем типам"`
 	// Statuses — фильтр по состоянию задачи (задача 14.1). Пусто НЕ означает
 	// «все»: выполненные задачи из дефолтной выдачи исключаются (memory.Query.Statuses).
-	Statuses []string `json:"statuses,omitempty" jsonschema:"фильтр по состоянию задач (kind=task): вернуть только задачи с одним из перечисленных статусов. Пусто — все записи, КРОМЕ выполненных задач (status=done); чтобы увидеть сделанное, передай [\"done\"] явно"`
-	Tags     []string `json:"tags,omitempty" jsonschema:"вернуть только записи, у которых есть хотя бы один из перечисленных тегов (OR); пусто — без фильтра по тегам"`
+	Statuses []string `json:"statuses,omitempty" jsonschema:"фильтр по стадии задач (kind=task): вернуть только задачи с одной из перечисленных стадий (backlog|todo|doing|review|testing|release|done). Пусто — все записи, КРОМЕ выполненных задач (status=done); чтобы увидеть сделанное, передай [\"done\"] явно; свой список дел — [\"todo\",\"doing\"]"`
+	// Types — фильтр по типу задачи (Этап 15): непустой набор сам по себе
+	// означает «только задачи» (memory.Query.Types).
+	Types []string `json:"types,omitempty" jsonschema:"фильтр по типу задач (kind=task): вернуть только задачи с одним из перечисленных типов (epic|story|task); непустой фильтр означает «только задачи». Пусто — без фильтра. Список эпиков проекта — types:[\"epic\"]"`
+	Tags  []string `json:"tags,omitempty" jsonschema:"вернуть только записи, у которых есть хотя бы один из перечисленных тегов (OR); пусто — без фильтра по тегам"`
 	// CreatedAfter/CreatedBefore — задача 8.2. Формат выбран длительностью назад от
 	// текущего момента (не абсолютной датой) — типичный запрос агента формулируется
 	// относительно "сейчас" ("за последнюю неделю"), а не конкретным календарным
@@ -186,6 +222,7 @@ func recallInputSchema() *jsonschema.Schema {
 	s := mustSchema[recallInput]()
 	s.Properties["kinds"].Items.Enum = kindEnum
 	s.Properties["statuses"].Items.Enum = statusEnum
+	s.Properties["types"].Items.Enum = taskTypeEnum
 	return s
 }
 
@@ -193,13 +230,19 @@ func recallInputSchema() *jsonschema.Schema {
 // «поле не передано» (nil, не трогаем) от «поле передано» — так правка меняет только
 // то, что агент явно прислал.
 type updateInput struct {
-	ID         string      `json:"id" jsonschema:"id (ULID) обновляемой записи"`
-	Content    *string     `json:"content,omitempty" jsonschema:"новый текст факта, если его нужно изменить"`
-	Summary    *string     `json:"summary,omitempty" jsonschema:"новая краткая форма для брифа; пустая строка очищает summary"`
-	Importance *int        `json:"importance,omitempty" jsonschema:"новая важность 1..5"`
-	Status     *string     `json:"status,omitempty" jsonschema:"новое состояние задачи (см. описание поля)"`
-	Tags       []string    `json:"tags,omitempty" jsonschema:"новый полный набор тегов — полностью заменяет старый"`
-	Links      []linkEntry `json:"links,omitempty"` // ДОБАВЛЯЮТСЯ к текущим links записи (не заменяют, в отличие от Tags — см. write.UpdateInput.Links)
+	ID         string  `json:"id" jsonschema:"id (ULID) обновляемой записи"`
+	Content    *string `json:"content,omitempty" jsonschema:"новый текст факта, если его нужно изменить"`
+	Summary    *string `json:"summary,omitempty" jsonschema:"новая краткая форма для брифа; пустая строка очищает summary"`
+	Importance *int    `json:"importance,omitempty" jsonschema:"новая важность 1..5"`
+	Status     *string `json:"status,omitempty" jsonschema:"новая стадия задачи (см. описание поля)"`
+	// Type/Branch/Workflow — task-only поля Этапа 15: nil — не менять; пустая
+	// строка у branch/workflow — очистить, у type — вернуть дефолт task
+	// (write.UpdateInput).
+	Type     *string     `json:"type,omitempty" jsonschema:"новый тип задачи (см. описание поля)"`
+	Branch   *string     `json:"branch,omitempty" jsonschema:"новая git-ветка задачи (см. описание поля)"`
+	Workflow *string     `json:"workflow,omitempty" jsonschema:"новый процесс задачи (см. описание поля)"`
+	Tags     []string    `json:"tags,omitempty" jsonschema:"новый полный набор тегов — полностью заменяет старый"`
+	Links    []linkEntry `json:"links,omitempty"` // ДОБАВЛЯЮТСЯ к текущим links записи (не заменяют, в отличие от Tags — см. write.UpdateInput.Links)
 	// TTL — указатель, а не string: отличает "не менять срок" (nil, поле не
 	// передано) от "снять срок" (пустая строка или "0", write.UpdateInput.TTL).
 	TTL *string `json:"ttl,omitempty"`
@@ -208,7 +251,11 @@ type updateInput struct {
 func updateInputSchema() *jsonschema.Schema {
 	s := mustSchema[updateInput]()
 	s.Properties["status"].Enum = statusEnum
-	s.Properties["status"].Description = statusDescription + " Смена статуса — обычная правка задачи: memory_update(id, status=\"doing\"|\"done\")."
+	s.Properties["status"].Description = statusDescription + " Смена стадии — обычная правка задачи: memory_update(id, status=\"doing\"|\"review\"|\"done\"); при переводе в doing заодно проставь branch и workflow."
+	s.Properties["type"].Enum = taskTypeEnum
+	s.Properties["type"].Description = taskTypeDescription + " Пустая строка — вернуть дефолт task."
+	s.Properties["branch"].Description = branchDescription + " Пустая строка — очистить."
+	s.Properties["workflow"].Description = workflowDescription + " Пустая строка — очистить."
 	linksSchema := &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription + " В отличие от tags, links ДОБАВЛЯЕТСЯ к уже существующим связям записи, а не заменяет их."}
 	s.Properties["links"] = linksSchema
 	s.Properties["ttl"].Description = ttlDescription + " Чтобы продлить или установить срок, передай длительность; чтобы снять срок (сделать запись вечной), передай \"0\"; не указано — текущий срок не меняется."
