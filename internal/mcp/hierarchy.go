@@ -10,17 +10,21 @@ import (
 	"agentmemory/internal/memory/store"
 )
 
-// hierarchySections собирает для ответа memory_get секции иерархии задачи
-// (DESIGN.md §14 Этап 15, задача 15.3): «Родитель» — цель первого ребра
-// part_of (memory.ParentOf + Store.Get), «Дети» — соседи, объявившие себя
-// частью m (memory.ChildrenOf поверх Store.Neighbors, который отдаёт соседей с
-// Links). Для записей прочих kind возвращает пустую строку: у них part_of —
+// taskSections собирает для ответа memory_get секции задачи (DESIGN.md §14
+// Этап 15): иерархия (задача 15.3) — «Родитель» — цель первого ребра part_of
+// (memory.ParentOf + Store.Get), «Дети» — соседи, объявившие себя частью m
+// (memory.ChildrenOf поверх Store.Neighbors, который отдаёт соседей с Links);
+// блокировка (задача 15.4) — «Заблокирована (ждёт)» — живые блокеры m
+// (memory.LiveBlockers поверх Store.GetMany по memory.BlockerIDs), «Блокирует»
+// — соседи с ребром blocked_by на m (memory.BlockedBy по тем же Neighbors).
+// Для записей прочих kind возвращает пустую строку: у них part_of —
 // тематическая связь, а не иерархия, и секции только зашумили бы ответ.
 // Пустые секции не выводятся.
 //
-// Обратный обход (дети) намеренно строится из Get+Neighbors, а не отдельным
-// «входящим» запросом к хранилищу: множества соседей малы (см. Store.Neighbors).
-func (s *Server) hierarchySections(ctx context.Context, m memory.Memory) (string, error) {
+// Обратный обход (дети, блокируемые) намеренно строится из одного Neighbors,
+// а не отдельным «входящим» запросом к хранилищу: множества соседей малы (см.
+// Store.Neighbors).
+func (s *Server) taskSections(ctx context.Context, m memory.Memory) (string, error) {
 	if m.Kind != memory.KindTask {
 		return "", nil
 	}
@@ -44,7 +48,7 @@ func (s *Server) hierarchySections(ctx context.Context, m memory.Memory) (string
 
 	neighbors, err := s.store.Neighbors(ctx, m.Id)
 	if err != nil {
-		return "", fmt.Errorf("дети %q: %w", m.Id, err)
+		return "", fmt.Errorf("соседи %q: %w", m.Id, err)
 	}
 	children := memory.ChildrenOf(m.Id, neighbors)
 	if len(children) > 0 {
@@ -53,6 +57,32 @@ func (s *Server) hierarchySections(ctx context.Context, m memory.Memory) (string
 		fmt.Fprintf(&b, "Дети (%d, готово %d):\n", total, done)
 		for _, c := range children {
 			b.WriteString(taskLine(c))
+		}
+		b.WriteString("\n")
+	}
+
+	if ids := memory.BlockerIDs(m); len(ids) > 0 {
+		loaded, err := s.store.GetMany(ctx, ids)
+		if err != nil {
+			return "", fmt.Errorf("блокеры %q: %w", m.Id, err)
+		}
+		byID := make(map[string]memory.Memory, len(loaded))
+		for _, bl := range loaded {
+			byID[bl.Id] = bl
+		}
+		if live := memory.LiveBlockers(m, byID); len(live) > 0 {
+			b.WriteString("Заблокирована (ждёт):\n")
+			for _, bl := range live {
+				b.WriteString(taskLine(bl))
+			}
+			b.WriteString("\n")
+		}
+	}
+	if blocked := memory.BlockedBy(m.Id, neighbors); len(blocked) > 0 {
+		memory.SortByStage(blocked)
+		b.WriteString("Блокирует:\n")
+		for _, t := range blocked {
+			b.WriteString(taskLine(t))
 		}
 		b.WriteString("\n")
 	}

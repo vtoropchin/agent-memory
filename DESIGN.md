@@ -285,6 +285,7 @@ PostgreSQL делает сервер: поведение с отбрасыван
 type Store interface {
     Put(ctx context.Context, m Memory) error
     Get(ctx context.Context, id string) (Memory, error)
+    GetMany(ctx context.Context, ids []string) ([]Memory, error)                   // по списку id, с Tags/Links батчем; тумстоуны включены, отсутствующие пропущены (Этап 15)
     SearchLexical(ctx context.Context, q Query) ([]Candidate, error)
     SearchVector(ctx context.Context, vec []float32, q Query) ([]Candidate, error) // no-op пока нет Embedder
     Neighbors(ctx context.Context, id string) ([]Memory, error)                    // граф-обход; Tags и Links соседей загружены (Этап 15)
@@ -564,6 +565,13 @@ DeepSeek chat (OpenAI-совместимый) в роли текстового �
   или снимает срок жизни: любая Go-длительность — новый срок от ТЕКУЩЕГО момента
   (продление); явный сентинел `"0"` (или пустая строка) — снять срок, запись
   становится вечной; поле не передано — текущий срок не меняется.
+  Опциональный `unlinks` (Этап 15, задача 15.4) — связи к удалению в том же
+  формате, что `links` (пара `id`+`rel`, строка = `related`): единственный
+  способ снять ребро, в т.ч. вручную снять блокировку `blocked_by`; применяется
+  после `links`, отсутствующая пара молча пропускается. Пост-состояние задачи
+  проверяется после всех полей: заблокированная живым блокером задача не может
+  оказаться дальше `todo` — `write.ErrTaskBlocked` с перечнем блокеров (§14
+  Этап 15).
 - **`memory_forget`** — мягкое удаление (`superseded_by` / архив).
 
 Транспорт: MCP over stdio (`/cmd/memo`).

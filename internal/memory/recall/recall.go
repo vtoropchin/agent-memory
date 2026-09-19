@@ -240,7 +240,7 @@ func (r *Recaller) Recall(ctx context.Context, q memory.Query) (memory.Brief, er
 		return emptyBrief(), nil
 	}
 
-	included, collapsed := selectByBudget(scored, budget, q.Explain)
+	included, collapsed := selectByBudget(scored, budget, q.Explain, r.blockerTitles(ctx, scored))
 
 	for _, c := range included {
 		// Touch — best-effort: ошибка усиления доступа не должна ронять recall.
@@ -441,14 +441,17 @@ type briefItem struct {
 //  3. Пока фактическая стоимость собранного брифа (composeMarkdown, т.е. реальный
 //     Markdown с обвязкой) не укладывается в бюджет — обрезаем с хвоста наименее
 //     релевантные записи, но не ниже одной.
-func selectByBudget(scored []scoredCandidate, budget int, explain bool) ([]briefItem, int) {
+//
+// blockers — заголовки живых блокеров по id задачи (blockerTitles): маркер ⛔
+// входит в строку ДО оценки бюджета по той же причине, что и explain-довесок.
+func selectByBudget(scored []scoredCandidate, budget int, explain bool, blockers map[string][]string) ([]briefItem, int) {
 	if len(scored) == 0 {
 		return nil, 0
 	}
 
 	items := make([]briefItem, len(scored))
 	for i, c := range scored {
-		line := formatLine(c.mem)
+		line := formatLine(c.mem, blockers[c.mem.Id])
 		if explain {
 			line += "\n" + formatExplainLine(c.explain)
 		}
@@ -494,11 +497,14 @@ func estimateTokens(s string) int {
 // обычная задача (task, подавляющее большинство) выглядит как раньше, чтобы не
 // платить токенами за значение по умолчанию. Ветка, если задана, — хвостом
 // `· ветка feat/x`: агенту, восстанавливающему контекст, важно знать, где
-// ведётся работа. Маркер блокировки — задача 15.4. Для задачи Summary — её
+// ведётся работа. Заблокированная задача (задача 15.4; blockers — заголовки
+// живых блокеров, см. blockerTitles) помечается `⛔` перед заголовком и хвостом
+// `(ждёт: <блокер>, <блокер> +n)` — первые два блокера по имени, остальные
+// счётчиком, чтобы строка не разрасталась. Для задачи Summary — её
 // заголовок и он обязателен (write.ErrTaskSummaryRequired), поэтому
 // многокилобайтный content задачи в бриф не просачивается; полный текст агент
 // забирает по id (memory_get).
-func formatLine(m memory.Memory) string {
+func formatLine(m memory.Memory, blockers []string) string {
 	text := m.Content
 	if m.Summary != nil && strings.TrimSpace(*m.Summary) != "" {
 		text = *m.Summary
@@ -509,13 +515,90 @@ func formatLine(m memory.Memory) string {
 		if m.Type != "" && m.Type != memory.TaskTypeTask {
 			fmt.Fprintf(&b, "(%s) ", m.Type)
 		}
-		fmt.Fprintf(&b, "%s [★%d]", text, m.Importance)
+		if len(blockers) > 0 {
+			b.WriteString("⛔ ")
+		}
+		b.WriteString(text)
+		if len(blockers) > 0 {
+			shown := blockers
+			if len(shown) > maxBlockersInLine {
+				shown = shown[:maxBlockersInLine]
+			}
+			fmt.Fprintf(&b, " (ждёт: %s", strings.Join(shown, ", "))
+			if rest := len(blockers) - len(shown); rest > 0 {
+				fmt.Fprintf(&b, " +%d", rest)
+			}
+			b.WriteString(")")
+		}
+		fmt.Fprintf(&b, " [★%d]", m.Importance)
 		if m.Branch != "" {
 			fmt.Fprintf(&b, " · ветка %s", m.Branch)
 		}
 		return b.String()
 	}
 	return fmt.Sprintf("- %s [★%d]", text, m.Importance)
+}
+
+// maxBlockersInLine — сколько блокеров называть по имени в строке брифа;
+// остальные — счётчиком «+n».
+const maxBlockersInLine = 2
+
+// blockerTitles возвращает по id задачи заголовки её ЖИВЫХ блокеров
+// (memory.LiveBlockers) для маркера ⛔ в строке брифа (задача 15.4). Два батча
+// Store.GetMany: кандидаты Search* приходят без Links, поэтому сперва
+// догружаются сами задачи из scored (их Links), затем — их блокеры (по id, без
+// фильтра scope: кросс-scope блокировка учитывается). Любая ошибка — маркер не
+// выводится, лог в stderr, бриф собирается без него (DESIGN.md §15: деградация,
+// а не падение). Записи прочих kind не трогаются, при отсутствии задач в
+// выдаче в Store не ходит.
+func (r *Recaller) blockerTitles(ctx context.Context, scored []scoredCandidate) map[string][]string {
+	var taskIDs []string
+	for _, c := range scored {
+		if c.mem.Kind == memory.KindTask {
+			taskIDs = append(taskIDs, c.mem.Id)
+		}
+	}
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	tasks, err := r.store.GetMany(ctx, taskIDs)
+	if err != nil {
+		log.Printf("recall: загрузка связей задач для маркера блокировки: %v (маркер пропущен)", err)
+		return nil
+	}
+	var blockerIDs []string
+	seen := map[string]bool{}
+	for _, t := range tasks {
+		for _, id := range memory.BlockerIDs(t) {
+			if !seen[id] {
+				seen[id] = true
+				blockerIDs = append(blockerIDs, id)
+			}
+		}
+	}
+	if len(blockerIDs) == 0 {
+		return nil
+	}
+	blockers, err := r.store.GetMany(ctx, blockerIDs)
+	if err != nil {
+		log.Printf("recall: загрузка блокеров для маркера блокировки: %v (маркер пропущен)", err)
+		return nil
+	}
+	byID := make(map[string]memory.Memory, len(blockers))
+	for _, b := range blockers {
+		byID[b.Id] = b
+	}
+	titles := make(map[string][]string)
+	for _, t := range tasks {
+		for _, b := range memory.LiveBlockers(t, byID) {
+			title := b.Id
+			if b.Summary != nil && strings.TrimSpace(*b.Summary) != "" {
+				title = *b.Summary
+			}
+			titles[t.Id] = append(titles[t.Id], title)
+		}
+	}
+	return titles
 }
 
 // formatExplainLine форматирует explain-довесок под строкой записи брифа

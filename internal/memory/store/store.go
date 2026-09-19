@@ -59,6 +59,15 @@ type Store interface {
 	Close() error
 	Put(ctx context.Context, m memory.Memory) error
 	Get(ctx context.Context, id string) (memory.Memory, error)
+	// GetMany возвращает записи по списку id — живые и тумстоуны (вызывающий
+	// сам фильтрует по SupersededBy: правило «блокирует = жив и не done» —
+	// memory.LiveBlockers), с Tags и Links (батчами, не N+1). Порядок не
+	// гарантируется, отсутствующие id молча пропускаются (без ErrNotFound: для
+	// потребителя это «нет такого блокера», не сбой), пустой ids — пустой
+	// результат без запроса. Введён для блокировки задач (Этап 15, задача 15.4):
+	// write грузит блокеров одной задачи, recall — блокеров всех задач брифа,
+	// доска (board) — кросс-scope блокеров, не попавших в ListTasks.
+	GetMany(ctx context.Context, ids []string) ([]memory.Memory, error)
 	SearchLexical(ctx context.Context, q memory.Query) ([]memory.Candidate, error)
 	SearchVector(ctx context.Context, vec []float32, q memory.Query) ([]memory.Candidate, error) // no-op пока нет Embedder
 	// Neighbors возвращает живые записи, связанные с id рёбрами links в любом

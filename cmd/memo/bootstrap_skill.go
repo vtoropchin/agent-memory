@@ -52,7 +52,8 @@ const bootstrapSkillBodyTemplate = `# Первичная инициализац�
 - ` + "`kind: task`" + ` — для задач вместо файлов TODO (` + "`content`" + ` — текст задачи,
   ` + "`summary`" + ` — обязательный заголовок, ` + "`status`" + ` — стадия доски
   backlog/todo/doing/review/testing/release/done, ` + "`type`" + ` — epic/story/task;
-  иерархия — ` + "`links`" + ` с ` + "`rel: part_of`" + ` от дочерней к родительской);
+  иерархия — ` + "`links`" + ` с ` + "`rel: part_of`" + ` от дочерней к родительской,
+  блокировка — ` + "`rel: blocked_by`" + ` от заблокированной задачи к блокеру);
 - ` + "`importance`" + ` — по значимости факта;
 - связывай родственные факты через ` + "`links`" + `.
 

@@ -2,6 +2,7 @@ package recall
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"agentmemory/internal/memory"
 	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
+	"agentmemory/internal/memory/store"
 )
 
 // TestRecall_TaskSectionInOrder: задачи выводятся отдельной секцией между
@@ -203,5 +205,101 @@ func TestRecall_FilterByTypes(t *testing.T) {
 	}
 	if strings.Contains(brief.Markdown, "Задача фильтра") || strings.Contains(brief.Markdown, "Факт фильтра") {
 		t.Errorf("Types=[epic] не должен пропускать обычную задачу и факт:\n%s", brief.Markdown)
+	}
+}
+
+// putBlockedTask — задача scope со статусом status и рёбрами blocked_by на
+// blockers; content общий, чтобы все записи находились одним запросом.
+func putBlockedTask(t *testing.T, s store.Store, scope, id, title string, status memory.Status, blockers ...string) {
+	t.Helper()
+	links := make([]memory.Link, len(blockers))
+	for i, b := range blockers {
+		links[i] = memory.Link{Dst: b, Rel: memory.RelBlockedBy}
+	}
+	putMemory(t, context.Background(), s, memory.Memory{
+		Id: id, Kind: memory.KindTask, Scope: scope, Status: status, Type: memory.TaskTypeTask,
+		Content: "общий текст про блокировку задач", Summary: strPtr(title),
+		Importance: 3, CreatedAt: 1, UpdatedAt: 1, Links: links,
+	})
+}
+
+// TestRecall_BlockedTaskMarker: заблокированная задача помечается ⛔ с
+// заголовком блокера (первые два по имени, дальше +n); блокер из другого scope
+// учитывается; после done блокера маркера нет (задача 15.4).
+func TestRecall_BlockedTaskMarker(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:blocked"
+
+	b1, b2, b3, task := newID(t), newID(t), newID(t), newID(t)
+	putBlockedTask(t, s, scope, b1, "Первый блокер", memory.StatusTodo)
+	putBlockedTask(t, s, "project:other", b2, "Чужой блокер", memory.StatusDoing) // кросс-scope
+	putBlockedTask(t, s, scope, b3, "Третий блокер", memory.StatusTodo)
+	putBlockedTask(t, s, scope, task, "Зависимая задача", memory.StatusTodo, b1, b2, b3)
+
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+	brief, err := r.Recall(ctx, memory.Query{Text: "блокировку задач", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	want := "- [todo] ⛔ Зависимая задача (ждёт: Первый блокер, Чужой блокер +1) [★3]"
+	if !strings.Contains(brief.Markdown, want) {
+		t.Errorf("ожидал строку %q:\n%s", want, brief.Markdown)
+	}
+	if strings.Contains(brief.Markdown, "⛔ Первый блокер") {
+		t.Errorf("сам блокер не должен помечаться ⛔:\n%s", brief.Markdown)
+	}
+
+	// Блокеры закрыты/отменены — маркер исчезает без правки задачи.
+	tomb := b3
+	for _, id := range []string{b1, b2} {
+		m, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		m.Status = memory.StatusDone
+		putMemory(t, ctx, s, m)
+	}
+	if err := s.Supersede(ctx, b3, tomb); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+	brief, err = r.Recall(ctx, memory.Query{Text: "блокировку задач", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if strings.Contains(brief.Markdown, "⛔") || !strings.Contains(brief.Markdown, "- [todo] Зависимая задача [★3]") {
+		t.Errorf("после done/тумстоуна блокеров маркера быть не должно:\n%s", brief.Markdown)
+	}
+}
+
+// getManyFailingStore — Store, у которого GetMany всегда падает: имитирует
+// сбой догрузки блокеров.
+type getManyFailingStore struct {
+	store.Store
+}
+
+func (getManyFailingStore) GetMany(context.Context, []string) ([]memory.Memory, error) {
+	return nil, errors.New("сбой батч-чтения")
+}
+
+// TestRecall_BlockerLoadErrorDegrades: ошибка GetMany — бриф собирается без
+// маркера, Recall не падает (DESIGN.md §15).
+func TestRecall_BlockerLoadErrorDegrades(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:blocked-degrade"
+	b, task := newID(t), newID(t)
+	putBlockedTask(t, s, scope, b, "Блокер", memory.StatusTodo)
+	putBlockedTask(t, s, scope, task, "Зависимая задача", memory.StatusTodo, b)
+
+	r := New(getManyFailingStore{s}, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+	brief, err := r.Recall(ctx, memory.Query{Text: "блокировку задач", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall при сбое GetMany должен деградировать, а не падать: %v", err)
+	}
+	if strings.Contains(brief.Markdown, "⛔") || !strings.Contains(brief.Markdown, "- [todo] Зависимая задача [★3]") {
+		t.Errorf("бриф без маркера, но с задачей:\n%s", brief.Markdown)
 	}
 }

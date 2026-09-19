@@ -50,7 +50,44 @@ var (
 	// recall.formatLine), поэтому заголовок задачи обязателен: без него бриф
 	// распух бы полным текстом одной задачи.
 	ErrTaskSummaryRequired = errors.New("write: для kind=task обязателен summary — заголовок задачи")
+	// ErrTaskBlocked — задачу с живыми блокерами (memory.LiveBlockers) пытаются
+	// поставить в стадию дальше todo (DESIGN.md §14 Этап 15, задача 15.4).
+	// Сентинел для errors.Is; сама ошибка — *TaskBlockedError с перечнем
+	// блокеров (errors.As). Проверяется как ПОСТ-состояние Save/Update: после
+	// применения всех полей `!memory.StatusAllowsBlocked(status) ∧ живые блокеры
+	// ≠ ∅` — а не как переход, иначе Update{Status: doing, Links: [blocked_by X]}
+	// зависел бы от порядка веток, а Save со статусом и блокером не проверялся
+	// бы вовсе.
+	ErrTaskBlocked = errors.New("write: задача заблокирована")
+	// ErrBlockerNotTask — цель ребра rel=blocked_by — не задача (kind != task):
+	// блокировать может только задача (её done/тумстоун снимает блокировку;
+	// у факта нет ни стадии, ни такого жизненного цикла). Единственное правило
+	// про rel, которое write проверяет по типу цели (см. resolveLinks).
+	ErrBlockerNotTask = errors.New("write: блокером (rel=blocked_by) может быть только задача (kind=task)")
 )
+
+// TaskBlockedError — конкретная ошибка ErrTaskBlocked с перечнем живых
+// блокеров, чтобы вызывающий слой (MCP-текст ошибки, web 409) перечислил их
+// агенту/пользователю, а не заставлял искать. errors.Is(err, ErrTaskBlocked)
+// — через Is; сами блокеры — errors.As(err, &e).
+type TaskBlockedError struct {
+	Blockers []memory.Memory
+}
+
+func (e *TaskBlockedError) Error() string {
+	parts := make([]string, len(e.Blockers))
+	for i, b := range e.Blockers {
+		title := b.Id
+		if b.Summary != nil && strings.TrimSpace(*b.Summary) != "" {
+			title = *b.Summary
+		}
+		parts[i] = fmt.Sprintf("%s (%s)", title, b.Id)
+	}
+	return ErrTaskBlocked.Error() + ": " + strings.Join(parts, ", ") + " — заблокированная задача может стоять только в backlog/todo; блокировка снимется сама, когда блокер станет done или будет отменён, либо снимается вручную через unlinks"
+}
+
+// Is делает errors.Is(err, ErrTaskBlocked) истинным для *TaskBlockedError.
+func (e *TaskBlockedError) Is(target error) bool { return target == ErrTaskBlocked }
 
 // defaultDedupLimit — сколько кандидатов из того же scope/kind рассматриваем при
 // поиске near-duplicate перед вставкой новой записи.
@@ -192,6 +229,14 @@ type UpdateInput struct {
 	Workflow *string
 	Links    []LinkInput // связи, добавляемые к текущим links записи (пустой Rel -> related);
 	// висячие ссылки пропускаются молча, как в Save (см. resolveLinks); nil — не менять.
+	// Unlinks — связи к удалению: пары (Dst, Rel), пустой Rel — related, как
+	// у Links (задача 15.4). Симметрия аддитивным Links: раз правка не стирает
+	// рёбра молча, снять ребро можно только явно — и это единственное место
+	// удаления ребра в коде (снятие блокировки вручную — unlinks blocked_by;
+	// та же операция для любого rel). Применяются ПОСЛЕ Links, поэтому один
+	// вызов может заменить ребро (links: новое, unlinks: старое). Пара, которой
+	// у записи нет, молча пропускается; nil — не менять.
+	Unlinks []LinkInput
 	// TTL продлевает или снимает срок жизни записи (задача 9.4): nil — не менять
 	// текущий ExpiresAt; "" или "0" — снять срок (запись становится вечной,
 	// ЯВНО задокументированный сентинел, тот же паттерн, что у Summary выше:
@@ -209,8 +254,10 @@ type UpdateInput struct {
 //     этом НЕ применяется (см. reinforce) — усиление не должно тихо переписывать
 //     summary уже существующего факта чужим значением;
 //  3. резолвит Links на существующие записи (см. ограничение ниже);
-//  4. генерирует ULID и вставляет запись (вместе с Summary, если он передан) через
-//     Store.Put одной операцией (FTS5-индекс обновляется триггерами внутри Put
+//  4. генерирует ULID, проверяет пост-состояние задачи (заблокированная живым
+//     блокером задача не может быть заведена дальше todo — checkBlocked,
+//     ErrTaskBlocked; задача 15.4) и вставляет запись (вместе с Summary, если он
+//     передан) через Store.Put одной операцией (FTS5-индекс обновляется триггерами внутри Put
 //     автоматически); merged=false;
 //  5. если Embedder включён (Dim() > 0), синхронно считает вектор content и
 //     сохраняет его через Store.PutVector; ошибка эмбеддинга/PutVector не
@@ -320,6 +367,9 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		Workflow:   workflow,
 		Tags:       tags,
 		Links:      links,
+	}
+	if err := w.checkBlocked(ctx, m); err != nil {
+		return "", false, err
 	}
 	if err := w.store.Put(ctx, m); err != nil {
 		return "", false, fmt.Errorf("write: сохранение записи: %w", err)
@@ -479,7 +529,8 @@ func (w *Writer) resolveLinks(ctx context.Context, ins []LinkInput) ([]memory.Li
 		if id == "" {
 			continue
 		}
-		if _, err := w.store.Get(ctx, id); err != nil {
+		dst, err := w.store.Get(ctx, id)
+		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				continue // висячая ссылка — известный пробел MVP, см. godoc Save
 			}
@@ -488,6 +539,9 @@ func (w *Writer) resolveLinks(ctx context.Context, ins []LinkInput) ([]memory.Li
 		rel := strings.TrimSpace(in.Rel)
 		if rel == "" {
 			rel = memory.RelRelated
+		}
+		if rel == memory.RelBlockedBy && dst.Kind != memory.KindTask {
+			return nil, fmt.Errorf("%w: %q имеет kind=%s", ErrBlockerNotTask, id, dst.Kind)
 		}
 		links = append(links, memory.Link{Dst: id, Rel: rel})
 	}
@@ -535,8 +589,12 @@ func (w *Writer) newULID() (string, error) {
 // резолвится той же resolveLinks, что и Save (висячие ссылки пропускаются молча).
 // TTL (задача 9.4) продлевает срок жизни (новый ExpiresAt = сейчас + длительность)
 // или снимает его ("0"/"" → вечная, см. годок UpdateInput.TTL) — см. parseTTL.
-// Если записи с Id нет, возвращает ошибку, оборачивающую store.ErrNotFound
-// (проверяется errors.Is).
+// Unlinks (задача 15.4) снимает рёбра по парам (Dst, Rel) после применения
+// Links (см. removeLinks). Перед Put проверяется пост-состояние задачи:
+// заблокированную живым блокером задачу нельзя оставить в стадии дальше todo
+// (checkBlocked → ErrTaskBlocked) — независимо от того, какими полями вызов её
+// туда привёл. Если записи с Id нет, возвращает ошибку, оборачивающую
+// store.ErrNotFound (проверяется errors.Is).
 func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 	id := strings.TrimSpace(in.Id)
 	if id == "" {
@@ -649,11 +707,18 @@ func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 		m.Links = mergeLinks(m.Links, filtered)
 		changed = true
 	}
+	if in.Unlinks != nil {
+		m.Links = removeLinks(m.Links, in.Unlinks)
+		changed = true
+	}
 
 	if !changed {
 		return nil
 	}
 
+	if err := w.checkBlocked(ctx, m); err != nil {
+		return err
+	}
 	m.UpdatedAt = w.now()
 	if err := w.store.Put(ctx, m); err != nil {
 		return fmt.Errorf("write: сохранение %q: %w", id, err)
@@ -713,6 +778,70 @@ func mergeLinks(existing, additional []memory.Link) []memory.Link {
 		out = append(out, l)
 	}
 	return out
+}
+
+// removeLinks возвращает links без пар (Dst, Rel) из unlinks — реализация
+// UpdateInput.Unlinks. Пустой Rel во входе трактуется как related — тот же
+// дефолт, что у resolveLinks для Links, чтобы «снять то, что добавил строковой
+// формой» работало симметрично. Отсутствующая пара молча пропускается.
+func removeLinks(links []memory.Link, unlinks []LinkInput) []memory.Link {
+	drop := make(map[memory.Link]bool, len(unlinks))
+	for _, u := range unlinks {
+		dst := strings.TrimSpace(u.Dst)
+		if dst == "" {
+			continue
+		}
+		rel := strings.TrimSpace(u.Rel)
+		if rel == "" {
+			rel = memory.RelRelated
+		}
+		drop[memory.Link{Dst: dst, Rel: rel}] = true
+	}
+	if len(drop) == 0 {
+		return links
+	}
+	out := links[:0]
+	for _, l := range links {
+		if drop[l] {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// checkBlocked — валидация пост-состояния задачи перед Put (DESIGN.md §14 Этап
+// 15, задача 15.4): если у задачи есть рёбра blocked_by и её стадия не
+// допускает блокировки (memory.StatusAllowsBlocked — только backlog/todo),
+// грузит блокеров одним GetMany и, если хоть один жив и не done
+// (memory.LiveBlockers), возвращает *TaskBlockedError с их перечнем. Для
+// задач без блокеров — no-op без обращения к Store. Ребро blocked_by у записи
+// прочего kind — ErrTaskFieldNotApplicable (заблокированной может быть только
+// задача — симметрично ErrBlockerNotTask для цели ребра).
+// Само правило «жив и не done» живёт в memory, здесь только поставка карты.
+func (w *Writer) checkBlocked(ctx context.Context, m memory.Memory) error {
+	ids := memory.BlockerIDs(m)
+	if len(ids) == 0 {
+		return nil
+	}
+	if m.Kind != memory.KindTask {
+		return taskFieldNotApplicable("links.rel=blocked_by", strings.Join(ids, ","), m.Kind)
+	}
+	if memory.StatusAllowsBlocked(m.Status) {
+		return nil
+	}
+	blockers, err := w.store.GetMany(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("write: загрузка блокеров %q: %w", m.Id, err)
+	}
+	byID := make(map[string]memory.Memory, len(blockers))
+	for _, b := range blockers {
+		byID[b.Id] = b
+	}
+	if live := memory.LiveBlockers(m, byID); len(live) > 0 {
+		return &TaskBlockedError{Blockers: live}
+	}
+	return nil
 }
 
 // normalizeStatus приводит переданный status к memory.Status с учётом kind

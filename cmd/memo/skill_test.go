@@ -20,6 +20,7 @@ func TestRenderSkillMD_TaskConventions(t *testing.T) {
 		"## Задачи (kanban-доска)",
 		"`backlog`", "`todo`", "`doing`", "`review`", "`testing`", "`release`", "`done`",
 		"`epic`", "`story`", "`task`", "`rel: part_of`", "**от дочерней к родительской**",
+		"**Блокировка**", `rel: "blocked_by"`, "unlinks", "дальше `todo`", "⛔",
 		"`branch`", "`workflow`",
 		`memory_recall(statuses:["todo","doing"])`, `memory_recall(types:["epic"])`, `memory_recall(statuses:["done"])`,
 		"project:alpha",
@@ -47,12 +48,15 @@ func TestRenderBootstrapSkillMD_TaskConventions(t *testing.T) {
 		"backlog/todo/doing/review/testing/release/done",
 		"epic/story/task",
 		"`rel: part_of`", "от дочерней к родительской",
+		"`rel: blocked_by`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("bootstrap-скил не содержит %q", want)
 		}
 	}
-	if strings.Contains(got, "blocked") {
-		t.Errorf("bootstrap-скил содержит упразднённую стадию blocked")
+	for _, bad := range []string{"`blocked`", "/blocked/", `"blocked"`} {
+		if strings.Contains(got, bad) {
+			t.Errorf("bootstrap-скил содержит упразднённую стадию blocked: %q", bad)
+		}
 	}
 }

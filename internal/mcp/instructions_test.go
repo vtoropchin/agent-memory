@@ -134,6 +134,7 @@ func TestBuildInstructions_TaskConventions(t *testing.T) {
 		"epic", "story", "part_of", "дочерней", "родительской",
 		"branch", "workflow",
 		`statuses:["todo","doing"]`, `types:["epic"]`, `statuses:["done"]`,
+		`"rel":"blocked_by"`, "unlinks", "дальше todo", "⛔",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("инструкции не содержат %q:\n%s", want, got)

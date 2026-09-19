@@ -704,6 +704,69 @@ func (s *sqliteStore) Get(ctx context.Context, id string) (memory.Memory, error)
 	return m, nil
 }
 
+// GetMany возвращает записи по списку id (живые и тумстоуны, отсутствующие
+// молча пропускаются) с Tags и Links — по одному батч-запросу на всё
+// (loadTagsBatch/loadLinksBatch), не N+1. Порядок не гарантируется. Пустой ids —
+// пустой результат без обращения к БД. См. Store.GetMany.
+func (s *sqliteStore) GetMany(ctx context.Context, ids []string) ([]memory.Memory, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+memoryColumns+`
+		FROM memories m WHERE m.id IN (`+strings.Join(placeholders, ",")+`)
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("батч-чтение записей: %w", err)
+	}
+	defer rows.Close()
+
+	var all []memory.Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("сканирование записи (батч): %w", err)
+		}
+		all = append(all, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("батч-чтение записей: %w", err)
+	}
+	if err := s.attachTagsAndLinks(ctx, all); err != nil {
+		return nil, err
+	}
+	return all, nil
+}
+
+// attachTagsAndLinks достраивает Tags и Links для all батчем (loadTagsBatch +
+// loadLinksBatch, один запрос на весь срез каждая) — общий хвост Neighbors,
+// GetMany и ListTasks; аналог pgStore.loadTagsAndLinksBatch.
+func (s *sqliteStore) attachTagsAndLinks(ctx context.Context, all []memory.Memory) error {
+	ids := make([]string, len(all))
+	for i, m := range all {
+		ids[i] = m.Id
+	}
+	tagsByID, err := s.loadTagsBatch(ctx, s.db, ids)
+	if err != nil {
+		return err
+	}
+	linksByID, err := s.loadLinksBatch(ctx, s.db, ids)
+	if err != nil {
+		return err
+	}
+	for i := range all {
+		all[i].Tags = tagsByID[all[i].Id]
+		all[i].Links = linksByID[all[i].Id]
+	}
+	return nil
+}
+
 func (s *sqliteStore) loadTags(ctx context.Context, id string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT tag FROM tags WHERE memory_id = ? ORDER BY tag`, id)
 	if err != nil {
@@ -1272,21 +1335,8 @@ func (s *sqliteStore) Neighbors(ctx context.Context, id string) ([]memory.Memory
 		return nil, fmt.Errorf("чтение соседей %q: %w", id, err)
 	}
 
-	ids := make([]string, len(neighbors))
-	for i, m := range neighbors {
-		ids[i] = m.Id
-	}
-	tagsByID, err := s.loadTagsBatch(ctx, s.db, ids)
-	if err != nil {
+	if err := s.attachTagsAndLinks(ctx, neighbors); err != nil {
 		return nil, err
-	}
-	linksByID, err := s.loadLinksBatch(ctx, s.db, ids)
-	if err != nil {
-		return nil, err
-	}
-	for i := range neighbors {
-		neighbors[i].Tags = tagsByID[neighbors[i].Id]
-		neighbors[i].Links = linksByID[neighbors[i].Id]
 	}
 	return neighbors, nil
 }

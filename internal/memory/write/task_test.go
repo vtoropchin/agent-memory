@@ -404,3 +404,224 @@ func TestUpdateStatusValidation(t *testing.T) {
 		t.Errorf("status у semantic: err = %v, want ErrStatusNotApplicable", err)
 	}
 }
+
+// --- блокировка задач задачами (задача 15.4) ---
+
+// saveBlocker заводит живую задачу-блокер в статусе todo.
+func saveBlocker(t *testing.T, w *Writer, title string) string {
+	t.Helper()
+	id, _, err := w.Save(context.Background(), taskInput("Текст блокера "+title, title))
+	if err != nil {
+		t.Fatalf("Save(блокер %s): %v", title, err)
+	}
+	return id
+}
+
+func blockedBy(ids ...string) []LinkInput {
+	out := make([]LinkInput, len(ids))
+	for i, id := range ids {
+		out[i] = LinkInput{Dst: id, Rel: memory.RelBlockedBy}
+	}
+	return out
+}
+
+// TestSaveBlockedTaskPostState: Save со статусом doing и живым блокером —
+// ErrTaskBlocked с перечнем блокеров, запись не создаётся; тот же вход со
+// статусом todo/backlog — ок.
+func TestSaveBlockedTaskPostState(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+	blocker := saveBlocker(t, w, "Решить вопрос со схемой")
+
+	in := taskInput("Зависимая задача", "Зависимая")
+	in.Status = string(memory.StatusDoing)
+	in.Links = blockedBy(blocker)
+	_, _, err := w.Save(ctx, in)
+	if !errors.Is(err, ErrTaskBlocked) {
+		t.Fatalf("Save(doing + blocked_by живой) err = %v, want ErrTaskBlocked", err)
+	}
+	var tbe *TaskBlockedError
+	if !errors.As(err, &tbe) || len(tbe.Blockers) != 1 || tbe.Blockers[0].Id != blocker {
+		t.Errorf("ошибка должна нести перечень блокеров [%s]: %+v", blocker, tbe)
+	}
+	if !strings.Contains(err.Error(), "Решить вопрос со схемой ("+blocker+")") {
+		t.Errorf("текст ошибки должен называть блокер заголовком и id: %v", err)
+	}
+	if n, err := st.SearchLexical(ctx, memory.Query{Text: "Зависимая", Scope: "project:tasks", Kinds: []string{"task"}}); err != nil || len(n) != 0 {
+		t.Errorf("заблокированная задача в doing не должна быть сохранена: %+v, %v", n, err)
+	}
+
+	for _, status := range []memory.Status{memory.StatusTodo, memory.StatusBacklog} {
+		in.Status = string(status)
+		id, _, err := w.Save(ctx, in)
+		if err != nil {
+			t.Fatalf("Save(%s + blocked_by) должен проходить: %v", status, err)
+		}
+		m, err := st.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got := memory.BlockerIDs(m); len(got) != 1 || got[0] != blocker {
+			t.Errorf("BlockerIDs = %v, want [%s]", got, blocker)
+		}
+	}
+}
+
+// TestUpdateBlockedTaskLifecycle: заблокированную задачу нельзя перевести в
+// doing; после done блокера — можно; после Unlinks — тоже; Update, который в
+// одном вызове добавляет blocked_by и ставит doing, — ошибка (пост-состояние).
+func TestUpdateBlockedTaskLifecycle(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+	doing, done := string(memory.StatusDoing), string(memory.StatusDone)
+
+	blocker := saveBlocker(t, w, "Блокер")
+	in := taskInput("Зависимая задача", "Зависимая")
+	in.Links = blockedBy(blocker)
+	task, _, err := w.Save(ctx, in)
+	if err != nil {
+		t.Fatalf("Save(todo + blocked_by): %v", err)
+	}
+
+	if err := w.Update(ctx, UpdateInput{Id: task, Status: &doing}); !errors.Is(err, ErrTaskBlocked) {
+		t.Fatalf("Update(doing) при живом блокере err = %v, want ErrTaskBlocked", err)
+	}
+	if m, _ := st.Get(ctx, task); m.Status != memory.StatusTodo {
+		t.Errorf("после отказа статус должен остаться todo, got %s", m.Status)
+	}
+	// Правка других полей заблокированной задачи в todo — не ограничена.
+	imp := 5
+	if err := w.Update(ctx, UpdateInput{Id: task, Importance: &imp}); err != nil {
+		t.Fatalf("Update(importance) заблокированной todo-задачи: %v", err)
+	}
+
+	if err := w.Update(ctx, UpdateInput{Id: blocker, Status: &done}); err != nil {
+		t.Fatalf("Update(блокер done): %v", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: task, Status: &doing}); err != nil {
+		t.Fatalf("Update(doing) после done блокера: %v", err)
+	}
+
+	// Новый живой блокер + doing в одном вызове — пост-состояние, ошибка;
+	// связь и статус не применяются.
+	second := saveBlocker(t, w, "Второй блокер")
+	todo := string(memory.StatusTodo)
+	if err := w.Update(ctx, UpdateInput{Id: task, Status: &todo}); err != nil {
+		t.Fatalf("Update(todo): %v", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: task, Status: &doing, Links: blockedBy(second)}); !errors.Is(err, ErrTaskBlocked) {
+		t.Fatalf("Update(doing + links blocked_by) err = %v, want ErrTaskBlocked", err)
+	}
+	m, _ := st.Get(ctx, task)
+	if m.Status != memory.StatusTodo || len(memory.BlockerIDs(m)) != 1 {
+		t.Errorf("отказанный Update не должен применяться частично: status=%s blockers=%v", m.Status, memory.BlockerIDs(m))
+	}
+
+	// Добавили блокер в todo, затем сняли его через Unlinks — doing проходит.
+	if err := w.Update(ctx, UpdateInput{Id: task, Links: blockedBy(second)}); err != nil {
+		t.Fatalf("Update(links blocked_by в todo): %v", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: task, Status: &doing}); !errors.Is(err, ErrTaskBlocked) {
+		t.Fatalf("Update(doing) при втором блокере err = %v, want ErrTaskBlocked", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: task, Unlinks: blockedBy(second)}); err != nil {
+		t.Fatalf("Update(unlinks): %v", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: task, Status: &doing}); err != nil {
+		t.Fatalf("Update(doing) после unlinks: %v", err)
+	}
+	// Тумстоун блокера тоже снимает блокировку.
+	third := saveBlocker(t, w, "Третий блокер")
+	if err := w.Update(ctx, UpdateInput{Id: task, Status: &todo, Links: blockedBy(third)}); err != nil {
+		t.Fatalf("Update(todo + третий блокер): %v", err)
+	}
+	if err := w.Forget(ctx, third, ""); err != nil {
+		t.Fatalf("Forget(третий): %v", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: task, Status: &doing}); err != nil {
+		t.Fatalf("Update(doing) после тумстоуна блокера: %v", err)
+	}
+}
+
+// TestBlockerMustBeTask: blocked_by на запись kind != task — ErrBlockerNotTask
+// и в Save, и в Update.
+func TestBlockerMustBeTask(t *testing.T) {
+	ctx := context.Background()
+	w, _ := newTestWriter(t)
+	fact, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "project:tasks", Content: "Просто факт"})
+	if err != nil {
+		t.Fatalf("Save(факт): %v", err)
+	}
+	in := taskInput("Задача", "Задача")
+	in.Links = blockedBy(fact)
+	if _, _, err := w.Save(ctx, in); !errors.Is(err, ErrBlockerNotTask) {
+		t.Errorf("Save(blocked_by факт) err = %v, want ErrBlockerNotTask", err)
+	}
+	task, _, err := w.Save(ctx, taskInput("Задача", "Задача"))
+	if err != nil {
+		t.Fatalf("Save(задача): %v", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: task, Links: blockedBy(fact)}); !errors.Is(err, ErrBlockerNotTask) {
+		t.Errorf("Update(blocked_by факт) err = %v, want ErrBlockerNotTask", err)
+	}
+	// Прочие rel на факт по-прежнему допустимы.
+	if err := w.Update(ctx, UpdateInput{Id: task, Links: []LinkInput{{Dst: fact, Rel: memory.RelRelated}}}); err != nil {
+		t.Errorf("Update(related на факт): %v", err)
+	}
+	// И наоборот: заблокированной может быть только задача — blocked_by у факта
+	// отвергается (ErrTaskFieldNotApplicable) и в Save, и в Update.
+	if _, _, err := w.Save(ctx, SaveInput{Kind: memory.KindSemantic, Scope: "project:tasks", Content: "Другой факт", Links: blockedBy(task)}); !errors.Is(err, ErrTaskFieldNotApplicable) {
+		t.Errorf("Save(факт с blocked_by) err = %v, want ErrTaskFieldNotApplicable", err)
+	}
+	if err := w.Update(ctx, UpdateInput{Id: fact, Links: blockedBy(task)}); !errors.Is(err, ErrTaskFieldNotApplicable) {
+		t.Errorf("Update(факт с blocked_by) err = %v, want ErrTaskFieldNotApplicable", err)
+	}
+}
+
+// TestUpdateUnlinksRemovesExactPair: Unlinks снимает ровно указанную пару
+// (Dst, Rel); чужие рёбра — на ту же цель с другим rel и на другие цели —
+// целы; пустой Rel трактуется как related; отсутствующая пара не ошибка.
+func TestUpdateUnlinksRemovesExactPair(t *testing.T) {
+	ctx := context.Background()
+	w, st := newTestWriter(t)
+	a := saveBlocker(t, w, "A")
+	b := saveBlocker(t, w, "B")
+	in := taskInput("Задача", "Задача")
+	in.Links = []LinkInput{{Dst: a, Rel: memory.RelBlockedBy}, {Dst: a, Rel: memory.RelRelated}, {Dst: b, Rel: memory.RelPartOf}}
+	task, _, err := w.Save(ctx, in)
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if err := w.Update(ctx, UpdateInput{Id: task, Unlinks: []LinkInput{{Dst: a, Rel: memory.RelBlockedBy}, {Dst: "нет-такого"}}}); err != nil {
+		t.Fatalf("Update(unlinks): %v", err)
+	}
+	m, _ := st.Get(ctx, task)
+	want := []memory.Link{{Dst: a, Rel: memory.RelRelated}, {Dst: b, Rel: memory.RelPartOf}}
+	if len(m.Links) != 2 {
+		t.Fatalf("Links = %+v, want %+v", m.Links, want)
+	}
+	for _, l := range m.Links {
+		if l != want[0] && l != want[1] {
+			t.Errorf("лишнее/пропавшее ребро: Links = %+v, want %+v", m.Links, want)
+		}
+	}
+
+	// Пустой Rel = related.
+	if err := w.Update(ctx, UpdateInput{Id: task, Unlinks: []LinkInput{{Dst: a}}}); err != nil {
+		t.Fatalf("Update(unlinks related): %v", err)
+	}
+	m, _ = st.Get(ctx, task)
+	if len(m.Links) != 1 || m.Links[0].Dst != b {
+		t.Errorf("после unlinks related на a должно остаться только part_of b: %+v", m.Links)
+	}
+
+	// Замена ребра одним вызовом: Links применяются раньше Unlinks.
+	if err := w.Update(ctx, UpdateInput{Id: task, Links: []LinkInput{{Dst: a, Rel: memory.RelPartOf}}, Unlinks: []LinkInput{{Dst: b, Rel: memory.RelPartOf}}}); err != nil {
+		t.Fatalf("Update(links+unlinks): %v", err)
+	}
+	m, _ = st.Get(ctx, task)
+	if len(m.Links) != 1 || m.Links[0].Dst != a || m.Links[0].Rel != memory.RelPartOf {
+		t.Errorf("замена ребра: Links = %+v, want [{%s part_of}]", m.Links, a)
+	}
+}

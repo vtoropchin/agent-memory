@@ -58,7 +58,7 @@ const (
 // linkRelValues — допустимые значения rel во входном links (DESIGN.md §4: типы
 // рёбер графа связей). Используются и для валидации (normalizeLinks), и для
 // текста ошибки/описания схемы — одно перечисление, не расходится.
-var linkRelValues = []string{memory.RelRelated, memory.RelSupersedes, memory.RelCauses, memory.RelPartOf}
+var linkRelValues = []string{memory.RelRelated, memory.RelSupersedes, memory.RelCauses, memory.RelPartOf, memory.RelBlockedBy}
 
 // ttlDescription — общее описание поля ttl для memory_save/memory_update
 // (DESIGN.md §4, §11, §12, задача 9.4): Go-длительность от текущего момента, а
@@ -71,7 +71,11 @@ const ttlDescription = "явный срок жизни факта: Go-длите
 // обоих инструментов). Обратная совместимость обязательна — элемент массива либо
 // ULID-строка (id существующей записи, тип связи будет related), либо объект
 // {"id":"...", "rel":"..."} с явным типом связи.
-const linksDescription = "связи с уже существующими записями графа памяти. Элемент — либо строка-id (ULID), либо объект {\"id\":\"01J...\",\"rel\":\"causes\"}. Типы связи (rel): related — просто связано (по умолчанию, в т.ч. для строковой формы); supersedes — эта запись новая версия целевой (ТОЛЬКО ребро графа, не заменяет фактическое устаревание — для него используй memory_update+memory_forget); causes — эта запись следствие целевой; part_of — эта запись часть процедуры/темы целевой. Пример: [\"01J8Z...\", {\"id\":\"01J8Z...\",\"rel\":\"causes\"}]."
+const linksDescription = "связи с уже существующими записями графа памяти. Элемент — либо строка-id (ULID), либо объект {\"id\":\"01J...\",\"rel\":\"causes\"}. Типы связи (rel): related — просто связано (по умолчанию, в т.ч. для строковой формы); supersedes — эта запись новая версия целевой (ТОЛЬКО ребро графа, не заменяет фактическое устаревание — для него используй memory_update+memory_forget); causes — эта запись следствие целевой; part_of — эта запись часть процедуры/темы целевой (для задач: дочерняя part_of родительской); blocked_by — ЭТА задача заблокирована целевой задачей (только kind=task с обеих сторон; заблокированную нельзя перевести дальше todo, пока блокер жив и не done — блокировка снимается сама по done/отмене блокера, вручную — unlinks в memory_update). Пример: [\"01J8Z...\", {\"id\":\"01J8Z...\",\"rel\":\"causes\"}]."
+
+// unlinksDescription — описание поля unlinks memory_update (задача 15.4):
+// симметрия аддитивным links, единственный способ снять ребро.
+const unlinksDescription = "связи к удалению: пары id+rel в том же формате, что links (строка-id = rel related). links только добавляют рёбра, поэтому снять связь — в т.ч. вручную снять блокировку blocked_by — можно только здесь; отсутствующая пара молча пропускается. Пример: [{\"id\":\"01J8Z...\",\"rel\":\"blocked_by\"}]."
 
 // linkEntry — один элемент входного links (DESIGN.md §4, §7, §12; задача 9.3):
 // либо ULID-строка цели (back-compat, Rel остаётся пустым — дефолт в related
@@ -140,7 +144,7 @@ func linkItemSchema() *jsonschema.Schema {
 				Type: "object",
 				Properties: map[string]*jsonschema.Schema{
 					"id":  {Type: "string", Description: "id (ULID) целевой записи"},
-					"rel": {Type: "string", Description: "тип связи: related | supersedes | causes | part_of (см. описание поля links)"},
+					"rel": {Type: "string", Description: "тип связи: related | supersedes | causes | part_of | blocked_by (см. описание поля links)"},
 				},
 				Required: []string{"id"},
 			},
@@ -243,6 +247,10 @@ type updateInput struct {
 	Workflow *string     `json:"workflow,omitempty" jsonschema:"новый процесс задачи (см. описание поля)"`
 	Tags     []string    `json:"tags,omitempty" jsonschema:"новый полный набор тегов — полностью заменяет старый"`
 	Links    []linkEntry `json:"links,omitempty"` // ДОБАВЛЯЮТСЯ к текущим links записи (не заменяют, в отличие от Tags — см. write.UpdateInput.Links)
+	// Unlinks — связи к удалению, пары id+rel (задача 15.4): единственный
+	// способ снять ребро, в т.ч. блокировку blocked_by вручную
+	// (write.UpdateInput.Unlinks). Тот же формат элемента, что у links.
+	Unlinks []linkEntry `json:"unlinks,omitempty"`
 	// TTL — указатель, а не string: отличает "не менять срок" (nil, поле не
 	// передано) от "снять срок" (пустая строка или "0", write.UpdateInput.TTL).
 	TTL *string `json:"ttl,omitempty"`
@@ -258,6 +266,7 @@ func updateInputSchema() *jsonschema.Schema {
 	s.Properties["workflow"].Description = workflowDescription + " Пустая строка — очистить."
 	linksSchema := &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: linksDescription + " В отличие от tags, links ДОБАВЛЯЕТСЯ к уже существующим связям записи, а не заменяет их."}
 	s.Properties["links"] = linksSchema
+	s.Properties["unlinks"] = &jsonschema.Schema{Type: "array", Items: linkItemSchema(), Description: unlinksDescription}
 	s.Properties["ttl"].Description = ttlDescription + " Чтобы продлить или установить срок, передай длительность; чтобы снять срок (сделать запись вечной), передай \"0\"; не указано — текущий срок не меняется."
 	return s
 }

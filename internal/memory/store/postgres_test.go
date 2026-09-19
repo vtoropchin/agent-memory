@@ -2056,3 +2056,9 @@ func TestSearchLexicalTSQuerySpecialCharsPostgres(t *testing.T) {
 		}
 	})
 }
+
+// TestParityGetMany — паритет GetMany (задача 15.4), сценарий — parityGetMany
+// (getmany_test.go).
+func TestParityGetMany(t *testing.T) {
+	runParity(t, "GetMany", parityGetMany)
+}
