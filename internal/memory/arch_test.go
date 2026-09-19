@@ -40,6 +40,9 @@ var allowedExternal = map[string]bool{
 // нужно опустить, иначе она перестанет что-либо защищать).
 var baseline = map[string]int{
 	"agentmemory/internal/memory": 0, // сущности: только стандартная библиотека
+	// board объявляет свой порт Source и не импортирует store — 0, а не линия 5
+	// с драйверами БД; тест обязан упасть, если board когда-нибудь импортирует store.
+	"agentmemory/internal/memory/board": 0,
 	// sqlite-vec, pgx, snowball, go-sqlite3 — через store; toml — через config,
 	// причём recall импортирует config напрямую (config.RecallConfig в подписи New).
 	"agentmemory/internal/memory/write":  5,

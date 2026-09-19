@@ -70,26 +70,36 @@ func Progress(children []Memory) (done, total int) {
 // затем по UpdatedAt по убыванию (свежее выше), затем по Id (детерминизм при
 // полном равенстве). Порядок списков детей в memory_get и в карточке
 // web-морды — один и тот же, поэтому правило живёт здесь, а не в каждом
-// адаптере; доска (пакет board) переиспользует его же. Сортировка на месте,
-// стабильная.
+// адаптере; доска (пакет board) сортирует карточки колонки тем же LessByStage.
+// Сортировка на месте, стабильная.
 func SortByStage(tasks []Memory) {
+	sort.SliceStable(tasks, func(i, j int) bool { return LessByStage(tasks[i], tasks[j]) })
+}
+
+// stageRank — позиция стадии в Statuses (порядок колонок доски).
+var stageRank = func() map[Status]int {
 	rank := make(map[Status]int, len(Statuses))
 	for i, st := range Statuses {
 		rank[st] = i
 	}
-	sort.SliceStable(tasks, func(i, j int) bool {
-		ri, rj := rank[tasks[i].Status], rank[tasks[j].Status]
-		if ri != rj {
-			return ri < rj
-		}
-		if tasks[i].Importance != tasks[j].Importance {
-			return tasks[i].Importance > tasks[j].Importance
-		}
-		if tasks[i].UpdatedAt != tasks[j].UpdatedAt {
-			return tasks[i].UpdatedAt > tasks[j].UpdatedAt
-		}
-		return tasks[i].Id < tasks[j].Id
-	})
+	return rank
+}()
+
+// LessByStage — правило порядка SortByStage как компаратор: стадия по
+// Statuses, затем Importance ↓, UpdatedAt ↓, Id ↑. Экспортирован для
+// потребителей, у которых задачи завёрнуты в свои структуры (карточки доски),
+// чтобы правило существовало один раз.
+func LessByStage(a, b Memory) bool {
+	if ra, rb := stageRank[a.Status], stageRank[b.Status]; ra != rb {
+		return ra < rb
+	}
+	if a.Importance != b.Importance {
+		return a.Importance > b.Importance
+	}
+	if a.UpdatedAt != b.UpdatedAt {
+		return a.UpdatedAt > b.UpdatedAt
+	}
+	return a.Id < b.Id
 }
 
 // Блокировка задач задачами (DESIGN.md §14 Этап 15, задача 15.4). Те же

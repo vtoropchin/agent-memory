@@ -68,6 +68,14 @@ type Store interface {
 	// write грузит блокеров одной задачи, recall — блокеров всех задач брифа,
 	// доска (board) — кросс-scope блокеров, не попавших в ListTasks.
 	GetMany(ctx context.Context, ids []string) ([]memory.Memory, error)
+	// ListTasks возвращает все живые задачи (kind = task, superseded_by IS
+	// NULL) в scopes (пусто — во всех scope), с Tags и Links (батчами), без
+	// пагинации, отсортированные по updated_at DESC — источник kanban-доски
+	// (internal/memory/board, Этап 15, задача 15.5). Специализированный read по
+	// образцу ListEpisodicForDecay: List с его страницами и без Links под доску
+	// не растягивается флагами. Стадия не фильтруется (done возвращается) —
+	// усечение колонки done и правило блокировки — забота board.
+	ListTasks(ctx context.Context, scopes []string) ([]memory.Memory, error)
 	SearchLexical(ctx context.Context, q memory.Query) ([]memory.Candidate, error)
 	SearchVector(ctx context.Context, vec []float32, q memory.Query) ([]memory.Candidate, error) // no-op пока нет Embedder
 	// Neighbors возвращает живые записи, связанные с id рёбрами links в любом

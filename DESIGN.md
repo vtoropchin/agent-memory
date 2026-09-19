@@ -286,6 +286,7 @@ type Store interface {
     Put(ctx context.Context, m Memory) error
     Get(ctx context.Context, id string) (Memory, error)
     GetMany(ctx context.Context, ids []string) ([]Memory, error)                   // по списку id, с Tags/Links батчем; тумстоуны включены, отсутствующие пропущены (Этап 15)
+    ListTasks(ctx context.Context, scopes []string) ([]Memory, error)              // все живые задачи scopes с Tags/Links, updated_at DESC — источник доски (Этап 15)
     SearchLexical(ctx context.Context, q Query) ([]Candidate, error)
     SearchVector(ctx context.Context, vec []float32, q Query) ([]Candidate, error) // no-op пока нет Embedder
     Neighbors(ctx context.Context, id string) ([]Memory, error)                    // граф-обход; Tags и Links соседей загружены (Этап 15)
@@ -614,6 +615,27 @@ Embedder гибрид молча деградирует до FTS5 (HTTP 200, `ve
 вызовов Embedder/ollama; там же (задача 10.2) — интерактивные звёзды importance и редактируемые
 чипы tags поверх PATCH. Статический фронтенд отдаётся из `embed.FS` (`cmd/memo/web/`), сам
 интерфейс — задачи 6.3/6.4/10.1/10.2.
+
+**Доска (Этап 15, задача 15.5).** `GET /api/board?scope=…(повторяемый)&type=…(повторяемый)&parent=…&branch=…&workflow=…&tag=…&doneLimit=N`
+— тонкая доставка варианта использования `board.Build` (пакет
+`internal/memory/board`, §14 Этап 15): ответ `{columns:[{status, total,
+cards:[{id, summary, type, status, importance, tags, branch, workflow, updatedAt,
+blocked, blockedBy:[{id, summary, status, type}], parent:{id, summary, status,
+type}|null, progress:{done, total}|null}]}]}` — всегда семь колонок в порядке
+`memory.Statuses`, карточки без `content` (запись целиком — `GET /api/memories/
+{id}`), `total` у `done` — до усечения `doneLimit` (дефолт 30; «показать ещё»
+— повторный запрос с бо́льшим `doneLimit`), неизвестный `type`/невалидный
+`doneLimit` → 400. Карточка записи `GET /api/memories/{id}` через тот же
+`board.Describe` отдаёт `parent`/`children`/`progress` (живой родитель;
+тумстоун опускается) и `blockedBy`/`blocks`. Расширенный `PATCH /api/memories/
+{id}`: помимо `importance`/`tags` принимает `status`, `type`, `branch`,
+`workflow`, `links:[{id, rel}]` (аддитивно) и `unlinks:[{id, rel}]` — 1:1 в
+`write.UpdateInput`; `rel` проверяется по `memory.LinkRels` на границе; ошибки
+домена маппятся `errors.Is`: `write.ErrTaskBlocked` → 409 с телом `{error,
+blockers:[{id, summary, status, type}]}`, `ErrUnknownStatus`/`ErrUnknownTaskType`/
+`ErrStatusNotApplicable`/`ErrTaskFieldNotApplicable`/`ErrBlockerNotTask` → 400,
+тумстоун → 409, как прежде. Пикер блокера/родителя на фронте — существующий
+`GET /api/search?q=…&mode=lexical&kind=task`, отдельного эндпоинта нет.
 
 **Суженный инвариант оффлайновости (задача 10.1).** До этой задачи морда была строгим
 read-only-читателем: ни одного вызова Embedder/Reasoner. `/api/search?mode=semantic` вводит

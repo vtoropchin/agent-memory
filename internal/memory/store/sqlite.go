@@ -744,6 +744,42 @@ func (s *sqliteStore) GetMany(ctx context.Context, ids []string) ([]memory.Memor
 	return all, nil
 }
 
+// ListTasks возвращает все живые задачи scopes с Tags/Links батчем, по
+// updated_at DESC (см. Store.ListTasks). scopes пуст — все scope.
+func (s *sqliteStore) ListTasks(ctx context.Context, scopes []string) ([]memory.Memory, error) {
+	where := "m.kind = ? AND m.superseded_by IS NULL"
+	args := []any{string(memory.KindTask)}
+	if clause, scopeArgs := scopePredicate(scopes, ""); clause != "" {
+		where += " AND " + clause
+		args = append(args, scopeArgs...)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+memoryColumns+`
+		FROM memories m WHERE `+where+`
+		ORDER BY m.updated_at DESC, m.id
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("выборка задач: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []memory.Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("сканирование задачи: %w", err)
+		}
+		tasks = append(tasks, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("выборка задач: %w", err)
+	}
+	if err := s.attachTagsAndLinks(ctx, tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
 // attachTagsAndLinks достраивает Tags и Links для all батчем (loadTagsBatch +
 // loadLinksBatch, один запрос на весь срез каждая) — общий хвост Neighbors,
 // GetMany и ListTasks; аналог pgStore.loadTagsAndLinksBatch.

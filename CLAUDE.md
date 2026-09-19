@@ -27,7 +27,9 @@
 - Сущности: `internal/memory` (`types.go`) — только стандартная библиотека, ноль внешних зависимостей.
 - Варианты использования: `internal/memory/write` (ingest, дедуп, связывание), `internal/memory/recall`
   (гибридный поиск RRF + ранжирование + сборка брифа), `internal/memory/maint`
-  (decay, consolidate, reindex, dedup-sweep, планировщик).
+  (decay, consolidate, reindex, dedup-sweep, планировщик), `internal/memory/board`
+  (kanban-доска: `Build`, карточка задачи `Describe`; свои порты `Source`/`DetailSource`,
+  `store` не импортирует — единственный пакет вариантов использования с нулём нарушений).
 - Порты объявлены в `store`, `embed`, `reason`; там же лежат реализации — см. «Известное нарушение».
 - Адаптеры: `store/sqlite.go`, `store/postgres*.go`, `embed/ollama.go`, `embed/openai.go`,
   `reason/deepseek.go`, `internal/mcp` (регистрация tools и JSON-схемы), `cmd/memo/web.go`.
@@ -49,7 +51,7 @@
   форматирование — `gofmt`.
 - Правило зависимостей: `CGO_ENABLED=1 go test -tags sqlite_fts5 -run TestDependencyRule ./internal/memory/`
   (`internal/memory/arch_test.go`, входит в обычный `make test`). Базовая линия нарушений: **5** для каждого
-  из `write`, `recall`, `maint`; **0** для `internal/memory`. Тест падает и при росте, и при снижении —
+  из `write`, `recall`, `maint`; **0** для `internal/memory` и `internal/memory/board`. Тест падает и при росте, и при снижении —
   снижение требует опустить линию в `baseline`.
 - Тесты ядра идут без сети и внешних сервисов (SQLite во временных файлах); прогон
   `./internal/memory/...` — около 2,5 с, это и есть целевое время.

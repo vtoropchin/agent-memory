@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -44,6 +45,7 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/board"
 	memembed "agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/recall"
@@ -171,6 +173,7 @@ func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder
 	mux.HandleFunc("PATCH /api/memories/{id}", handlePatchMemory(s, w))
 	mux.HandleFunc("DELETE /api/memories/{id}", handleForgetMemory(s, w))
 	mux.HandleFunc("GET /api/search", handleSearch(s, rc, embedder))
+	mux.HandleFunc("GET /api/board", handleBoard(s))
 	// Catch-all для неизвестных /api/*-путей: без него они проваливаются в
 	// файловый хендлер на "/" и отдают plain-text 404 вместо JSON-ошибки.
 	// Менее специфичен, чем method-aware паттерны выше, поэтому известные
@@ -214,14 +217,12 @@ type memoryDTO struct {
 	// без срока (Memory.ExpiresAt). Read-only показ в карточке — правка TTL из
 	// web-морды вне этой версии (см. DESIGN.md §12: read + курирование метаданных).
 	ExpiresAt int64 `json:"expiresAt"`
-	// Status — состояние задачи (kind=task, задача 14.1): пусто у записей
-	// прочих типов. Read-only, как и ExpiresAt: смена статуса — работа агента
-	// через MCP, web-морда остаётся чтением + курированием метаданных
-	// (importance/tags, DESIGN.md §12).
+	// Status — стадия задачи (kind=task): пусто у записей прочих типов. С
+	// Этапа 15 правится PATCH (доска) — рабочие метаданные задачи, не
+	// содержание (DESIGN.md §12).
 	Status string `json:"status"`
 	// Type/Branch/Workflow — тип задачи (epic|story|task), git-ветка и процесс
-	// (kind=task, Этап 15): пусты у прочих типов. Read-only в этой версии —
-	// правка из web-морды (доска, PATCH) — задача 15.5.
+	// (kind=task, Этап 15): пусты у прочих типов; правятся PATCH.
 	Type     string    `json:"type"`
 	Branch   string    `json:"branch"`
 	Workflow string    `json:"workflow"`
@@ -396,11 +397,11 @@ type progressDTO struct {
 }
 
 // memoryCardResponse — тело ответа GET /api/memories/{id}. Parent/Children/
-// Progress — иерархия задачи (kind=task, DESIGN.md §14 Этап 15, задача 15.3):
-// родитель по первому ребру part_of (memory.ParentOf), дети — задачи с ребром
-// part_of на эту запись (memory.ChildrenOf поверх тех же Neighbors), в порядке
-// доски (memory.SortByStage). У записей прочих kind parent/progress — null,
-// children — пустой массив. Read-only: смена родителя — доска (15.5/15.6).
+// Progress — иерархия задачи (kind=task, DESIGN.md §14 Этап 15, задача 15.3),
+// BlockedBy/Blocks — блокировка (задача 15.4): живые блокеры и задачи, которые
+// эта запись блокирует. Всё — board.Describe (задача 15.5: одна политика на
+// mcp и web), здесь только DTO. У записей прочих kind parent/progress — null,
+// массивы — пустые.
 type memoryCardResponse struct {
 	Memory            memoryDTO             `json:"memory"`
 	Neighbors         []memoryDTO           `json:"neighbors"`
@@ -409,39 +410,28 @@ type memoryCardResponse struct {
 	Parent            *taskRefDTO           `json:"parent"`
 	Children          []taskRefDTO          `json:"children"`
 	Progress          *progressDTO          `json:"progress"`
+	BlockedBy         []taskRefDTO          `json:"blockedBy"`
+	Blocks            []taskRefDTO          `json:"blocks"`
 }
 
-func toTaskRef(m memory.Memory) taskRefDTO {
-	return taskRefDTO{Id: m.Id, Summary: m.Summary, Status: string(m.Status), Type: string(m.Type)}
+// toTaskRef конвертирует board.Ref в DTO; пустой Summary — null (у задачи
+// заголовок обязателен, пусто означает «запись недоступна, известен id»).
+func toTaskRef(r board.Ref) taskRefDTO {
+	dto := taskRefDTO{Id: r.ID, Status: string(r.Status), Type: string(r.Type)}
+	if r.Summary != "" {
+		summary := r.Summary
+		dto.Summary = &summary
+	}
+	return dto
 }
 
-// taskHierarchy собирает родителя, детей и прогресс задачи m из её Links и уже
-// загруженных соседей (Store.Neighbors отдаёт их с Links). Для не-задач —
-// (nil, [], nil): их part_of — тематическая связь, не иерархия. Родитель,
-// удалённый физически (висячее ребро), опускается; прочие ошибки Get — наружу.
-func taskHierarchy(ctx context.Context, s store.Store, m memory.Memory, neighbors []memory.Memory) (parent *taskRefDTO, children []taskRefDTO, progress *progressDTO, err error) {
-	children = []taskRefDTO{}
-	if m.Kind != memory.KindTask {
-		return nil, children, nil, nil
+// toTaskRefs — массив DTO; nil → пустой массив (фронт ждёт [], не null).
+func toTaskRefs(refs []board.Ref) []taskRefDTO {
+	out := make([]taskRefDTO, len(refs))
+	for i, r := range refs {
+		out[i] = toTaskRef(r)
 	}
-	if parentID, ok := memory.ParentOf(m); ok {
-		p, err := s.Get(ctx, parentID)
-		switch {
-		case err == nil:
-			ref := toTaskRef(p)
-			parent = &ref
-		case errors.Is(err, store.ErrNotFound):
-		default:
-			return nil, nil, nil, fmt.Errorf("родитель %q: %w", parentID, err)
-		}
-	}
-	kids := memory.ChildrenOf(m.Id, neighbors)
-	memory.SortByStage(kids)
-	for _, c := range kids {
-		children = append(children, toTaskRef(c))
-	}
-	done, total := memory.Progress(kids)
-	return parent, children, &progressDTO{Done: done, Total: total}, nil
+	return out
 }
 
 func handleGetMemory(s store.Store) http.HandlerFunc {
@@ -484,10 +474,19 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 			})
 		}
 
-		parent, children, progress, err := taskHierarchy(r.Context(), s, m, neighbors)
+		detail, err := board.Describe(r.Context(), s, m)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, fmt.Errorf("hierarchy %q: %w", id, err))
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("detail %q: %w", id, err))
 			return
+		}
+		var parent *taskRefDTO
+		if detail.Parent != nil {
+			ref := toTaskRef(*detail.Parent)
+			parent = &ref
+		}
+		var progress *progressDTO
+		if detail.Progress != nil {
+			progress = &progressDTO{Done: detail.Progress.Done, Total: detail.Progress.Total}
 		}
 
 		writeJSON(w, http.StatusOK, memoryCardResponse{
@@ -500,8 +499,10 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 			},
 			SemanticNeighbors: semanticNeighbors,
 			Parent:            parent,
-			Children:          children,
+			Children:          toTaskRefs(detail.Children),
 			Progress:          progress,
+			BlockedBy:         toTaskRefs(detail.BlockedBy),
+			Blocks:            toTaskRefs(detail.Blocks),
 		})
 	}
 }
@@ -515,20 +516,91 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 // поля стандартным поведением encoding/json обнуляет указатель — "importance:
 // null"/"tags: null" неотличимы от отсутствия поля, что здесь и требуется
 // (частичный PATCH не должен трогать поле, которое явно обнулили до null).
-// Content/kind/scope/links сюда не входят: DisallowUnknownFields (см.
+// Content/kind/scope/summary сюда не входят: DisallowUnknownFields (см.
 // handlePatchMemory) превращает присутствие лишнего поля в 400 — защита
-// контракта от тихого расширения (правку контента морда не делает никогда).
+// контракта от тихого расширения (содержание фактов морда не правит никогда,
+// DESIGN.md §12). С Этапа 15 (задача 15.5) добавлены рабочие метаданные
+// задачи — Status/Type/Branch/Workflow и связи Links/Unlinks — whitelist-DTO
+// 1:1 в write.UpdateInput, без собственной логики: применимость к kind,
+// перечни значений и правило блокировки проверяет домен, морда только маппит
+// его ошибки в HTTP-статусы (см. patchErrorStatus).
 type patchMemoryRequest struct {
-	Importance *int      `json:"importance"`
-	Tags       *[]string `json:"tags"`
+	Importance *int           `json:"importance"`
+	Tags       *[]string      `json:"tags"`
+	Status     *string        `json:"status"`
+	Type       *string        `json:"type"`
+	Branch     *string        `json:"branch"`
+	Workflow   *string        `json:"workflow"`
+	Links      []patchLinkDTO `json:"links"`   // добавляются (аддитивно, как в MCP)
+	Unlinks    []patchLinkDTO `json:"unlinks"` // снимаются; единственный способ убрать ребро
+}
+
+// patchLinkDTO — элемент links/unlinks PATCH: {id, rel}. Rel обязателен и
+// проверяется по memory.LinkRels на границе входа (как rel в MCP-схеме);
+// дефолта related здесь нет — фронт всегда знает, какое ребро правит.
+type patchLinkDTO struct {
+	ID  string `json:"id"`
+	Rel string `json:"rel"`
 }
 
 // patchMemoryAllowedFields — перечень допустимых полей тела PATCH
 // /api/memories/{id} для текста ошибки 400 на лишнее поле.
-const patchMemoryAllowedFields = "importance, tags"
+const patchMemoryAllowedFields = "importance, tags, status, type, branch, workflow, links, unlinks"
 
-// handlePatchMemory — правка importance/tags живой записи (задача 10.2) через
-// доменный write.Writer.Update (write.UpdateInput{Importance, Tags}): кламп
+// patchLinks валидирует и переводит links/unlinks PATCH в write.LinkInput:
+// пустой id или rel вне memory.LinkRels — ошибка (400 у вызывающего).
+func patchLinks(field string, in []patchLinkDTO) ([]write.LinkInput, error) {
+	if in == nil {
+		return nil, nil
+	}
+	out := make([]write.LinkInput, 0, len(in))
+	for _, l := range in {
+		if strings.TrimSpace(l.ID) == "" {
+			return nil, fmt.Errorf("%s: id обязателен", field)
+		}
+		if !slices.Contains(memory.LinkRels, l.Rel) {
+			return nil, fmt.Errorf("%s: неизвестный rel %q, допустимые значения: %s", field, l.Rel, strings.Join(memory.LinkRels, ", "))
+		}
+		out = append(out, write.LinkInput{Dst: l.ID, Rel: l.Rel})
+	}
+	return out, nil
+}
+
+// blockedResponse — тело 409 на write.ErrTaskBlocked: ошибка плюс перечень
+// живых блокеров, чтобы фронт показал, кого ждёт карточка.
+type blockedResponse struct {
+	Error    string       `json:"error"`
+	Blockers []taskRefDTO `json:"blockers"`
+}
+
+// writePatchError маппит ошибку write.Writer.Update в HTTP (errors.Is, не
+// текст): ErrTaskBlocked → 409 с блокерами; ошибки валидации домена (стадия,
+// тип, применимость к kind, блокер-не-задача) → 400; ErrNotFound → 404;
+// прочее → 500. Никаких доменных проверок здесь нет — только маппинг.
+func writePatchError(rw http.ResponseWriter, id string, err error) {
+	var blocked *write.TaskBlockedError
+	switch {
+	case errors.As(err, &blocked):
+		refs := make([]taskRefDTO, len(blocked.Blockers))
+		for i, b := range blocked.Blockers {
+			refs[i] = taskRefDTO{Id: b.Id, Summary: b.Summary, Status: string(b.Status), Type: string(b.Type)}
+		}
+		writeJSON(rw, http.StatusConflict, blockedResponse{Error: err.Error(), Blockers: refs})
+	case errors.Is(err, write.ErrUnknownStatus), errors.Is(err, write.ErrUnknownTaskType),
+		errors.Is(err, write.ErrStatusNotApplicable), errors.Is(err, write.ErrTaskFieldNotApplicable),
+		errors.Is(err, write.ErrBlockerNotTask), errors.Is(err, write.ErrEmptyContent):
+		writeErr(rw, http.StatusBadRequest, err)
+	case errors.Is(err, store.ErrNotFound):
+		writeErr(rw, http.StatusNotFound, fmt.Errorf("запись %q не найдена", id))
+	default:
+		writeErr(rw, http.StatusInternalServerError, fmt.Errorf("update %q: %w", id, err))
+	}
+}
+
+// handlePatchMemory — правка importance/tags живой записи (задача 10.2) и, с
+// Этапа 15 (задача 15.5), рабочих метаданных задачи (status/type/branch/
+// workflow, links/unlinks — переносы карточек доски, блокировка, родитель)
+// через доменный write.Writer.Update (write.UpdateInput 1:1): кламп
 // importance в 1..5, updated_at, синхронизация FTS5 (триггеры tags_ai/tags_ad
 // на таблице tags, см. sqlite.go) — вся эта логика уже в домене, здесь только
 // разбор входа и HTTP-ответ, ничего не дублируется. accessed_at/access_count
@@ -583,16 +655,31 @@ func handlePatchMemory(s store.Store, w *write.Writer) http.HandlerFunc {
 			return
 		}
 
-		in := write.UpdateInput{Id: id, Importance: body.Importance}
+		links, err := patchLinks("links", body.Links)
+		if err != nil {
+			writeErr(rw, http.StatusBadRequest, err)
+			return
+		}
+		unlinks, err := patchLinks("unlinks", body.Unlinks)
+		if err != nil {
+			writeErr(rw, http.StatusBadRequest, err)
+			return
+		}
+		in := write.UpdateInput{
+			Id:         id,
+			Importance: body.Importance,
+			Status:     body.Status,
+			Type:       body.Type,
+			Branch:     body.Branch,
+			Workflow:   body.Workflow,
+			Links:      links,
+			Unlinks:    unlinks,
+		}
 		if body.Tags != nil {
 			in.Tags = *body.Tags
 		}
 		if err := w.Update(r.Context(), in); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				writeErr(rw, http.StatusNotFound, fmt.Errorf("запись %q не найдена", id))
-				return
-			}
-			writeErr(rw, http.StatusInternalServerError, fmt.Errorf("update %q: %w", id, err))
+			writePatchError(rw, id, err)
 			return
 		}
 
@@ -754,6 +841,126 @@ func handleSearch(s store.Store, rc *recall.Recaller, embedder memembed.Embedder
 
 		writeJSON(w, http.StatusOK, searchResponse{Items: items, Vector: embedder.Dim() > 0})
 	}
+}
+
+// --- доска (задача 15.5) ---
+
+// boardCardDTO — карточка доски GET /api/board: поля задачи без content
+// (карточка записи целиком — GET /api/memories/{id}) плюс вычисленные
+// board.Card свойства. Массивы всегда массивы (не null); parent/progress —
+// null, когда их нет.
+type boardCardDTO struct {
+	Id         string       `json:"id"`
+	Summary    *string      `json:"summary"`
+	Type       string       `json:"type"`
+	Status     string       `json:"status"`
+	Importance int          `json:"importance"`
+	Tags       []string     `json:"tags"`
+	Branch     string       `json:"branch"`
+	Workflow   string       `json:"workflow"`
+	UpdatedAt  int64        `json:"updatedAt"`
+	Blocked    bool         `json:"blocked"`
+	BlockedBy  []taskRefDTO `json:"blockedBy"`
+	Parent     *taskRefDTO  `json:"parent"`
+	Progress   *progressDTO `json:"progress"`
+}
+
+// boardColumnDTO — колонка доски: стадия, общее число карточек под фильтр
+// (у done — до усечения doneLimit) и сами карточки.
+type boardColumnDTO struct {
+	Status string         `json:"status"`
+	Total  int            `json:"total"`
+	Cards  []boardCardDTO `json:"cards"`
+}
+
+// boardResponse — тело GET /api/board: колонки в порядке memory.Statuses.
+type boardResponse struct {
+	Columns []boardColumnDTO `json:"columns"`
+}
+
+func toBoardCard(c board.Card) boardCardDTO {
+	tags := c.Memory.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	dto := boardCardDTO{
+		Id:         c.Memory.Id,
+		Summary:    c.Memory.Summary,
+		Type:       string(c.Memory.Type),
+		Status:     string(c.Memory.Status),
+		Importance: c.Memory.Importance,
+		Tags:       tags,
+		Branch:     c.Memory.Branch,
+		Workflow:   c.Memory.Workflow,
+		UpdatedAt:  c.Memory.UpdatedAt,
+		Blocked:    c.Blocked,
+		BlockedBy:  toTaskRefs(c.BlockedBy),
+	}
+	if c.Parent != nil {
+		ref := toTaskRef(*c.Parent)
+		dto.Parent = &ref
+	}
+	if c.Progress != nil {
+		dto.Progress = &progressDTO{Done: c.Progress.Done, Total: c.Progress.Total}
+	}
+	return dto
+}
+
+// handleBoard — GET /api/board?scope=…(повторяемый)&type=…(повторяемый)&
+// parent=…&branch=…&workflow=…&tag=…&doneLimit=N: тонкая доставка
+// board.Build (store удовлетворяет board.Source структурно). Неизвестный type
+// или невалидный doneLimit → 400; ошибка сборки → 500. Логики доски здесь нет.
+func handleBoard(s store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		var types []memory.TaskType
+		for _, raw := range nonEmpty(q["type"]) {
+			tt := memory.TaskType(raw)
+			if !slices.Contains(memory.TaskTypes, tt) {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("параметр type: неизвестное значение %q (ожидается %s)", raw, joinTaskTypes()))
+				return
+			}
+			types = append(types, tt)
+		}
+		doneLimit, err := parseNonNegativeInt(q.Get("doneLimit"), 0)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("параметр doneLimit: %w", err))
+			return
+		}
+
+		b, err := board.Build(r.Context(), s, board.Filter{
+			Scopes:    nonEmpty(q["scope"]),
+			Types:     types,
+			ParentID:  strings.TrimSpace(q.Get("parent")),
+			Branch:    strings.TrimSpace(q.Get("branch")),
+			Workflow:  strings.TrimSpace(q.Get("workflow")),
+			Tag:       strings.TrimSpace(q.Get("tag")),
+			DoneLimit: doneLimit,
+		})
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		columns := make([]boardColumnDTO, len(b.Columns))
+		for i, col := range b.Columns {
+			cards := make([]boardCardDTO, len(col.Cards))
+			for j, c := range col.Cards {
+				cards[j] = toBoardCard(c)
+			}
+			columns[i] = boardColumnDTO{Status: string(col.Status), Total: col.Total, Cards: cards}
+		}
+		writeJSON(w, http.StatusOK, boardResponse{Columns: columns})
+	}
+}
+
+// joinTaskTypes — перечень memory.TaskTypes для текста ошибки.
+func joinTaskTypes() string {
+	out := make([]string, len(memory.TaskTypes))
+	for i, tt := range memory.TaskTypes {
+		out[i] = string(tt)
+	}
+	return strings.Join(out, ", ")
 }
 
 // --- query-параметры ---

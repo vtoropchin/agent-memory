@@ -58,7 +58,7 @@ const (
 // linkRelValues — допустимые значения rel во входном links (DESIGN.md §4: типы
 // рёбер графа связей). Используются и для валидации (normalizeLinks), и для
 // текста ошибки/описания схемы — одно перечисление, не расходится.
-var linkRelValues = []string{memory.RelRelated, memory.RelSupersedes, memory.RelCauses, memory.RelPartOf, memory.RelBlockedBy}
+var linkRelValues = memory.LinkRels
 
 // ttlDescription — общее описание поля ttl для memory_save/memory_update
 // (DESIGN.md §4, §11, §12, задача 9.4): Go-длительность от текущего момента, а

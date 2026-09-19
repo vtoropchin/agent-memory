@@ -139,19 +139,27 @@ func TestGetChildrenExcludeForgotten(t *testing.T) {
 	}
 }
 
-// parentGoneStore — Store, у которого Get для одного id отвечает ErrNotFound:
-// имитирует висячее ребро part_of. Через сам store такое не создать (FOREIGN KEY
-// на links в обеих схемах), поэтому ветка деградации проверяется подменой порта.
+// parentGoneStore — Store, у которого GetMany не находит один id: имитирует
+// висячее ребро part_of (родитель удалён физически). Через сам store такое не
+// создать (FOREIGN KEY на links в обеих схемах), поэтому ветка деградации
+// проверяется подменой порта.
 type parentGoneStore struct {
 	store.Store
 	gone string
 }
 
-func (s parentGoneStore) Get(ctx context.Context, id string) (memory.Memory, error) {
-	if id == s.gone {
-		return memory.Memory{}, store.ErrNotFound
+func (s parentGoneStore) GetMany(ctx context.Context, ids []string) ([]memory.Memory, error) {
+	all, err := s.Store.GetMany(ctx, ids)
+	if err != nil {
+		return nil, err
 	}
-	return s.Store.Get(ctx, id)
+	kept := all[:0]
+	for _, m := range all {
+		if m.Id != s.gone {
+			kept = append(kept, m)
+		}
+	}
+	return kept, nil
 }
 
 // TestGetDanglingParentSkipped: родитель, которого хранилище не находит, —
@@ -170,5 +178,26 @@ func TestGetDanglingParentSkipped(t *testing.T) {
 	}
 	if out := textOf(res); strings.Contains(out, "Родитель:") {
 		t.Errorf("недоступный родитель не должен давать секцию «Родитель»:\n%s", out)
+	}
+}
+
+// TestGetForgottenParentSkipped: забытый (тумстоун) родитель не показывается —
+// прежний Store.Get тумстоуны не фильтровал (техдолг 15.3, закрыт board.Describe).
+func TestGetForgottenParentSkipped(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+
+	epic := saveTask(t, srv, memory.TaskTypeEpic, "Эпик", "todo", 3)
+	story := saveTask(t, srv, memory.TaskTypeStory, "История", "todo", 3, write.LinkInput{Dst: epic, Rel: memory.RelPartOf})
+	if _, _, err := srv.handleForget(ctx, nil, forgetInput{ID: epic}); err != nil {
+		t.Fatalf("handleForget(эпик): %v", err)
+	}
+
+	res, _, err := srv.handleGet(ctx, nil, getInput{ID: story})
+	if err != nil {
+		t.Fatalf("handleGet: %v", err)
+	}
+	if out := textOf(res); strings.Contains(out, "Родитель:") {
+		t.Errorf("забытый родитель не должен давать секцию «Родитель»:\n%s", out)
 	}
 }

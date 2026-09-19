@@ -117,6 +117,10 @@ const (
 	RelBlockedBy = "blocked_by"
 )
 
+// LinkRels — все допустимые значения Link.Rel. Единственный перечень для
+// валидации на границах входа (MCP-схема, web PATCH), как Statuses и TaskTypes.
+var LinkRels = []string{RelRelated, RelSupersedes, RelCauses, RelPartOf, RelBlockedBy}
+
 // Link — направленное ребро графа памяти: текущая запись -> Dst с отношением Rel.
 type Link struct {
 	Dst string // id записи-цели

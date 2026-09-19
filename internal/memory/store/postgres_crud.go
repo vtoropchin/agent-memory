@@ -163,6 +163,41 @@ func (s *pgStore) GetMany(ctx context.Context, ids []string) ([]memory.Memory, e
 	return all, nil
 }
 
+// ListTasks возвращает все живые задачи scopes с Tags/Links батчем, по
+// updated_at DESC. Паритет со sqliteStore.ListTasks; см. Store.ListTasks.
+func (s *pgStore) ListTasks(ctx context.Context, scopes []string) ([]memory.Memory, error) {
+	a := &argList{}
+	where := "m.kind = " + a.add(string(memory.KindTask)) + " AND m.superseded_by IS NULL"
+	if clause := scopePredicatePG(a, scopes, ""); clause != "" {
+		where += " AND " + clause
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+memoryColumns+`
+		FROM memories m WHERE `+where+`
+		ORDER BY m.updated_at DESC, m.id
+	`, a.args...)
+	if err != nil {
+		return nil, fmt.Errorf("выборка задач: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []memory.Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, fmt.Errorf("сканирование задачи: %w", err)
+		}
+		tasks = append(tasks, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("выборка задач: %w", err)
+	}
+	if err := s.loadTagsAndLinksBatch(ctx, tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
 func (s *pgStore) loadTags(ctx context.Context, id string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT tag FROM tags WHERE memory_id = $1 ORDER BY tag`, id)
 	if err != nil {

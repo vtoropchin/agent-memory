@@ -2062,3 +2062,9 @@ func TestSearchLexicalTSQuerySpecialCharsPostgres(t *testing.T) {
 func TestParityGetMany(t *testing.T) {
 	runParity(t, "GetMany", parityGetMany)
 }
+
+// TestParityListTasks — паритет ListTasks (задача 15.5), сценарий —
+// parityListTasks (listtasks_test.go).
+func TestParityListTasks(t *testing.T) {
+	runParity(t, "ListTasks", parityListTasks)
+}
