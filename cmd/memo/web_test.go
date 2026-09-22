@@ -1079,3 +1079,212 @@ func TestRunWeb_LoadsDotEnvBeforeOpeningStore(t *testing.T) {
 		t.Errorf("%s = %q, хочу \"from-dotenv\" — .env не загружен до открытия хранилища", memoPostgresPasswordEnv, got)
 	}
 }
+
+// postJSON шлёт POST с телом bodyJSON (сырая строка — тест может послать и
+// намеренно битый JSON) и декодирует ответ в out (если не nil).
+func postJSON(t *testing.T, url, bodyJSON string, out any) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(bodyJSON))
+	if err != nil {
+		t.Fatalf("NewRequest POST %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	if out != nil {
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			t.Fatalf("decode JSON от %s: %v", url, err)
+		}
+	}
+	return resp
+}
+
+// newTestWebHandlerWithInstance — handler с заданным webInstance: нужен
+// тестам, которым важен домашний scope инстанса (дефолт scope у POST).
+func newTestWebHandlerWithInstance(s store.Store, inst webInstance) http.Handler {
+	w := write.New(s, embed.NewNoop())
+	rc := recall.New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: testRecallWeights()}, reason.NewNoop(), embed.NewNoop())
+	return newWebHandler(s, w, rc, embed.NewNoop(), inst)
+}
+
+// TestHandleCreateMemory_TaskAppearsOnBoard — успешное создание задачи
+// (Этап 17, задача 17.1): 201 + memoryDTO, поля задачи сохранены, карточка
+// видна в /api/board в колонке своей стадии.
+func TestHandleCreateMemory_TaskAppearsOnBoard(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var created memoryDTO
+	resp := postJSON(t, srv.URL+"/api/memories", `{
+		"kind":"task","scope":"project:agentmemory","type":"story",
+		"summary":"Завести доску","content":"полный текст задачи",
+		"status":"doing","importance":5,"tags":["web","доска"],
+		"branch":"feat/board","workflow":"dev"
+	}`, &created)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("статус = %d, ожидался 201", resp.StatusCode)
+	}
+	if created.Id == "" {
+		t.Fatalf("id пустой: %+v", created)
+	}
+	if created.Kind != string(memory.KindTask) || created.Status != "doing" {
+		t.Fatalf("kind/status не сохранены: %+v", created)
+	}
+	if created.Type != "story" {
+		t.Fatalf("type не сохранён: %+v", created)
+	}
+	if created.Branch != "feat/board" || created.Workflow != "dev" {
+		t.Fatalf("branch/workflow не сохранены: %+v", created)
+	}
+	if created.Importance != 5 || len(created.Tags) != 2 {
+		t.Fatalf("importance/tags не сохранены: %+v", created)
+	}
+
+	var board boardResponse
+	getJSON(t, srv.URL+"/api/board?scope=project:agentmemory", &board)
+	found := false
+	for _, col := range board.Columns {
+		for _, c := range col.Cards {
+			if c.Id == created.Id {
+				if col.Status != "doing" {
+					t.Fatalf("карточка в колонке %q, ожидалась doing", col.Status)
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("созданная задача не видна на доске")
+	}
+}
+
+// TestHandleCreateMemory_NonTaskBadRequest — из браузера создаётся только
+// kind=task: любой другой вид (и пустой kind) — 400, запись не появляется.
+func TestHandleCreateMemory_NonTaskBadRequest(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	for _, kind := range []string{"semantic", "", "debt"} {
+		body := `{"kind":"` + kind + `","scope":"project:agentmemory","summary":"x","content":"y"}`
+		resp := postJSON(t, srv.URL+"/api/memories", body, nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("kind=%q: статус = %d, ожидался 400", kind, resp.StatusCode)
+		}
+	}
+	var list memoriesResponse
+	getJSON(t, srv.URL+"/api/memories", &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("ничего не должно было создаться, а в памяти %d записей", len(list.Items))
+	}
+}
+
+// TestHandleCreateMemory_EmptySummaryBadRequest — заголовок задачи
+// обязателен (write.ErrTaskSummaryRequired) → 400 от домена, не 500.
+func TestHandleCreateMemory_EmptySummaryBadRequest(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	resp := postJSON(t, srv.URL+"/api/memories", `{"kind":"task","scope":"project:agentmemory","summary":"  ","content":"текст"}`, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("статус = %d, ожидался 400", resp.StatusCode)
+	}
+}
+
+// TestHandleCreateMemory_PartOfLinksParent — links с rel=part_of создаёт
+// ребро к родителю (задача внутрь истории); ребро видно в карточке родителя
+// как дочерняя запись.
+func TestHandleCreateMemory_PartOfLinksParent(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var parent memoryDTO
+	postJSON(t, srv.URL+"/api/memories", `{"kind":"task","scope":"project:agentmemory","type":"story","summary":"История","content":"текст"}`, &parent)
+
+	var child memoryDTO
+	resp := postJSON(t, srv.URL+"/api/memories", `{"kind":"task","scope":"project:agentmemory","type":"task","summary":"Задача","content":"текст",
+		"links":[{"id":"`+parent.Id+`","rel":"part_of"}]}`, &child)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("статус = %d, ожидался 201", resp.StatusCode)
+	}
+
+	var card memoryCardResponse
+	getJSON(t, srv.URL+"/api/memories/"+parent.Id, &card)
+	if len(card.Children) != 1 || card.Children[0].Id != child.Id {
+		t.Fatalf("дочерняя задача не привязана к родителю: %+v", card.Children)
+	}
+}
+
+// TestHandleCreateMemory_RejectsNonPartOfLink — при создании допустима
+// единственная связь «входит в»: blocked_by и прочие рёбра ставятся уже на
+// существующей карточке через PATCH.
+func TestHandleCreateMemory_RejectsNonPartOfLink(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	blocker := putTestMemory(t, s, func(m *memory.Memory) { m.Kind = memory.KindTask })
+	resp := postJSON(t, srv.URL+"/api/memories", `{"kind":"task","scope":"project:agentmemory","summary":"x","content":"y",
+		"links":[{"id":"`+blocker.Id+`","rel":"blocked_by"}]}`, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("статус = %d, ожидался 400", resp.StatusCode)
+	}
+}
+
+// TestHandleCreateMemory_EmptyScopeFallsBackToHomeScope — пустой scope берёт
+// домашний scope инстанса (как MCP memory_save), а не падает ErrEmptyScope.
+func TestHandleCreateMemory_EmptyScopeFallsBackToHomeScope(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandlerWithInstance(s, webInstance{HomeScope: "project:home"}))
+	defer srv.Close()
+
+	var created memoryDTO
+	resp := postJSON(t, srv.URL+"/api/memories", `{"kind":"task","summary":"Без scope","content":"текст"}`, &created)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("статус = %d, ожидался 201", resp.StatusCode)
+	}
+	if created.Scope != "project:home" {
+		t.Fatalf("scope = %q, ожидался домашний project:home", created.Scope)
+	}
+}
+
+// TestHandleCreateMemory_EmptyContentUsesSummary — пустое описание не ошибка:
+// карточка заводится заголовком (§2.6 макета), иначе ErrEmptyContent не дал
+// бы создать быструю задачу с доски.
+func TestHandleCreateMemory_EmptyContentUsesSummary(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	var created memoryDTO
+	resp := postJSON(t, srv.URL+"/api/memories", `{"kind":"task","scope":"project:agentmemory","summary":"Только заголовок"}`, &created)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("статус = %d, ожидался 201", resp.StatusCode)
+	}
+	if created.Content != "Только заголовок" {
+		t.Fatalf("content = %q, ожидался заголовок", created.Content)
+	}
+}
+
+// TestHandleCreateMemory_UnknownFieldBadRequest — тело POST закрыто
+// whitelist-ом: лишнее поле → 400 (та же защита контракта, что у PATCH).
+func TestHandleCreateMemory_UnknownFieldBadRequest(t *testing.T) {
+	s := newTestWebStore(t)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	resp := postJSON(t, srv.URL+"/api/memories", `{"kind":"task","summary":"x","content":"y","ttl":"72h"}`, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("статус = %d, ожидался 400", resp.StatusCode)
+	}
+}

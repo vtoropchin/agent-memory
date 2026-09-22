@@ -134,7 +134,11 @@ main.wide{max-width:none}
 input[type=search],input[type=text],select,textarea{background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r);padding:5px 8px;min-height:30px}
 input[type=search]{width:100%}
 textarea{width:100%;resize:vertical}
-select{padding-right:24px}
+select{appearance:none;-webkit-appearance:none;padding-right:26px;
+  /* Safari рисует нативный контрол (степпер) и игнорирует рамку — своя стрелка одинакова везде */
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238A8D87' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 9px center;background-size:9px 6px}
+select::-ms-expand{display:none}
 .seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:var(--r);overflow:hidden}
 .seg button{border:0;background:var(--surface);padding:4px 10px;cursor:pointer;color:var(--ink-2);min-height:28px}
 .seg button+button{border-left:1px solid var(--line-strong)}
@@ -284,8 +288,12 @@ select{padding-right:24px}
 .links .to button{border:0;background:none;padding:0;text-align:left;cursor:pointer;color:var(--ink);font:inherit}
 .links .to button:hover{color:var(--accent);text-decoration:underline}
 .links .to .kind{margin-right:6px}
-.tags-edit{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
-.tags-edit input{min-height:24px;padding:1px 6px;width:120px;font-size:var(--fs-sm)}
+.tags-edit{display:flex;gap:var(--s1);flex-wrap:wrap;align-items:center}
+/* поле «+ тег…» — те же высота, паддинги и кегль, что у остальных полей формы */
+.tags-edit input{min-height:30px;padding:5px 8px;width:160px;font-size:var(--fs-md)}
+.tags-edit>span:empty{display:none}   /* без тегов поле начинается от левого края, а не через gap */
+/* в панели и форме все однострочные контролы одной высоты: моно- и обычный шрифт иначе дают 30–32px */
+.drawer input[type=text],.drawer input[type=search],.drawer select{height:32px}
 .confirm{margin-top:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--danger);border-radius:var(--r);background:var(--danger-soft);color:var(--ink)}
 .confirm p{margin-bottom:var(--s2);font-size:var(--fs-sm)}
 .confirm .btns{display:flex;gap:var(--s2)}
@@ -308,6 +316,9 @@ select{padding-right:24px}
 .col>header .n{color:var(--ink-3);font-weight:400;font-variant-numeric:tabular-nums}
 .col>header .grow{flex:1}
 .col .cards{flex:1;overflow:auto;padding:var(--s2);display:flex;flex-direction:column;gap:var(--s2)}
+.col .add-card{margin:0 var(--s2) var(--s2);justify-content:flex-start;border:1px dashed var(--line-strong);
+  background:transparent;color:var(--ink-2);font-size:var(--fs-sm);min-height:28px}
+.col .add-card:hover{background:var(--surface);color:var(--ink);border-style:solid}
 .col.over{outline:2px dashed var(--accent);outline-offset:-2px}
 .lane{font-size:var(--fs-xs);color:var(--ink-3);padding:6px 4px 2px;border-top:1px solid var(--line);margin-top:4px}
 .lane:first-child{border-top:0;margin-top:0}
@@ -325,11 +336,21 @@ body.dragging-any{user-select:none}
 .card .foot{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:11px;color:var(--ink-3)}
 .card .blk{color:var(--danger);font-weight:600}
 .card .move{margin-left:auto}
-.card .move select{min-height:22px;padding:0 4px;font-size:11px;opacity:0}
+.card .move select{min-height:22px;padding:0 15px 0 4px;font-size:11px;opacity:0;background-position:right 3px center;background-size:8px 5px}
 .card:hover .move select,.card:focus-within .move select{opacity:1}
 .card .prog{display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;color:var(--ink-3)}
 .card .prog .progress{flex:1;height:4px}
 .col .cards .empty{padding:var(--s5) var(--s3);font-size:var(--fs-xs)}
+
+/* создание задачи: те же контролы и секции, что в панели задачи */
+.col>header .add{border:0;background:none;color:var(--ink-3);cursor:pointer;padding:0 5px;line-height:1;font-size:15px;border-radius:var(--r);opacity:0}
+.col:hover>header .add,.col>header .add:focus-visible{opacity:1}
+.col>header .add:hover{color:var(--accent);background:var(--surface-3)}
+.card.flash{outline:2px solid var(--accent);outline-offset:1px}
+.compose .summary input{width:100%;font:inherit;color:inherit}
+.compose .err{display:block;color:var(--danger);font-size:var(--fs-xs);margin-top:6px;font-weight:400;letter-spacing:0}
+.compose .bad input{border-color:var(--danger)}
+.compose .hint{display:block;color:var(--ink-3);font-size:var(--fs-sm)}
 
 /* ============================================================
    Служебная панель прототипа (не часть продукта)
@@ -555,6 +576,8 @@ const state = {
   q:'', mode:'semantic', kinds:new Set(), archived:false,
   board:{type:'', parent:'', tag:'', lanes:true},
   open:null,                  // id открытой записи
+  create:null,                // черновик новой задачи (форма создания) или null
+  flash:null,                 // id только что созданной карточки — подсветка на доске
   edit:false, confirm:false,
   demo:{embedder:false,reasoner:false,apierror:false,empty:false},
 };
@@ -598,7 +621,7 @@ function render(){
   document.querySelectorAll('.nav button').forEach(b=>b.toggleAttribute('aria-current',false)||b.removeAttribute('aria-current'));
   const cur=document.querySelector(`.nav button[data-nav="${state.view}"]`);cur.setAttribute('aria-current','page');
   const main=$('#main');main.className=state.view==='board'?'wide':'';
-  if(state.demo.apierror){main.innerHTML=apiError();return}
+  if(state.demo.apierror){main.innerHTML=apiError();renderScopeSelect();renderDrawer();return}
   main.innerHTML={overview,memory,board}[state.view]();
   renderScopeSelect();
   renderDrawer();
@@ -736,6 +759,7 @@ function board(){
   const blockedN=tasks.filter(t=>blockers(t).length&&t.status!=='done').length;
   return `
   <div class="board-toolbar">
+    <button type="button" class="btn primary" id="b-new">+ Задача</button>
     <label>Тип <select id="b-type"><option value="">любой</option>${Object.entries(TYPE_LABEL).map(([k,v])=>`<option value="${k}"${state.board.type===k?' selected':''}>${v}</option>`).join('')}</select></label>
     <label>Внутри <select id="b-parent" style="max-width:320px"><option value="">всего</option>${epics.map(e=>`<option value="${e.id}"${state.board.parent===e.id?' selected':''}>${esc(e.summary)}</option>`).join('')}</select></label>
     <label>Тег <select id="b-tag"><option value="">любой</option>${tags.map(t=>`<option${state.board.tag===t?' selected':''}>${esc(t)}</option>`).join('')}</select></label>
@@ -743,7 +767,7 @@ function board(){
     <span class="muted" style="margin-left:auto">${tasks.length} ${plural(tasks.length,'задача','задачи','задач')}${blockedN?` · ${blockedN} заблокировано`:''}${state.scope?` · ${esc(scopeShort(state.scope))}`:' · все scope'}</span>
     ${(state.board.type||state.board.parent||state.board.tag)?`<button class="btn quiet sm" id="b-reset">Сбросить</button>`:''}
   </div>
-  <p class="muted" style="font-size:var(--fs-xs);margin-bottom:var(--s3)">Перетащи карточку в другую колонку или открой её и смени стадию — с клавиатуры: Enter на карточке, затем поле «Стадия». Заблокированную задачу дальше «к работе» не пустит сервер.</p>
+  <p class="muted" style="font-size:var(--fs-xs);margin-bottom:var(--s3)">Новая задача — кнопка «+ Задача», «+» в шапке колонки или клавиша <kbd>n</kbd>; внутрь эпика или истории — из их панели. Перетащи карточку в другую колонку или открой её и смени стадию — с клавиатуры: Enter на карточке, затем поле «Стадия». Заблокированную задачу дальше «к работе» не пустит сервер.</p>
   <div class="board" role="list" aria-label="Стадии">
     ${STATUSES.map(s=>column(s,tasks.filter(t=>t.status===s))).join('')}
   </div>`;
@@ -753,15 +777,16 @@ function column(s,cards){
   if(state.board.lanes){cards.forEach(c=>{const p=parentOf(c);const key=p?p.id:'';(groups[key]=groups[key]||[]).push(c)})}else groups['']=cards;
   const keys=Object.keys(groups).sort((a,b)=>(a===''?1:0)-(b===''?1:0));
   return `<section class="col" data-status="${s}" role="listitem" aria-labelledby="col-${s}">
-    <header><span id="col-${s}">${STATUS_LABEL[s]}</span><span class="n">${cards.length}</span><span class="grow"></span>${s==='done'?`<span class="n">30 последних</span>`:''}</header>
+    <header><span id="col-${s}">${STATUS_LABEL[s]}</span><span class="n">${cards.length}</span><span class="grow"></span>${s==='done'?`<span class="n">30 последних</span>`:`<button type="button" class="add" data-new="${s}" aria-label="Создать задачу в стадии «${STATUS_LABEL[s]}»" title="Создать задачу в «${STATUS_LABEL[s]}»">+</button>`}</header>
     <div class="cards">
       ${cards.length?keys.map(k=>`${state.board.lanes&&keys.length>1?`<div class="lane">${k?'↳ '+esc(byId(k).summary):'без родителя'}</div>`:''}${groups[k].map(card).join('')}`).join(''):`<div class="empty">${s==='doing'?'Ничего не в работе':'Пусто'}</div>`}
     </div>
+    ${s==='backlog'||s==='todo'?`<button type="button" class="btn add-card" data-new="${s}">+ Задача</button>`:''}
   </section>`;
 }
 function card(t){
   const b=blockers(t), p=parentOf(t), pr=progressOf(t);
-  return `<article class="card ${t.type}${b.length?' blocked':''}" draggable="true" data-id="${t.id}" aria-label="${esc(t.summary)}">
+  return `<article class="card ${t.type}${b.length?' blocked':''}${state.flash===t.id?' flash':''}" draggable="true" data-id="${t.id}" aria-label="${esc(t.summary)}">
     <div class="top"><span>${TYPE_LABEL[t.type]}</span>${b.length?`<span class="blk" title="${esc(b.map(x=>x.summary).join('; '))}">заблокирована</span>`:''}<span class="grow"></span>${imp(t.importance)}</div>
     <button type="button" class="ttl" data-open="${t.id}">${esc(t.summary)}</button>
     ${pr?`<div class="prog"><div class="progress"><i style="width:${Math.round(pr.done/pr.total*100)}%"></i></div>${pr.done}/${pr.total}</div>`:''}
@@ -776,7 +801,11 @@ let lastFocus=null;
 function renderDrawer(){
   const root=$('#drawer-root');
   const m=state.open&&byId(state.open);
-  $('#main').inert=!!m;document.querySelector('.topbar').inert=!!m;
+  const on=!!m||!!state.create;
+  $('#main').inert=on;document.querySelector('.topbar').inert=on;
+  if(state.create){
+    if(!root.querySelector('.compose')){root.innerHTML=createDrawer();updateParentHint();$('#nt-summary')?.focus()}
+    return}
   if(!m){root.innerHTML='';return}
   const isTask=m.kind==='task';
   root.innerHTML=`<div class="drawer-backdrop" data-close></div>
@@ -852,7 +881,10 @@ function taskBody(t){
   <div class="section"><h3>Описание</h3>${state.edit?`<textarea id="ed-content" rows="10">${esc(t.content)}</textarea>`:`<div class="prose">${esc(t.content)}</div>`}</div>
   <div class="section"><h3>Входит в</h3>${p?`<ul class="links"><li><span class="rel">${TYPE_LABEL[p.type]}</span><span class="to"><button type="button" data-open="${p.id}">${esc(p.summary)}</button> ${statusTag(p.status)}</span><button class="btn quiet sm" data-unlink="${p.id}" data-rel="part_of" data-id="${t.id}">Отвязать</button></li></ul>`:`<p class="muted" style="font-size:var(--fs-sm)">Ни в какой эпик или историю не входит.</p>`}
     <div style="margin-top:6px"><input type="search" placeholder="Найти эпик или историю…" aria-label="Родитель: поиск задачи" style="max-width:320px" data-picker="parent"></div></div>
-  ${ch.length?`<div class="section"><h3>Дочерние <span class="muted">${pr.done} из ${pr.total} готово</span></h3><div class="progress" style="margin-bottom:6px"><i style="width:${Math.round(pr.done/pr.total*100)}%"></i></div><ul class="links">${ch.map(c=>`<li><span class="rel in">включает</span><span class="to"><button type="button" data-open="${c.id}">${esc(c.summary)}</button> ${statusTag(c.status)}</span><span></span></li>`).join('')}</ul></div>`:''}
+  ${t.type!=='task'||ch.length?`<div class="section"><h3>Дочерние ${pr?`<span class="muted">${pr.done} из ${pr.total} готово</span>`:''}</h3>
+    ${pr?`<div class="progress" style="margin-bottom:6px"><i style="width:${Math.round(pr.done/pr.total*100)}%"></i></div>`:''}
+    ${ch.length?`<ul class="links">${ch.map(c=>`<li><span class="rel in">включает</span><span class="to"><button type="button" data-open="${c.id}">${esc(c.summary)}</button> ${statusTag(c.status)}</span><span></span></li>`).join('')}</ul>`:`<p class="muted" style="font-size:var(--fs-sm)">Внутрь пока ничего не вложено.</p>`}
+    ${t.type!=='task'?`<div style="margin-top:6px"><button type="button" class="btn sm" data-new-child="${t.id}">+ ${t.type==='epic'?'История внутрь эпика':'Задача внутрь истории'}</button></div>`:''}</div>`:''}
   <div class="section"><h3>Блокировки</h3>
     <ul class="links">${b.map(x=>`<li><span class="rel out">заблокирована</span><span class="to"><button type="button" data-open="${x.id}">${esc(x.summary)}</button> ${statusTag(x.status)}</span><button class="btn quiet sm" data-unlink="${x.id}" data-rel="blocked_by" data-id="${t.id}">Снять</button></li>`).join('')}
     ${blocks.map(x=>`<li><span class="rel in">блокирует</span><span class="to"><button type="button" data-open="${x.id}">${esc(x.summary)}</button> ${statusTag(x.status)}</span><span></span></li>`).join('')}</ul>
@@ -864,6 +896,113 @@ function taskBody(t){
   ${state.confirm?forgetConfirm(t):''}`;
 }
 
+/* ---------- (е) Создание задачи / истории / эпика ---------- */
+/* Форма живёт в той же панели и НЕ перерисовывается целиком: смена типа,
+   приоритета и тегов правит только затронутые узлы — иначе панель моргает
+   (пересоздание узла заново проигрывает анимацию появления) и теряет каретку. */
+const TITLE_PLACEHOLDER={epic:'Цель эпика — одной строкой',story:'Что должно появиться у пользователя',task:'Что сделать — одной строкой'};
+const BODY_PLACEHOLDER={epic:'Зачем эпик, из чего состоит, когда считается закрытым',story:'Сценарий, границы, критерий приёмки',task:'Что сделать, границы, критерий приёмки'};
+
+function parentCandidates(c){
+  // направление part_of фиксировано «дочь → родитель»: история вкладывается в эпик, задача — в историю или эпик
+  return DB.filter(m=>m.kind==='task'&&live(m)&&m.scope===c.scope&&(c.type==='story'?m.type==='epic':m.type!=='task'))
+           .sort((a,b)=>a.summary.localeCompare(b.summary,'ru'));
+}
+function parentOptions(c){
+  return `<option value="">ни во что</option>`+parentCandidates(c)
+    .map(x=>`<option value="${x.id}"${c.parent===x.id?' selected':''}>${TYPE_LABEL[x.type]}: ${esc(x.summary.slice(0,64))}</option>`).join('');
+}
+function impSegments(n){
+  return [1,2,3,4,5].map(i=>`<i class="${i<=n?'on':''}" data-nimp="${i}" role="radio" aria-checked="${i===n}" tabindex="0" aria-label="приоритет ${i} из 5"></i>`).join('');
+}
+function tagChipsEditable(tags){
+  return tags.map(t=>`<span class="chip tag">${esc(t)}<button type="button" data-nuntag="${esc(t)}" aria-label="Убрать тег ${esc(t)}">×</button></span>`).join('');
+}
+/* Разметка повторяет taskBody в режиме правки: те же шапка, h2, сетка полей 2×2,
+   приоритет, секции «Описание / Входит в / Теги / Служебное» и футер действий. */
+function createDrawer(){
+  const c=state.create, scopes=[...new Set(SEED.map(m=>m.scope))].sort();
+  return `<div class="drawer-backdrop" data-close-create></div>
+  <aside class="drawer compose editing" role="dialog" aria-modal="true" aria-label="Новая задача на доске">
+    <header>${kindTag('task')}<div class="grow"><span class="scope muted" id="nt-scope-label">${esc(c.scope)}</span></div>
+      <button class="btn quiet sm" data-close-create aria-label="Закрыть форму">Закрыть ✕</button></header>
+    <div class="content">
+      <div id="nt-notice"></div>
+      <h2 class="summary task" id="nt-title-field">
+        <label class="sr-only" for="nt-summary">Заголовок</label>
+        <input type="text" id="nt-summary" value="${esc(c.summary)}" autocomplete="off" spellcheck="false"
+               placeholder="${TITLE_PLACEHOLDER[c.type]}" aria-describedby="nt-err">
+        <span class="err" id="nt-err" role="alert"></span>
+      </h2>
+      <div class="fields-2">
+        <div class="field"><label for="nt-status">Стадия</label>
+          <select id="nt-status">${STATUSES.map(x=>`<option value="${x}"${x===c.status?' selected':''}>${STATUS_LABEL[x]}</option>`).join('')}</select></div>
+        <div class="field"><label for="nt-type">Тип</label>
+          <select id="nt-type">${Object.entries(TYPE_LABEL).map(([k,v])=>`<option value="${k}"${c.type===k?' selected':''}>${v}</option>`).join('')}</select></div>
+        <div class="field"><label for="nt-branch">Ветка</label>
+          <input type="text" id="nt-branch" class="mono" value="${esc(c.branch)}" placeholder="feat/… — можно позже" autocomplete="off" spellcheck="false"></div>
+        <div class="field"><label for="nt-workflow">Процесс</label>
+          <input type="text" id="nt-workflow" value="${esc(c.workflow)}" placeholder="dev, ultracode…" autocomplete="off"></div>
+      </div>
+      <div class="hgroup"><span class="imp edit" id="nt-imp" role="radiogroup" aria-label="Приоритет">${impSegments(c.importance)}</span><span id="nt-imp-text">приоритет ${c.importance} из 5</span></div>
+      <div class="section"><h3>Описание</h3>
+        <label class="sr-only" for="nt-content">Описание</label>
+        <textarea id="nt-content" rows="10" placeholder="${BODY_PLACEHOLDER[c.type]}">${esc(c.content)}</textarea></div>
+      <div class="section" id="nt-parent-sec"${c.type==='epic'?' hidden':''}><h3>Входит в</h3>
+        <label class="sr-only" for="nt-parent">Родительская запись</label>
+        <select id="nt-parent" style="width:100%">${parentOptions(c)}</select>
+        <span class="hint" id="nt-parent-hint" style="margin-top:6px"></span></div>
+      <div class="section"><h3>Теги</h3>
+        <div class="tags-edit"><span id="nt-chips">${tagChipsEditable(c.tags)}</span><input type="text" id="nt-newtag" placeholder="+ тег…" autocomplete="off" spellcheck="false" aria-label="Новый тег"></div></div>
+      <div class="section"><h3>Служебное</h3>
+        <div class="field" style="margin-bottom:0"><label for="nt-scope">Scope</label>
+          <select id="nt-scope" style="max-width:320px">${scopes.map(x=>`<option value="${x}"${x===c.scope?' selected':''}>${esc(x)}</option>`).join('')}</select>
+          <span class="hint">id и даты запись получит при создании.</span></div></div>
+    </div>
+    <div class="actions">
+      <button class="btn primary" data-create-submit>Создать</button>
+      <button class="btn" data-close-create>Отмена</button>
+      <span class="grow"></span>
+      <span class="muted" style="font-size:var(--fs-xs)">⌘/Ctrl + ↵ — создать · Esc — закрыть</span>
+    </div>
+  </aside>`;
+}
+
+/* --- точечные обновления формы (без перерисовки панели) --- */
+function updateParentHint(){
+  const c=state.create,h=$('#nt-parent-hint');if(!h)return;
+  h.textContent=parentCandidates(c).length?'':(c.type==='story'?'В этом scope ещё нет эпиков — привяжешь позже.':'В этом scope ещё нет эпиков и историй — привяжешь позже.');
+}
+function setCreateType(type){
+  const c=state.create;c.type=type;
+  if(type==='epic')c.parent='';
+  else if(c.parent&&!parentCandidates(c).some(x=>x.id===c.parent))c.parent='';
+  $('#nt-type').value=type;
+  $('#nt-summary').placeholder=TITLE_PLACEHOLDER[type];
+  $('#nt-content').placeholder=BODY_PLACEHOLDER[type];
+  $('#nt-parent-sec').hidden=(type==='epic');
+  if(type!=='epic'){$('#nt-parent').innerHTML=parentOptions(c);updateParentHint()}
+}
+function setCreateImportance(n){
+  state.create.importance=n;
+  $('#nt-imp').innerHTML=impSegments(n);
+  $('#nt-imp-text').textContent=`приоритет ${n} из 5`;
+}
+function renderCreateTags(){$('#nt-chips').innerHTML=tagChipsEditable(state.create.tags)}
+function setCreateScope(scope){
+  const c=state.create;c.scope=scope;c.parent='';
+  $('#nt-scope-label').textContent=scope;
+  if(c.type!=='epic'){$('#nt-parent').innerHTML=parentOptions(c);updateParentHint()}
+}
+function showCreateError(text){
+  const n=$('#nt-notice');
+  n.innerHTML=text?`<div class="notice danger" role="alert" style="margin-bottom:var(--s4)"><div class="grow"><strong>Задача не создана.</strong> ${esc(text)}</div></div>`:'';
+}
+function showTitleError(text){
+  $('#nt-title-field').classList.toggle('bad',!!text);
+  $('#nt-err').textContent=text||'';
+}
+
 /* ============================================================
    Действия (в реальном приложении — вызовы API, здесь правят DB)
    ============================================================ */
@@ -872,11 +1011,59 @@ function closeRec(){state.open=null;state.edit=false;state.confirm=false;render(
 function patch(id,fields){const m=byId(id);if(!m)return;
   if(fields.status&&fields.status!==m.status){const order=STATUSES.indexOf(fields.status);if(order>1&&blockers(m).length){toast(`Не переведена: «${m.summary.slice(0,40)}…» заблокирована — ${blockers(m).map(b=>b.summary.slice(0,30)+'…').join(', ')}`);render();return false}}
   Object.assign(m,fields,{updatedAt:NOW});render();return true}
+function openCreate(init){
+  lastFocus=document.activeElement;
+  state.open=null;state.edit=false;state.confirm=false;
+  state.create=Object.assign({type:state.board.type||'task',status:'todo',parent:state.board.parent||'',
+    summary:'',content:'',importance:3,tags:[],branch:'',workflow:'',
+    scope:state.scope||HOME_SCOPE},init);
+  if(state.create.type==='epic')state.create.parent='';
+  render();
+}
+function closeCreate(){state.create=null;render();lastFocus?.focus?.()}
+function syncCreate(){ // читает форму в черновик — перед любым действием, которое зависит от введённого
+  const c=state.create;if(!c||!$('#nt-summary'))return;
+  c.summary=$('#nt-summary').value;c.content=$('#nt-content').value;
+  c.status=$('#nt-status').value;
+  c.parent=c.type==='epic'?'':$('#nt-parent').value;
+  c.branch=$('#nt-branch').value;c.workflow=$('#nt-workflow').value;
+  if($('#nt-scope'))c.scope=$('#nt-scope').value;
+}
+function submitCreate(){
+  syncCreate();const c=state.create;
+  const title=c.summary.trim();
+  if(!title){showTitleError('Без заголовка не создаётся: агент видит в брифе именно его.');$('#nt-summary').focus();return}
+  showTitleError('');
+  if(state.demo.apierror){showCreateError('Запрос POST /api/memories завершился ошибкой соединения. Черновик цел — проверь, что memo web запущен, и нажми «Создать» ещё раз.');return}
+  showCreateError('');
+  // сервер: POST /api/memories → 201; здесь — запись прямо в заглушку
+  const t={id:'01K0NEW'+String(DB.length).padStart(2,'0')+'000000000000000',kind:'task',scope:c.scope,
+    importance:c.importance,createdAt:NOW,updatedAt:NOW,accessedAt:null,accessCount:0,
+    status:c.status,type:c.type,branch:c.branch.trim(),workflow:c.workflow.trim(),
+    summary:title,content:c.content.trim()||title,tags:[...c.tags],
+    links:c.parent?[{dst:c.parent,rel:'part_of'}]:[]};
+  DB.push(t);
+  state.create=null;state.view='board';state.flash=t.id;
+  if(state.scope&&state.scope!==t.scope)state.scope=t.scope;           // иначе карточка не видна
+  if(state.board.type&&state.board.type!==t.type)state.board.type='';   // фильтры не прячут созданное
+  if(state.board.parent&&state.board.parent!==c.parent)state.board.parent='';
+  if(state.board.tag&&!t.tags.includes(state.board.tag))state.board.tag='';
+  render();lastFocus?.focus?.();
+  toast(`Создана: «${title.slice(0,40)}${title.length>40?'…':''}» — в «${STATUS_LABEL[t.status]}»`);
+  setTimeout(()=>{if(state.flash===t.id){state.flash=null;render()}},2200);
+}
 function forget(id){const m=byId(id);m.supersededBy=m.id;m.updatedAt=NOW;state.confirm=false;state.open=null;render();toast(`Забыта: «${(m.summary||m.content).slice(0,50)}…» — в архиве`)}
 
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-nav],[data-goto],[data-goto-kind],[data-open],[data-close],[data-scope],[data-mode],[data-edit],[data-cancel],[data-save],[data-forget-ask],[data-forget-cancel],[data-forget],[data-untag],[data-unlink],[data-imp],#reset,#b-reset');
+  const t=e.target.closest('[data-nav],[data-goto],[data-goto-kind],[data-open],[data-close],[data-scope],[data-mode],[data-edit],[data-cancel],[data-save],[data-forget-ask],[data-forget-cancel],[data-forget],[data-untag],[data-unlink],[data-imp],[data-new],[data-new-child],[data-close-create],[data-create-submit],[data-nimp],[data-nuntag],#reset,#b-reset,#b-new');
   if(!t)return;
+  if(t.id==='b-new'){openCreate({});return}
+  if(t.dataset.new){openCreate({status:t.dataset.new});return}
+  if(t.dataset.newChild){const p=byId(t.dataset.newChild);openCreate({parent:p.id,type:p.type==='epic'?'story':'task',scope:p.scope});return}
+  if(t.hasAttribute('data-close-create')){closeCreate();return}
+  if(t.hasAttribute('data-create-submit')){submitCreate();return}
+  if(t.dataset.nimp){setCreateImportance(+t.dataset.nimp);return}
+  if(t.dataset.nuntag){state.create.tags=state.create.tags.filter(x=>x!==t.dataset.nuntag);renderCreateTags();$('#nt-newtag').focus();return}
   if(t.dataset.nav){state.view=t.dataset.nav;render();return}
   if(t.dataset.goto){state.view=t.dataset.goto;if(t.hasAttribute('data-close'))state.open=null;render();return}
   if(t.dataset.gotoKind){state.view='memory';state.kinds=new Set([t.dataset.gotoKind]);state.q='';render();return}
@@ -897,6 +1084,14 @@ document.addEventListener('click',e=>{
   if(t.dataset.imp){const m=byId(t.dataset.id);m.importance=+t.dataset.imp;m.updatedAt=NOW;render();toast(`Важность ${m.importance} из 5`);return}
 });
 document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&state.create){closeCreate();return}
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-nimp]')){e.preventDefault();e.target.click();return}
+  if(e.key==='Enter'&&e.target.id==='nt-newtag'){e.preventDefault();
+    const v=e.target.value.trim().toLowerCase();const c=state.create;
+    if(v&&!c.tags.includes(v)){c.tags.push(v);c.tags.sort();renderCreateTags();toast(`Тег «${v}» добавлен`)}
+    e.target.value='';return}
+  if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)&&state.create){e.preventDefault();submitCreate();return}
+  if(e.key==='n'&&!state.create&&!state.open&&!e.target.matches('input,textarea,select')){e.preventDefault();if(state.view!=='board'){state.view='board'}openCreate({});return}
   if(e.key==='Escape'&&state.open){if(state.confirm){state.confirm=false;render()}else closeRec();return}
   if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-imp]')){e.preventDefault();e.target.click();return}
   if(e.key==='Enter'&&e.target.matches('[data-newtag]')){const m=byId(e.target.dataset.newtag);const v=e.target.value.trim().toLowerCase();if(v&&!m.tags.includes(v)){m.tags.push(v);m.tags.sort();m.updatedAt=NOW;render();$(`[data-newtag="${m.id}"]`)?.focus();toast(`Тег «${v}» добавлен`)}e.preventDefault();return}
@@ -908,6 +1103,8 @@ document.addEventListener('input',e=>{
 });
 document.addEventListener('change',e=>{
   const t=e.target;
+  if(t.id==='nt-type'){syncCreate();setCreateType(t.value);return}
+  if(t.id==='nt-scope'){syncCreate();setCreateScope(t.value);return}
   if(t.id==='scope-global'){state.scope=t.value;render();return}
   if(t.dataset.kind){t.checked?state.kinds.add(t.dataset.kind):state.kinds.delete(t.dataset.kind);render();return}
   if(t.id==='archived'){state.archived=t.checked;render();return}
@@ -962,6 +1159,28 @@ render();
   он же вместо отдельного селекта «проект».
 
 Потребует новых полей/эндпоинтов (или решения):
+0. СОЗДАНИЕ ЗАДАЧ ИЗ БРАУЗЕРА (этот экран) — нужен новый POST /api/memories,
+   которого нет: сейчас морда умеет только читать, PATCH и DELETE, а инвариант
+   DESIGN §12/§16 прямо говорит «создание записей из браузера недоступно».
+   Макет снимает инвариант ТОЛЬКО для kind=task (эпик/история/задача); факты,
+   эпизоды, процедуры и долг по-прежнему создаёт агент через memory_save.
+   Контракт (whitelist-DTO, 1:1 с write.SaveInput):
+     POST /api/memories
+     {kind:"task", scope, type:"epic|story|task", summary, content,
+      status, importance, tags:[], branch, workflow,
+      links:[{id:"<родитель>", rel:"part_of"}]}   → 201 + memoryDTO
+   Правила и ошибки (все уже есть в домене, морда их не дублирует):
+   - kind ≠ task → 400 (создаётся только задача);
+   - пустой summary → write.ErrTaskSummaryRequired → 400; в макете это
+     инлайн-ошибка поля «Заголовок», до запроса;
+   - пустой content → write.ErrEmptyContent → 400; макет не даёт этому
+     случиться: пустое описание отправляется как заголовок (решение ниже);
+   - scope пустой → берётся homeScope инстанса (как в memory_save);
+   - задачи не дедуплицируются (§7) — тихого слияния с похожей не будет;
+   - запись идёт через доменный write.Writer с РЕАЛЬНЫМ Embedder (тот же
+     инвариант, что у правки текста в §16) — вектор считается сразу, иначе
+     новая задача не найдётся поиском по смыслу.
+
 1. Состояние сервисов на обзоре (store/embedder/reasoner: provider, model,
    available, очередь на эмбеддинг, время последнего прогона джобов) — нового
    поля providers/jobs в GET /api/stats сейчас нет; до него плашку деградации
@@ -981,6 +1200,50 @@ render();
    без изменений; но «в очереди на эмбеддинг» для свежей записи —
    embedding.embedded=false, уже есть.
 5. Счётчик «читалась N раз» — accessCount/accessedAt уже в DTO.
+
+Решения, принятые в макете по созданию задач (и почему):
+- ФОРМА СОЗДАНИЯ = ПАНЕЛЬ ЗАДАЧИ В РЕЖИМЕ ПРАВКИ. Та же шапка (вид + scope +
+  «Закрыть»), тот же h2-заголовок, та же сетка полей 2×2 «Стадия · Тип · Ветка ·
+  Процесс», тот же приоритет сегментами с подписью, те же секции «Описание /
+  Входит в / Теги / Служебное» и тот же футер действий. Создание и правка — одно
+  и то же действие над одной сущностью, разного языка у них быть не должно; в
+  реализации это буквально общая разметка, а не похожая.
+- Четыре точки входа: «+ Задача» на панели доски (тип по фильтру, стадия «к работе»),
+  «+» в шапке колонки (стадия = колонка), постоянная «+ Задача» под карточками в
+  «бэклоге» и «к работе» (туда заводят чаще всего — прятать вход в hover там неверно)
+  и «+ История/Задача внутрь» в панели эпика/истории (родитель и тип проставлены).
+  Иерархия заводится сверху вниз — предзаполненное поле дешевле пикера после создания.
+- ФОРМА НЕ ПЕРЕРИСОВЫВАЕТСЯ ЦЕЛИКОМ. Смена типа, приоритета и тегов правит только
+  затронутые узлы (список родителей, чипы, плейсхолдеры, подпись приоритета).
+  Полная перерисовка панели давала мигание (узел пересоздаётся → заново играет
+  анимация появления) и роняла каретку; смонтированная панель переживает любой
+  render(), черновик не теряется.
+- Заголовок обязателен и проверяется до запроса (домен вернул бы
+  ErrTaskSummaryRequired), ошибка — строкой под полем. Описание необязательно:
+  пустое уходит как заголовок, иначе ErrEmptyContent не даст завести быструю
+  карточку. Цена — задача-заготовка без текста; выигрыш — карточка за три секунды.
+- «Входит в» — select допустимых по уровню записей того же scope (задача →
+  история|эпик, история → эпик), а не пикер-поиск, как в панели: при создании
+  привязывать не к чему, список в одном scope короткий, а поиск требует запроса к
+  API. У эпика секция скрыта целиком, а не выключена: выключенный контрол
+  оставляет вопрос «почему нельзя».
+- Ветка и процесс — в той же сетке, что в панели, с плейсхолдером «можно позже»:
+  при заведении задачи ветки ещё нет, но поле там же, где его потом ищут.
+- Scope — в секции «Служебное», где он и показывается у существующей записи.
+- После создания: панель закрывается, карточка подсвечивается ~2 с, тост говорит
+  колонку; фильтры, которые спрятали бы новую карточку (тип, родитель, тег,
+  scope), сбрасываются — иначе «создал, и ничего не появилось».
+- Клавиатура: n — новая задача, ⌘/Ctrl+↵ — создать, Esc — закрыть, Enter в поле
+  тега добавляет тег.
+- Ошибка сервера — плашкой в форме, черновик цел (в макете включается
+  переключателем «ошибка API»).
+- ВСЕ <select> МОРДЫ: appearance:none + своя стрелка фоном. Safari игнорирует
+  рамку и рисует нативный контрол со степпером — рядом с обычными полями это
+  читается как другой виджет. Правило общее для доски, панели и формы.
+- Однострочные контролы в панели — ровно 32 px, и поле «+ тег…» с теми же
+  метриками, что остальные поля (было 24 px и мельче кеглем, плюс сдвиг вправо
+  на gap пустого контейнера чипов). Правило общее с панелью записи и задачи —
+  в живом приложении эта же строка выглядит рваной.
 
 Решения, принятые в макете (и почему):
 - Панель справа вместо модалки: правка/забывание не покидает список или

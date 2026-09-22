@@ -209,15 +209,18 @@ func newWebInstance(cfg config.Config, reasonerAvailable bool) webInstance {
 // newWebHandler собирает мультиплексор web-морды: JSON API под /api/ (см.
 // каждый handler) + статика (embed.FS) на /. API-роуты регистрируются до
 // файлового хендлера, чтобы /api/* не перехватывался статикой. w используется
-// для обеих write-операций (DELETE — мягкое удаление, PATCH — правка записи);
+// для всех трёх write-операций (POST — создание задачи, DELETE — мягкое
+// удаление, PATCH — правка записи);
 // rc — только для /api/search в режиме semantic (задача 10.1); embedder — там
 // же и в /api/stats (доступность/dim для панели «Сервисы») — остальные роуты
-// целиком read-only поверх s. inst — домашний scope и провайдеры инстанса.
+// целиком read-only поверх s. inst — домашний scope и провайдеры инстанса
+// (домашний scope — ещё и дефолт scope у POST /api/memories).
 func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder memembed.Embedder, inst webInstance) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/stats", handleStats(s, embedder, inst))
 	mux.HandleFunc("GET /api/memories", handleListMemories(s))
+	mux.HandleFunc("POST /api/memories", handleCreateMemory(s, w, inst))
 	mux.HandleFunc("GET /api/memories/{id}", handleGetMemory(s))
 	mux.HandleFunc("PATCH /api/memories/{id}", handlePatchMemory(s, w))
 	mux.HandleFunc("DELETE /api/memories/{id}", handleForgetMemory(s, w))
@@ -818,6 +821,158 @@ func handlePatchMemory(s store.Store, w *write.Writer) http.HandlerFunc {
 			return
 		}
 		writeJSON(rw, http.StatusOK, toDTO(updated))
+	}
+}
+
+// createMemoryRequest — тело POST /api/memories: whitelist-DTO 1:1 в
+// write.SaveInput, без прохода «как есть» в домен. Kind присутствует явно и
+// обязан быть "task": из браузера заводится только задача (DESIGN.md §12 —
+// инвариант «морда не создаёт записи» снят ровно для kind=task, остальные
+// виды памяти по-прежнему пишет только агент через memory_save). Указателей
+// здесь нет — в отличие от PATCH это не частичная правка, а полный набор
+// полей новой записи: пустое поле означает «дефолт домена», а не «не трогать».
+type createMemoryRequest struct {
+	Kind       string         `json:"kind"`
+	Scope      string         `json:"scope"`
+	Type       string         `json:"type"`
+	Summary    string         `json:"summary"`
+	Content    string         `json:"content"`
+	Status     string         `json:"status"`
+	Importance int            `json:"importance"`
+	Tags       []string       `json:"tags"`
+	Branch     string         `json:"branch"`
+	Workflow   string         `json:"workflow"`
+	Links      []patchLinkDTO `json:"links"`
+}
+
+// createMemoryAllowedFields — перечень допустимых полей тела POST
+// /api/memories для текста ошибки 400 на лишнее поле (как у PATCH).
+const createMemoryAllowedFields = "kind, scope, type, summary, content, status, importance, tags, branch, workflow, links"
+
+// handleCreateMemory — создание задачи из браузера (Этап 17). Единственная
+// write-операция морды, которая заводит новую запись; всё остальное —
+// правка и мягкое удаление существующих.
+//
+// Границы, заданные здесь, а не в домене (домен обязан уметь писать любой
+// kind — его зовёт MCP memory_save):
+//   - kind != "task" (в т.ч. пустой) → 400. Факты/эпизоды/процедуры/долг
+//     создаёт только агент: у морды нет ни контекста для атомарного факта,
+//     ни дедупа в UI.
+//   - links допускают только rel=part_of: при создании из браузера
+//     осмысленна ровно одна связь — «входит в» (задача → история/эпик).
+//     blocked_by и прочие рёбра ставятся уже на существующей карточке через
+//     PATCH, где виден весь граф.
+//
+// Пустой scope → домашний scope инстанса (inst.HomeScope), как в MCP
+// memory_save: морда открыта в конкретном проекте, и заставлять пользователя
+// печатать scope руками незачем. Ошибки домена маппятся тем же
+// writePatchError — перечень ошибок Save и Update совпадает (валидация полей
+// задачи общая), дублировать маппинг не нужно; store.ErrNotFound от Save
+// недостижим, ветка 404 просто не сработает.
+//
+// Дедуп: Writer.Save для kind=task его не делает (DESIGN.md §7 — задачи не
+// сливаются), поэтому merged из Save здесь не интерпретируется.
+func handleCreateMemory(s store.Store, w *write.Writer, inst webInstance) http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
+		var body createMemoryRequest
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			if strings.Contains(err.Error(), "unknown field") {
+				writeErr(rw, http.StatusBadRequest, fmt.Errorf("недопустимое поле в теле запроса: %w (допустимые поля: %s)", err, createMemoryAllowedFields))
+				return
+			}
+			writeErr(rw, http.StatusBadRequest, fmt.Errorf("разбор тела запроса: %w", err))
+			return
+		}
+
+		if strings.TrimSpace(body.Kind) != string(memory.KindTask) {
+			writeErr(rw, http.StatusBadRequest, fmt.Errorf("из браузера создаётся только kind=%s (получено %q): остальные виды памяти пишет агент через memory_save", memory.KindTask, body.Kind))
+			return
+		}
+
+		links, err := createLinks(body.Links)
+		if err != nil {
+			writeErr(rw, http.StatusBadRequest, err)
+			return
+		}
+
+		scope := strings.TrimSpace(body.Scope)
+		if scope == "" {
+			scope = inst.HomeScope
+		}
+
+		// Пустое описание — не ошибка входа: карточка заводится заголовком
+		// (§2.6 макета), иначе ErrEmptyContent не дал бы создать быструю
+		// задачу. Подстановка именно здесь, а не в домене: для memory_save
+		// пустой content остаётся ошибкой.
+		content := strings.TrimSpace(body.Content)
+		if content == "" {
+			content = strings.TrimSpace(body.Summary)
+		}
+
+		id, _, err := w.Save(r.Context(), write.SaveInput{
+			Kind:       memory.KindTask,
+			Scope:      scope,
+			Content:    content,
+			Summary:    body.Summary,
+			Status:     body.Status,
+			Type:       body.Type,
+			Branch:     body.Branch,
+			Workflow:   body.Workflow,
+			Importance: body.Importance,
+			Tags:       body.Tags,
+			Links:      links,
+		})
+		if err != nil {
+			writeCreateError(rw, err)
+			return
+		}
+
+		created, err := s.Get(r.Context(), id)
+		if err != nil {
+			writeErr(rw, http.StatusInternalServerError, fmt.Errorf("get %q после create: %w", id, err))
+			return
+		}
+		writeJSON(rw, http.StatusCreated, toDTO(created))
+	}
+}
+
+// createLinks переводит links тела POST в write.LinkInput, разрешая
+// единственный rel — part_of (см. handleCreateMemory).
+func createLinks(in []patchLinkDTO) ([]write.LinkInput, error) {
+	if in == nil {
+		return nil, nil
+	}
+	out := make([]write.LinkInput, 0, len(in))
+	for _, l := range in {
+		if strings.TrimSpace(l.ID) == "" {
+			return nil, fmt.Errorf("links: id обязателен")
+		}
+		if l.Rel != memory.RelPartOf {
+			return nil, fmt.Errorf("links: при создании допустим только rel=%s (получено %q)", memory.RelPartOf, l.Rel)
+		}
+		out = append(out, write.LinkInput{Dst: l.ID, Rel: l.Rel})
+	}
+	return out, nil
+}
+
+// writeCreateError маппит ошибку write.Writer.Save в HTTP: ошибки валидации
+// входа и полей задачи → 400, прочее (store) → 500. ErrTaskBlocked здесь
+// возможен (Save проверяет пост-состояние), но при создании с rel=part_of
+// недостижим — отдельной ветки 409 нет, такая ошибка пойдёт как 400 вместе с
+// остальной валидацией домена.
+func writeCreateError(rw http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, write.ErrEmptyContent), errors.Is(err, write.ErrEmptyScope),
+		errors.Is(err, write.ErrUnknownKind), errors.Is(err, write.ErrInvalidTTL),
+		errors.Is(err, write.ErrTaskSummaryRequired), errors.Is(err, write.ErrUnknownStatus),
+		errors.Is(err, write.ErrUnknownTaskType), errors.Is(err, write.ErrStatusNotApplicable),
+		errors.Is(err, write.ErrTaskFieldNotApplicable), errors.Is(err, write.ErrBlockerNotTask),
+		errors.Is(err, write.ErrTaskBlocked):
+		writeErr(rw, http.StatusBadRequest, err)
+	default:
+		writeErr(rw, http.StatusInternalServerError, fmt.Errorf("create: %w", err))
 	}
 }
 
