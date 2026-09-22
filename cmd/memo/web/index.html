@@ -3,103 +3,62 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AgentMemory — web-морда</title>
+  <title>memo — память агента</title>
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F5F5F2">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#15171B">
   <link rel="stylesheet" href="/tailwind.css">
 </head>
-<body class="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100">
-  <div id="page" class="mx-auto max-w-5xl px-4 py-6">
-    <header>
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <h1 class="text-xl font-semibold">AgentMemory</h1>
-        <!-- переключатель вида (задача 15.6): hash-роутинг #/ (память) и #/board (доска);
-             активная вкладка подсвечивается из app.js по location.hash -->
-        <nav id="view-nav" class="flex items-center gap-0.5 rounded-md border border-slate-300 p-0.5 text-sm dark:border-slate-600" aria-label="вид">
-          <a href="#/" data-view="list" class="rounded px-3 py-1 hover:bg-slate-100 dark:hover:bg-slate-700">Память</a>
-          <a href="#/board" data-view="board" class="rounded px-3 py-1 hover:bg-slate-100 dark:hover:bg-slate-700">Доска</a>
-        </nav>
-      </div>
-    </header>
-
-  <!-- вид «Память»: дашборд + поиск/фильтры + список (задачи 6.3–10.2) -->
-  <div id="list-view">
-    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">просмотр памяти · удаление архивирует запись (soft-delete, история сохраняется)</p>
-    <div id="dashboard" class="mt-4"></div>
-
-    <section class="mt-6 rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <input
-          id="search-input"
-          type="search"
-          placeholder="Поиск по памяти… (Enter или пауза в наборе)"
-          class="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
-        >
-        <div id="search-mode-group" class="flex shrink-0 items-center gap-0.5 rounded-md border border-slate-300 p-0.5 text-sm dark:border-slate-600" role="radiogroup" aria-label="режим поиска">
-          <label class="cursor-pointer rounded px-2 py-1 has-[:checked]:bg-blue-600 has-[:checked]:text-white">
-            <input type="radio" name="search-mode" id="mode-semantic" value="semantic" class="sr-only" checked>
-            по смыслу
-          </label>
-          <label class="cursor-pointer rounded px-2 py-1 has-[:checked]:bg-blue-600 has-[:checked]:text-white">
-            <input type="radio" name="search-mode" id="mode-lexical" value="lexical" class="sr-only">
-            по словам
-          </label>
-        </div>
-        <label class="flex shrink-0 items-center gap-2 text-sm">
-          <input id="toggle-superseded" type="checkbox">
-          показывать архивные
-        </label>
-        <button id="reset-filters" type="button" class="shrink-0 rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-700">
-          сбросить фильтры
-        </button>
-      </div>
-
-      <div id="search-degraded-banner" class="mt-3 hidden rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
-        Поиск по смыслу недоступен (векторный слой выключен) — показаны результаты по словам.
-      </div>
-
-      <div class="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div>
-          <div class="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">kind</div>
-          <div id="kind-filters" class="mt-1 flex flex-wrap gap-x-4 gap-y-1"></div>
-        </div>
-        <div>
-          <div class="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">scope</div>
-          <div id="scope-filters" class="mt-1 flex flex-wrap gap-x-4 gap-y-1"></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="mt-4">
-      <div class="flex items-center justify-between">
-        <div id="results-summary" class="text-sm text-slate-500 dark:text-slate-400"></div>
-      </div>
-      <div id="cards-container" class="mt-2 space-y-3"></div>
-      <div id="pagination" class="mt-4 flex justify-center"></div>
-    </section>
-  </div>
-
-  <!-- вид «Доска» (задача 15.6, DESIGN.md §12/§14 Этап 15): панель фильтров и
-       сетка колонок генерируются app.js (renderBoardFilters/renderBoard) -->
-  <div id="board-view" class="hidden">
-    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">kanban-доска задач · перетащи карточку в другую колонку, чтобы сменить стадию</p>
-    <section id="board-filters" class="mt-4 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-800"></section>
-    <div id="board-summary" class="mt-3 text-sm text-slate-500 dark:text-slate-400"></div>
-    <section id="board-grid" class="mt-2 overflow-x-auto pb-2"></section>
-  </div>
-  </div>
-
-  <!-- тосты ошибок (общий компонент, задача 15.6): показываются из showToast() -->
-  <div id="toasts" class="pointer-events-none fixed bottom-4 right-4 z-20 flex w-full max-w-sm flex-col gap-2" aria-live="polite"></div>
-
-  <!-- модалка карточки записи -->
-  <div id="modal-backdrop" class="hidden fixed inset-0 z-10 flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:items-center">
-    <div class="w-full max-w-2xl rounded-lg bg-white p-5 shadow-lg dark:bg-slate-800">
-      <div class="flex items-center justify-between">
-        <h2 class="text-base font-semibold">Карточка записи</h2>
-        <button id="modal-close" type="button" class="rounded-md px-2 py-1 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700">✕</button>
-      </div>
-      <div id="modal-content" class="mt-3 max-h-[70vh] overflow-y-auto"></div>
+<body>
+  <!-- Каркас новой морды (Этап 16, задача 16.2; спецификация design/memo-web-redesign.md).
+       Шапка: <h1>, три раздела по хэшу (#/, #/memory, #/board; активный — aria-current),
+       единственный на всё приложение селект scope (app.js наполняет его из /api/stats,
+       домашний scope помечен по homeScope). Ссылки разделов app.js дописывает текущим
+       scope, чтобы он переживал переключение раздела. -->
+  <a class="skip" href="#main">К содержимому</a>
+  <header class="topbar">
+    <h1 class="brand">memo <small id="brand-host">память агента</small></h1>
+    <nav class="nav" aria-label="Разделы">
+      <a href="#/" data-view="overview">Обзор</a>
+      <a href="#/memory" data-view="memory">Память</a>
+      <a href="#/board" data-view="board">Доска</a>
+    </nav>
+    <div class="grow"></div>
+    <div class="scopebox">
+      <label for="scope-global"><span>Scope</span></label>
+      <select id="scope-global" aria-label="Scope записей">
+        <option value="">все scope</option>
+      </select>
     </div>
-  </div>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <!-- ошибка API (§5): «Сервер памяти не отвечает» с кнопкой «Повторить» -->
+    <div id="notice-root"></div>
+
+    <!-- контейнеры трёх экранов: виден только текущий (hidden снимает app.js);
+         заглушки с заголовком — наполнение задачами 16.3 (Обзор), 16.4 (Память),
+         16.6 (Доска) -->
+    <section id="screen-overview" hidden aria-labelledby="h-overview">
+      <h2 id="h-overview">Обзор</h2>
+      <p class="muted" data-placeholder></p>
+    </section>
+    <section id="screen-memory" hidden aria-labelledby="h-memory">
+      <h2 id="h-memory">Память</h2>
+      <p class="muted" data-placeholder></p>
+    </section>
+    <section id="screen-board" hidden aria-labelledby="h-board">
+      <h2 id="h-board">Доска</h2>
+      <p class="muted" data-placeholder></p>
+    </section>
+  </main>
+
+  <!-- панель записи (§2.3): открывается по id= в хэше; role=dialog aria-modal,
+       фон под ней inert, Esc закрывает, фокус возвращается на открывший элемент.
+       Тело панели — задача 16.5 -->
+  <div id="drawer-root"></div>
+
+  <!-- тосты (§5): один активный, aria-live только здесь и на счётчике результатов -->
+  <div id="toast-root" aria-live="polite"></div>
 
   <script src="/app.js"></script>
 </body>

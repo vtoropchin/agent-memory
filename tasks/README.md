@@ -190,7 +190,7 @@ review → testing → release → done`, тип `epic|story|task`, иерарх
 | Задача | Файл | Статус |
 |--------|------|--------|
 | 16.1 API: `providers`/`jobs` в stats, `expiresBefore`, PATCH `content`/`summary`, `maint_meta` | [16.1-web-api-stats-providers.md](16.1-web-api-stats-providers.md) | ✅ выполнена (2026-09-22): порт Store (`PendingVectors`, `ExpiresBefore`, `SchemaVersion`, `maint_meta`), `maint.RunLog`, `/api/stats` providers/jobs, `expiresBefore`, PATCH content/summary; build/test зелёные, PG-паритет на живом сервере, e2e curl к `bin/memo web` на SQLite и PG |
-| 16.2 Фронт: каркас, токены, роутер, панель записи, тосты | [16.2-web-shell-tokens.md](16.2-web-shell-tokens.md) | ⬜ ожидает |
+| 16.2 Фронт: каркас, токены, роутер, панель записи, тосты | [16.2-web-shell-tokens.md](16.2-web-shell-tokens.md) | ✅ выполнена (2026-09-22): токены/тёмная тема/шрифты из макета в `tailwind.input.css`, `index.html`/`app.js` переписаны — хэш-роутер трёх разделов, единый селект scope с домашним по `homeScope`, панель записи (`dialog`, `inert`, Esc, возврат фокуса, центр ≥ 1200 px), `showToast`, `rel()`; экраны — заглушки; build/test зелёные, ручная проверка в браузере на живом PG |
 | 16.3 Фронт: экран «Обзор» | [16.3-web-overview.md](16.3-web-overview.md) | ⬜ ожидает |
 | 16.4 Фронт: экран «Память» (список, поиск, фильтры, состояния) | [16.4-web-memory-list.md](16.4-web-memory-list.md) | ⬜ ожидает |
 | 16.5 Фронт: панель записи (просмотр, связи, правка, «Забыть») | [16.5-web-record-panel.md](16.5-web-record-panel.md) | ⬜ ожидает |

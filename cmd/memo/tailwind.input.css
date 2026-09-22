@@ -14,3 +14,271 @@
    index.html/app.js внутри web/ сканируются оба. */
 @import "tailwindcss" source(none);
 @source "./web";
+
+/* ============================================================
+   Design tokens (Этап 16, задача 16.2) — перенесены как есть из :root
+   принятого макета design/memo-web-prototype.html; источник истины по
+   значениям — design/memo-web-redesign.md §3. Тёмная тема — те же токены
+   под prefers-color-scheme: dark (плюс явный data-theme для отладки).
+   ============================================================ */
+@layer base {
+  :root {
+    color-scheme: light dark;
+    /* поверхности */
+    --bg: #F5F5F2;          /* страница */
+    --surface: #FFFFFF;     /* панели, строки */
+    --surface-2: #ECECE8;   /* колонки доски, вторичные области */
+    --surface-3: #E3E3DE;   /* hover строки */
+    /* текст */
+    --ink: #1C1F23;
+    --ink-2: #464B53;
+    --ink-3: #676C75;       /* ≥ 4.5:1 на surface */
+    /* линии */
+    --line: #DADBD6;
+    --line-strong: #8A8D87; /* ≥ 3:1 на surface — границы контролов (WCAG 1.4.11) */
+    /* акцент и семантика */
+    --accent: #2E5BDA;
+    --accent-ink: #FFFFFF;
+    --accent-soft: #E6ECFB;
+    --danger: #B4231F;
+    --danger-soft: #FBE7E6;
+    --warn: #7A5300;
+    --warn-soft: #FBF1DC;
+    --ok: #1F6E3A;
+    --ok-soft: #E3F2E7;
+    /* виды памяти (текст-контраст ≥ 4.5 на surface) */
+    --k-semantic: #2F5FB3;
+    --k-episodic: #8A5A10;
+    --k-procedural: #187066;
+    --k-debt: #B3402B;
+    --k-task: #6A4FBF;
+    /* шрифты: интерфейс — системный sans; содержание памяти — сериф; id/ветки — mono */
+    --font-ui: -apple-system, "SF Pro Text", "Segoe UI", system-ui, Roboto, sans-serif;
+    --font-prose: "Iowan Old Style", "Charter", "Palatino", Georgia, "Times New Roman", serif;
+    --font-mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    /* шкала */
+    --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 20px; --fs-2xl: 28px;
+    --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+    --r: 4px; --r-lg: 8px;
+    --focus: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+    --drawer-w: 600px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15171B; --surface: #1E2126; --surface-2: #191B1F; --surface-3: #272A30;
+      --ink: #E8E9EB; --ink-2: #C0C4CA; --ink-3: #9EA4AD;
+      --line: #32363D; --line-strong: #6B7079;
+      --accent: #8EA7F2; --accent-ink: #0F172A; --accent-soft: #25304A;
+      --danger: #F08C87; --danger-soft: #3B2321;
+      --warn: #E9C06A; --warn-soft: #3A2F16;
+      --ok: #7FD09A; --ok-soft: #1C3324;
+      --k-semantic: #8FB0F0; --k-episodic: #E2B15A; --k-procedural: #6FCABD; --k-debt: #F09480; --k-task: #B9A6F5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #15171B; --surface: #1E2126; --surface-2: #191B1F; --surface-3: #272A30;
+    --ink: #E8E9EB; --ink-2: #C0C4CA; --ink-3: #9EA4AD;
+    --line: #32363D; --line-strong: #6B7079;
+    --accent: #8EA7F2; --accent-ink: #0F172A; --accent-soft: #25304A;
+    --danger: #F08C87; --danger-soft: #3B2321;
+    --warn: #E9C06A; --warn-soft: #3A2F16;
+    --ok: #7FD09A; --ok-soft: #1C3324;
+    --k-semantic: #8FB0F0; --k-episodic: #E2B15A; --k-procedural: #6FCABD; --k-debt: #F09480; --k-task: #B9A6F5;
+  }
+
+  /* база поверх preflight Tailwind */
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: var(--fs-md)/1.45 var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  /* единое кольцо фокуса на всём интерактивном (§4): двойное — читается на любом фоне */
+  :focus-visible { outline: none; box-shadow: var(--focus); border-radius: var(--r); }
+  h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.25; text-wrap: balance; }
+  h1 { font-size: var(--fs-xl); }
+  h2 { font-size: var(--fs-lg); }
+  h3 { font-size: var(--fs-md); }
+  p { margin: 0; }
+  code { font-family: var(--font-mono); font-size: 0.92em; }
+  input[type=search], input[type=text], select, textarea {
+    background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r);
+    padding: 5px 8px; min-height: 30px;
+  }
+  input[type=search] { width: 100%; }
+  textarea { width: 100%; resize: vertical; }
+  select { padding-right: 24px; }
+}
+
+/* ============================================================
+   Компонентные классы макета, не выражаемые утилитами. Здесь — общие для
+   всех экранов (каркас, контролы, вид/важность/стадия, плашки, панель
+   записи, тосты; часть — .seg/.chip/.imp/.status/.progress/.hl — впервые
+   понадобится в 16.3+); экранные (.overview/.rows, .toolbar/.row,
+   .board/.card, тело панели) добавляют задачи 16.3–16.6 из того же макета.
+   Классы, совпадающие по имени с утилитами Tailwind (.grow → flex-grow:1,
+   .sr-only), здесь НЕ объявляются: слой utilities победил бы молча.
+   ============================================================ */
+@layer components {
+  .skip {
+    position: absolute; left: var(--s3); top: -40px; z-index: 40;
+    background: var(--accent); color: var(--accent-ink); padding: 6px 10px; border-radius: var(--r);
+  }
+  .skip:focus { top: var(--s3); }
+  .mono { font-family: var(--font-mono); font-size: 0.92em; }
+  .muted { color: var(--ink-3); }
+  /* содержание памяти — серифом (§3) */
+  .prose {
+    font-family: var(--font-prose); font-size: 15.5px; line-height: 1.55; max-width: 68ch;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .prose code { font-size: 0.85em; background: var(--surface-2); padding: 0 3px; border-radius: 3px; }
+
+  /* --- каркас: шапка + основная область --- */
+  .topbar {
+    position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: var(--s5); padding: 0 var(--s5); height: 48px;
+  }
+  .brand { font-size: var(--fs-md); font-weight: 700; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: var(--s2); }
+  .brand small { font-weight: 400; color: var(--ink-3); font-size: var(--fs-xs); }
+  .nav { display: flex; gap: var(--s1); height: 100%; }
+  .nav a {
+    display: inline-flex; align-items: center; text-decoration: none;
+    border-bottom: 2px solid transparent; padding: 0 var(--s3); height: 48px; color: var(--ink-2);
+  }
+  .nav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+  .nav a:hover { color: var(--ink); }
+  .nav a:focus-visible { border-radius: 0; }
+  .scopebox { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-sm); color: var(--ink-2); }
+  .scopebox select { max-width: 260px; }
+  main { padding: var(--s5); max-width: 1400px; margin: 0 auto; }
+  main.wide { max-width: none; }
+  main:focus-visible { box-shadow: none; } /* цель skip link — не контрол, кольцо не нужно */
+
+  /* --- контролы --- */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); background: var(--surface);
+    padding: 5px 10px; border-radius: var(--r); cursor: pointer; line-height: 1.3; color: var(--ink); min-height: 30px;
+  }
+  .btn:hover { background: var(--surface-3); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn.danger { color: var(--danger); border-color: var(--danger); }
+  .btn.danger.solid { background: var(--danger); color: #fff; }
+  .btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+  .btn.quiet:hover { background: var(--surface-3); color: var(--ink); }
+  .btn.sm { padding: 2px 8px; min-height: 24px; font-size: var(--fs-sm); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r); overflow: hidden; }
+  .seg button { border: 0; background: var(--surface); padding: 4px 10px; cursor: pointer; color: var(--ink-2); min-height: 28px; }
+  .seg button + button { border-left: 1px solid var(--line-strong); }
+  .seg button[aria-pressed="true"], .seg button[aria-checked="true"] { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+  .seg button:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); border-radius: 0; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 999px;
+    padding: 1px 8px; font-size: var(--fs-xs); color: var(--ink-2); background: var(--surface);
+  }
+  .chip.tag { background: var(--surface-2); border-color: transparent; }
+  .chip button { border: 0; background: none; padding: 0 0 0 2px; cursor: pointer; color: var(--ink-3); line-height: 1; }
+  .chip button:hover { color: var(--danger); }
+
+  /* --- вид записи: цветной квадратик + слово; кромка 3 px — rule-* --- */
+  .kind { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: .01em; }
+  .kind::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: currentColor; }
+  .kind.semantic { color: var(--k-semantic); }
+  .kind.episodic { color: var(--k-episodic); }
+  .kind.procedural { color: var(--k-procedural); }
+  .kind.debt { color: var(--k-debt); }
+  .kind.task { color: var(--k-task); }
+  .rule-semantic { border-left-color: var(--k-semantic); }
+  .rule-episodic { border-left-color: var(--k-episodic); }
+  .rule-procedural { border-left-color: var(--k-procedural); }
+  .rule-debt { border-left-color: var(--k-debt); }
+  .rule-task { border-left-color: var(--k-task); }
+
+  /* --- важность: 5 сегментов 6×10, не звёзды (§3) --- */
+  .imp { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .imp i { display: block; width: 6px; height: 10px; border-radius: 1px; background: var(--surface); border: 1px solid var(--line-strong); }
+  .imp i.on { background: var(--ink-2); border-color: var(--ink-2); }
+  .imp.edit i { cursor: pointer; width: 10px; height: 14px; }
+  .imp.edit i:hover { background: var(--accent); }
+  .imp-btn { border: 0; background: none; padding: 0; cursor: pointer; }
+
+  /* --- стадия задачи --- */
+  .status {
+    display: inline-block; font-size: var(--fs-xs); padding: 1px 7px; border-radius: 3px;
+    background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line);
+  }
+  .status.doing { background: var(--accent-soft); color: var(--ink); border-color: transparent; }
+  .status.done { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+  .status.release, .status.testing, .status.review { border-color: var(--line-strong); }
+
+  /* --- плашки --- */
+  .notice {
+    display: flex; gap: var(--s3); align-items: flex-start; padding: var(--s3) var(--s4); border-radius: var(--r);
+    border: 1px solid var(--line); background: var(--surface); font-size: var(--fs-sm);
+  }
+  .notice.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+  .notice.danger { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+  .notice.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+  .notice .btn { color: inherit; border-color: currentColor; background: transparent; }
+
+  /* --- панель-блок (обзор и др.) и пустое состояние --- */
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
+  .panel > header { display: flex; align-items: baseline; gap: var(--s3); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line); }
+  .panel > header h2 { font-size: var(--fs-md); }
+  .panel > header .muted { font-size: var(--fs-sm); }
+  .panel .body { padding: var(--s3) var(--s4); }
+  .stack { display: grid; gap: var(--s5); }
+  .empty { padding: var(--s7) var(--s5); text-align: center; color: var(--ink-2); }
+  .empty h3 { margin-bottom: var(--s2); }
+  .empty p { color: var(--ink-3); max-width: 46ch; margin: 0 auto var(--s4); }
+  .hl { background: var(--warn-soft); color: inherit; border-radius: 2px; }
+  .progress { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; border: 1px solid var(--line); }
+  .progress i { display: block; height: 100%; background: var(--accent); }
+
+  /* --- панель записи / задачи (drawer): у правого края; на ≥ 1200 px — по центру, 720 px --- */
+  .drawer-backdrop { position: fixed; inset: 0; background: rgba(20, 22, 26, .25); z-index: 9; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: var(--drawer-w); max-width: 100vw;
+    background: var(--surface); border-left: 1px solid var(--line); z-index: 10;
+    display: flex; flex-direction: column; box-shadow: -8px 0 24px rgba(0, 0, 0, .06);
+  }
+  .drawer:focus-visible { box-shadow: none; } /* фокус на диалог при открытии — без кольца */
+  @media (min-width: 1200px) {
+    .drawer {
+      top: 40px; bottom: 40px; right: auto; left: 50%; transform: translateX(-50%); width: 720px;
+      border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; box-shadow: 0 12px 40px rgba(0, 0, 0, .14);
+    }
+    .drawer > header { border-radius: var(--r-lg) var(--r-lg) 0 0; }
+  }
+  .drawer > header {
+    display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--surface);
+  }
+  .drawer > header .grow { min-width: 0; }
+  .drawer > .content { flex: 1; overflow: auto; overscroll-behavior: contain; padding: var(--s4) var(--s5) var(--s7); }
+  .drawer .actions { display: flex; gap: var(--s2); padding: var(--s3) var(--s4); border-top: 1px solid var(--line); background: var(--surface); align-items: center; }
+  .summary { font-size: var(--fs-lg); font-family: var(--font-prose); line-height: 1.35; margin-bottom: var(--s3); }
+  .summary.task { font-size: var(--fs-xl); font-family: var(--font-ui); font-weight: 600; letter-spacing: -0.01em; }
+  @media (prefers-reduced-motion: no-preference) {
+    .drawer { animation: drawer-in .18s ease-out; }
+    @keyframes drawer-in { from { opacity: 0; } to { opacity: 1; } }
+  }
+
+  /* --- тост: один, по центру снизу --- */
+  .toast {
+    position: fixed; left: 50%; bottom: var(--s5); transform: translateX(-50%); z-index: 20;
+    background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: var(--r); font-size: var(--fs-sm);
+  }
+
+  @media (max-width: 760px) {
+    main { padding: var(--s4); }
+    .topbar { gap: var(--s3); padding: 0 var(--s4); }
+    .scopebox span { display: none; }
+    :root { --drawer-w: 100vw; }
+  }
+}
