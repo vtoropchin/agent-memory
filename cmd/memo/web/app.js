@@ -643,8 +643,14 @@ function boardColumn(col, lanes) {
   // «показать ещё» — удвоение от показанного: умолчание doneLimit знает ядро
   const more = s === "done" && col.total > cards.length;
   return '<section class="col" data-status="' + s + '" role="listitem" aria-labelledby="col-' + s + '">' +
-    '<header><span id="col-' + s + '">' + STATUS_LABEL[s] + '</span><span class="n">' + (s === "done" && col.total > cards.length ? cards.length + " из " + col.total : col.total) + '</span><span class="grow"></span></header>' +
-    '<div class="cards">' + body + (more ? '<button type="button" class="btn quiet sm" data-more="' + cards.length * 2 + '">показать ещё</button>' : "") + "</div></section>";
+    '<header><span id="col-' + s + '">' + STATUS_LABEL[s] + '</span><span class="n">' + (s === "done" && col.total > cards.length ? cards.length + " из " + col.total : col.total) + '</span><span class="grow"></span>' +
+    // «+» в шапке — везде, кроме «готово»: карточку не заводят сразу готовой
+    (s === "done" ? "" : '<button type="button" class="add" data-new="' + s + '" aria-label="Создать задачу в стадии «' + STATUS_LABEL[s] + '»" title="Создать задачу в «' + STATUS_LABEL[s] + '»">+</button>') +
+    '</header>' +
+    '<div class="cards">' + body + (more ? '<button type="button" class="btn quiet sm" data-more="' + cards.length * 2 + '">показать ещё</button>' : "") + "</div>" +
+    // в «бэклоге» и «к работе» вход постоянный: туда заводят чаще всего, прятать его в hover неверно (§2.4)
+    (s === "backlog" || s === "todo" ? '<button type="button" class="btn add-card" data-new="' + s + '">+ Задача</button>' : "") +
+    "</section>";
 }
 
 async function renderBoard() {
@@ -681,6 +687,7 @@ async function renderBoard() {
   const hasFilter = f.type || f.parent || f.tag;
   el.innerHTML = '<h2 id="h-board" class="sr-only">Доска</h2>' +
     '<div class="board-toolbar">' +
+    '<button type="button" class="btn primary" id="b-new">+ Задача</button>' +
     '<label>Тип <select id="b-type"><option value="">любой</option>' + Object.keys(TYPE_LABEL).map(function (k) { return '<option value="' + k + '"' + (f.type === k ? " selected" : "") + ">" + TYPE_LABEL[k] + "</option>"; }).join("") + "</select></label>" +
     '<span class="b-parent"><label for="b-parent">Внутри</label> ' + (f.parent
       ? '<span class="chip">' + esc(parentLabel.slice(0, 40)) + '<button type="button" data-board-parent="" aria-label="Снять фильтр по родителю">×</button></span>'
@@ -691,6 +698,19 @@ async function renderBoard() {
     (hasFilter ? '<button type="button" class="btn quiet sm" data-board-reset>Сбросить</button>' : "") + "</div>" +
     '<p class="muted hint">Перетащи карточку в другую колонку или открой её и смени стадию — с клавиатуры: Enter на карточке, затем поле «Стадия». Заблокированную задачу дальше «к работе» не пустит сервер.</p>' +
     '<div class="board" role="list" aria-label="Стадии">' + cols.map(function (c) { return boardColumn(c, f.lanes); }).join("") + "</div>";
+  if (flashId) {
+    const fresh = $('.card[data-id="' + flashId + '"]', el);
+    flashId = "";
+    if (fresh) {
+      fresh.classList.add("flash");
+      fresh.scrollIntoView({ block: "nearest" });
+      // форма закрылась, её кнопка-инициатор ушла вместе с перерисовкой доски —
+      // фокус подхватывает новая карточка, а не теряется на body
+      const ttl = $(".ttl", fresh);
+      if (ttl && (!document.activeElement || document.activeElement === document.body)) ttl.focus();
+      setTimeout(function () { fresh.classList.remove("flash"); }, 2200);
+    }
+  }
 }
 
 // moveCard — PATCH {status}: оптимистичный перенос карточки в колонку, затем
@@ -714,6 +734,13 @@ async function moveCard(id, status, summary) {
 document.addEventListener("change", function (e) {
   const t = e.target;
   if (!(t instanceof Element)) return;
+  if (compose.on && t.closest(".compose")) {
+    // тип и scope меняют только затронутые узлы формы — панель не перерисовывается (§2.6)
+    syncCompose();
+    if (t.id === "nt-type") { setComposeType(t.value); return; }
+    if (t.id === "nt-scope") { setComposeScope(t.value); return; }
+    return;
+  }
   if (t.id === "b-type") { setBoardParams({ type: t.value }); return; }
   if (t.id === "b-tag") { setBoardParams({ tag: t.value }); return; }
   if (t.id === "b-lanes") { setBoardParams({ lanes: t.checked }); return; }
@@ -802,6 +829,24 @@ function pickerClick(t) {
 
 // --- панель задачи (§2.5): поверх общей панели записи ---
 
+// taskFields — сетка 2×2 «Стадия · Тип · Ветка · Процесс» (§2.5). Одна
+// разметка на панель задачи и форму создания (§2.6: форма — та же панель в
+// режиме правки, а не похожая на неё): различаются префикс id полей и
+// data-field — в панели смена поля уходит в PATCH сразу, в форме копится в
+// черновике до «Создать».
+function taskFields(prefix, t, opts) {
+  const dis = opts && opts.disabled ? " disabled" : "";
+  const live = !!(opts && opts.live);
+  const df = function (name) { return live ? ' data-field="' + name + '"' : ""; };
+  return '<div class="fields-2">' +
+    '<div class="field"><label for="' + prefix + 'status">Стадия</label><select id="' + prefix + 'status"' + df("status") + dis + ">" +
+    STATUSES.map(function (x) { return '<option value="' + x + '"' + (x === t.status ? " selected" : "") + ">" + STATUS_LABEL[x] + "</option>"; }).join("") + "</select></div>" +
+    '<div class="field"><label for="' + prefix + 'type">Тип</label><select id="' + prefix + 'type"' + df("type") + dis + ">" +
+    Object.keys(TYPE_LABEL).map(function (k) { return '<option value="' + k + '"' + (t.type === k ? " selected" : "") + ">" + TYPE_LABEL[k] + "</option>"; }).join("") + "</select></div>" +
+    '<div class="field"><label for="' + prefix + 'branch">Ветка</label><input type="text" id="' + prefix + 'branch" class="mono" value="' + esc(t.branch || "") + '" placeholder="feat/…' + (live ? "" : " — можно позже") + '" autocomplete="off" spellcheck="false"' + df("branch") + dis + "></div>" +
+    '<div class="field"><label for="' + prefix + 'workflow">Процесс</label><input type="text" id="' + prefix + 'workflow" value="' + esc(t.workflow || "") + '" placeholder="dev, ultracode…" autocomplete="off"' + df("workflow") + dis + "></div></div>";
+}
+
 function taskBody(card) {
   const t = card.memory, archived = !!t.supersededBy;
   const b = card.blockedBy || [], blocks = card.blocks || [], p = card.parent, ch = card.children || [], pr = card.progress;
@@ -815,12 +860,8 @@ function taskBody(card) {
     html += '<div class="notice danger" style="margin-bottom:var(--s4)"><div class="grow"><strong>Заблокирована.</strong> Дальше «к работе» не перевести, пока ' + (b.length === 1 ? "не закрыта" : "не закрыты") + ": " +
       b.map(function (x) { return '<button type="button" class="btn quiet sm inline-link" data-open="' + esc(x.id) + '">' + esc(x.summary || x.id) + "</button> (" + esc(STATUS_LABEL[x.status] || x.status) + ")"; }).join(", ") + "</div></div>";
   }
-  const dis = archived ? " disabled" : "";
-  html += '<div class="fields-2">' +
-    '<div class="field"><label for="f-status">Стадия</label><select id="f-status" data-field="status"' + dis + ">" + STATUSES.map(function (s) { return '<option value="' + s + '"' + (s === t.status ? " selected" : "") + ">" + STATUS_LABEL[s] + "</option>"; }).join("") + "</select></div>" +
-    '<div class="field"><label for="f-type">Тип</label><select id="f-type" data-field="type"' + dis + ">" + Object.keys(TYPE_LABEL).map(function (k) { return '<option value="' + k + '"' + (t.type === k ? " selected" : "") + ">" + TYPE_LABEL[k] + "</option>"; }).join("") + "</select></div>" +
-    '<div class="field"><label for="f-branch">Ветка</label><input type="text" id="f-branch" class="mono" value="' + esc(t.branch || "") + '" placeholder="feat/…" autocomplete="off" spellcheck="false" data-field="branch"' + dis + "></div>" +
-    '<div class="field"><label for="f-workflow">Процесс</label><input type="text" id="f-workflow" value="' + esc(t.workflow || "") + '" placeholder="dev, ultracode…" autocomplete="off" data-field="workflow"' + dis + "></div></div>" +
+  const dis = archived;
+  html += taskFields("f-", t, { live: true, disabled: dis }) +
     '<div class="hgroup">' + imp(t.importance, !archived && !drawer.edit) + "<span>приоритет " + t.importance + " из 5</span><span class=\"muted\">·</span><span class=\"muted\">создана " + esc(rel(t.createdAt)) + "</span></div>" +
     '<div class="section"><h3>Описание</h3>' + (drawer.edit ? '<textarea id="ed-content" rows="10" aria-label="Описание">' + esc(t.content) + "</textarea>" : '<div class="prose">' + esc(t.content) + "</div>") + "</div>" +
     '<div class="section"><h3>Входит в</h3>' + (p
@@ -828,10 +869,17 @@ function taskBody(card) {
         (archived ? "<span></span>" : '<button type="button" class="btn quiet sm" data-unlink="' + esc(p.id) + '" data-rel="part_of">Отвязать</button>') + "</li></ul>"
       : '<p class="muted small">Ни в какой эпик или историю не входит.</p>') +
     (archived ? "" : '<div class="picker"><input type="search" placeholder="Найти эпик или историю…" aria-label="Родитель: поиск задачи" autocomplete="off" data-picker="task-parent"><ul hidden></ul></div>') + "</div>";
-  if (ch.length) {
+  // у эпика и истории секция показывается и пустой — ради кнопки «+ … внутрь» (§2.5)
+  const container = t.type === "epic" || t.type === "story";
+  if (ch.length || container) {
+    const childType = t.type === "epic" ? "story" : "task";
     html += '<div class="section"><h3>Дочерние <span class="muted">' + (pr ? pr.done + " из " + pr.total + " готово" : ch.length) + "</span></h3>" +
       (pr && pr.total ? '<div class="progress" style="margin-bottom:6px"><i style="width:' + Math.round(pr.done / pr.total * 100) + '%"></i></div>' : "") +
-      '<ul class="links">' + ch.map(function (c) { return '<li><span class="rel in">включает</span><span class="to"><button type="button" data-open="' + esc(c.id) + '">' + esc(c.summary || c.id) + "</button> " + statusTag(c.status) + "</span><span></span></li>"; }).join("") + "</ul></div>";
+      (ch.length
+        ? '<ul class="links">' + ch.map(function (c) { return '<li><span class="rel in">включает</span><span class="to"><button type="button" data-open="' + esc(c.id) + '">' + esc(c.summary || c.id) + "</button> " + statusTag(c.status) + "</span><span></span></li>"; }).join("") + "</ul>"
+        : '<p class="muted small">Внутрь ничего не входит.</p>') +
+      (container && !archived ? '<button type="button" class="btn quiet sm" data-new-child="' + esc(t.id) + '" data-child-type="' + childType + '" data-child-scope="' + esc(t.scope) + '" data-child-label="' + esc(t.summary || t.id) + '" style="margin-top:6px">+ ' + (childType === "story" ? "История внутрь эпика" : "Задача внутрь истории") + "</button>" : "") +
+      "</div>";
   }
   html += '<div class="section"><h3>Блокировки</h3>' + (b.length || blocks.length ? '<ul class="links">' +
     b.map(function (x) { return '<li><span class="rel out">заблокирована</span><span class="to"><button type="button" data-open="' + esc(x.id) + '">' + esc(x.summary || x.id) + "</button> " + statusTag(x.status) + "</span>" + (archived ? "<span></span>" : '<button type="button" class="btn quiet sm" data-unlink="' + esc(x.id) + '" data-rel="blocked_by">Снять</button>') + "</li>"; }).join("") +
@@ -892,6 +940,18 @@ function setBackgroundInert(on) {
 
 function renderDrawer() {
   const root = $("#drawer-root");
+  // форма создания живёт в том же drawer-root и НЕ перерисовывается целиком:
+  // смонтированную панель общий перерендер (applyRoute) не трогает, иначе
+  // мигает анимация появления и теряется черновик (§2.6)
+  if (compose.on) {
+    if (!root.querySelector(".compose")) {
+      root.innerHTML = composeDrawer();
+      setBackgroundInert(true);
+      updateParentField();
+      $("#nt-summary").focus();
+    }
+    return;
+  }
   if (!state.id) {
     if (!drawer.id && !root.firstChild) return;
     drawer.id = ""; drawer.card = null; drawer.edit = false; drawer.confirm = false;
@@ -1179,6 +1239,307 @@ function addTag(input) {
   patchRecord({ tags: (m.tags || []).concat([v]) }, "Тег «" + v + "» добавлен", "[data-newtag]");
 }
 
+// --- форма создания задачи (§2.6, задача 17.2) ---
+
+// Плейсхолдеры зависят от типа: у эпика, истории и задачи спрашивают разное.
+const TITLE_PLACEHOLDER = { epic: "Цель эпика — одной строкой", story: "Что должно появиться у пользователя", task: "Что сделать — одной строкой" };
+const BODY_PLACEHOLDER = { epic: "Зачем эпик, из чего состоит, когда считается закрытым", story: "Сценарий, границы, критерий приёмки", task: "Что сделать, границы, критерий приёмки" };
+
+// compose — черновик новой задачи. В хэш не пишется: форма — не адрес (как и
+// drawer.edit). parents — кандидаты в родители того же scope (эпики и
+// истории); parentsScope — scope, для которого они УЖЕ загружены (null — ещё
+// нет). Запрос один на scope в пределах одной открытой формы: смена типа
+// только фильтрует загруженное, без запроса и без перерисовки панели. Кэш
+// живёт не дольше формы — иначе следующая форма видела бы доску такой, какой
+// она была до создания предыдущей карточки.
+const compose = { on: false, draft: null, parents: [], parentsScope: null, busy: false };
+let flashId = "";   // id только что созданной карточки — подсветка на доске ~2 с
+
+function composeScope() { return state.scope || (state.stats && state.stats.homeScope) || ""; }
+
+// boardParentLabel — заголовок родителя из фильтра «Внутри»: форма, открытая с
+// доски, показывает его в «Входит в» сразу, не дожидаясь списка кандидатов.
+function boardParentLabel() {
+  const chip = $(".board-toolbar .b-parent .chip");
+  return chip ? chip.textContent.replace(/\s*×\s*$/, "").trim() : "";
+}
+
+// parentCandidates — допустимые родители по уровню: направление part_of
+// фиксировано «дочь → родитель», история вкладывается в эпик, задача — в
+// историю или эпик, эпик не вкладывается никуда.
+function parentCandidates() {
+  const type = compose.draft.type;
+  if (type === "epic") return [];
+  return compose.parents.filter(function (x) { return type === "story" ? x.type === "epic" : x.type !== "task"; });
+}
+
+function parentOptions() {
+  const c = compose.draft;
+  return '<option value="">ни во что</option>' + parentCandidates().map(function (x) {
+    return '<option value="' + esc(x.id) + '"' + (c.parent === x.id ? " selected" : "") + ">" +
+      esc((TYPE_LABEL[x.type] || x.type) + ": " + (x.summary || x.id).slice(0, 64)) + "</option>";
+  }).join("");
+}
+
+// composeDrawer — та же панель задачи в режиме правки (§2.6): шапка, h2-заголовок
+// полем, сетка полей (общий taskFields), приоритет (общий imp), секции
+// «Описание / Входит в / Теги (общий tagsEditor) / Служебное» и футер действий.
+function composeDrawer() {
+  const c = compose.draft;
+  const stats = state.stats;
+  const scopes = stats && stats.byScope ? Object.keys(stats.byScope).sort() : [];
+  if (c.scope && scopes.indexOf(c.scope) === -1) scopes.push(c.scope);
+  return '<div class="drawer-backdrop" data-close-compose></div>' +
+    '<aside class="drawer compose editing" role="dialog" aria-modal="true" aria-label="Новая задача на доске" tabindex="-1">' +
+    '<header>' + kindTag("task") + '<div class="grow"><span class="muted" id="nt-scope-label">' + esc(c.scope) + "</span></div>" +
+    '<button type="button" class="btn quiet sm" data-close-compose aria-label="Закрыть форму">Закрыть ✕</button></header>' +
+    '<div class="content">' +
+    '<div id="nt-notice"></div>' +
+    '<h2 class="summary task" id="nt-title-field"><label class="sr-only" for="nt-summary">Заголовок</label>' +
+    '<input type="text" id="nt-summary" value="' + esc(c.summary) + '" autocomplete="off" spellcheck="false" placeholder="' + esc(TITLE_PLACEHOLDER[c.type]) + '" aria-describedby="nt-err">' +
+    '<span class="err" id="nt-err" role="alert"></span></h2>' +
+    taskFields("nt-", c, {}) +
+    '<div class="hgroup"><span id="nt-imp-box">' + imp(c.importance, true) + '</span><span id="nt-imp-text">приоритет ' + c.importance + " из 5</span></div>" +
+    '<div class="section"><h3>Описание</h3><label class="sr-only" for="nt-content">Описание</label>' +
+    '<textarea id="nt-content" rows="10" placeholder="' + esc(BODY_PLACEHOLDER[c.type]) + '">' + esc(c.content) + "</textarea></div>" +
+    '<div class="section" id="nt-parent-sec"' + (c.type === "epic" ? " hidden" : "") + "><h3>Входит в</h3>" +
+    '<label class="sr-only" for="nt-parent">Родительская запись</label>' +
+    '<select id="nt-parent" style="width:100%">' + parentOptions() + "</select>" +
+    '<span class="hint" id="nt-parent-hint"></span></div>' +
+    '<div class="section"><h3>Теги</h3><div id="nt-tags">' + tagsEditor({ tags: c.tags }) + "</div></div>" +
+    '<div class="section"><h3>Служебное</h3><div class="field" style="margin-bottom:0"><label for="nt-scope">Scope</label>' +
+    '<select id="nt-scope" style="max-width:320px">' + scopes.map(function (s) {
+      return '<option value="' + esc(s) + '"' + (s === c.scope ? " selected" : "") + ">" + esc(s) + "</option>";
+    }).join("") + "</select>" +
+    '<span class="hint">id и даты запись получит при создании.</span></div></div>' +
+    "</div>" +
+    '<div class="actions"><button type="button" class="btn primary" data-compose-submit>Создать</button>' +
+    '<button type="button" class="btn" data-close-compose>Отмена</button><span class="grow"></span>' +
+    '<span class="muted" style="font-size:var(--fs-xs)">⌘/Ctrl + ↵ — создать · Esc — закрыть</span></div></aside>';
+}
+
+// openCompose — открыть форму с предзаполнением точки входа (§2.6): панель
+// доски, «+» в шапке колонки, «+ Задача» под карточками, «+ … внутрь» в
+// панели эпика/истории, клавиша n. Из любого раздела переключает на доску.
+function openCompose(init, parentLabel) {
+  const initiator = document.activeElement;
+  const onBoard = state.view === "board";
+  const f = onBoard ? boardParams() : { type: "", parent: "" };
+  const draft = Object.assign({
+    type: f.type || "task", status: "todo", parent: f.parent || "",
+    summary: "", content: "", importance: 3, tags: [], branch: "", workflow: "",
+    scope: composeScope(),
+  }, init || {});
+  if (draft.type === "epic") draft.parent = "";
+  compose.draft = draft;
+  compose.on = true;
+  compose.busy = false;
+  // кандидаты грузятся заново на каждую форму; предзаполненный родитель
+  // показан сразу его заголовком, до ответа, — иначе «Входит в» на миг
+  // показывало бы «ни во что» там, где родитель выбран точкой входа
+  compose.parentsScope = null;
+  compose.parents = draft.parent && parentLabel
+    ? [{ id: draft.parent, summary: parentLabel, type: draft.type === "story" ? "epic" : "story" }]
+    : [];
+  // панель записи и форма не сосуществуют: id уходит из хэша, но фон не
+  // возвращает фокус — форма уже смонтирована в том же drawer-root
+  if (!onBoard || state.id) navigate({ view: "board", params: onBoard ? state.params : new URLSearchParams(), id: "" });
+  lastFocus = initiator;
+  renderDrawer();
+  loadParents();
+}
+
+function closeCompose() {
+  if (!compose.on) return;
+  compose.on = false;
+  compose.draft = null;
+  compose.busy = false;
+  renderDrawer();
+}
+
+// loadParents — кандидаты в родители: живые эпики и истории того же scope
+// (GET /api/board — тот же источник, что у доски; колонка «готово» усечена
+// сервером, как и на доске). Запрос один на scope; смена типа только
+// фильтрует загруженное.
+async function loadParents() {
+  const scope = compose.draft.scope;
+  if (compose.parentsScope === scope) { updateParentField(); return; }
+  let board;
+  try {
+    board = await api("/api/board" + qs({ scope: scope, type: ["epic", "story"] }));
+  } catch (err) {
+    if (compose.on) updateParentField();
+    return;
+  }
+  if (!compose.on || compose.draft.scope !== scope) return;
+  const out = [];
+  (board.columns || []).forEach(function (col) {
+    (col.cards || []).forEach(function (x) { out.push({ id: x.id, summary: x.summary || x.id, type: x.type }); });
+  });
+  // предзаполненный родитель остаётся в списке, даже если доска его не вернула
+  // (усечённая колонка «готово»): точка входа уже выбрала его осознанно
+  const pre = compose.parents.filter(function (x) { return x.id === compose.draft.parent && !out.some(function (y) { return y.id === x.id; }); });
+  out.sort(function (a, b) { return String(a.summary).localeCompare(String(b.summary), "ru"); });
+  compose.parents = pre.concat(out);
+  compose.parentsScope = scope;
+  updateParentField();
+}
+
+// --- точечные обновления формы (без перерисовки панели, §2.6) ---
+
+function updateParentField() {
+  const sec = $("#nt-parent-sec");
+  if (!sec) return;
+  const c = compose.draft;
+  // пока кандидаты этого scope не загружены, выбранного родителя не снимаем:
+  // он пришёл из точки входа и в загруженном списке окажется
+  const loaded = compose.parentsScope === c.scope;
+  const list = parentCandidates();
+  if (loaded && c.parent && !list.some(function (x) { return x.id === c.parent; })) c.parent = "";
+  $("#nt-parent").innerHTML = parentOptions();
+  $("#nt-parent-hint").textContent = !loaded || list.length ? "" : (c.type === "story"
+    ? "В этом scope ещё нет эпиков — привяжешь позже."
+    : "В этом scope ещё нет эпиков и историй — привяжешь позже.");
+}
+
+function setComposeType(type) {
+  const c = compose.draft;
+  c.type = type;
+  if (type === "epic") c.parent = "";
+  $("#nt-summary").placeholder = TITLE_PLACEHOLDER[type] || "";
+  $("#nt-content").placeholder = BODY_PLACEHOLDER[type] || "";
+  $("#nt-parent-sec").hidden = type === "epic";
+  if (type !== "epic") updateParentField();
+}
+
+function setComposeImportance(n) {
+  compose.draft.importance = n;
+  $("#nt-imp-box").innerHTML = imp(n, true);
+  $("#nt-imp-text").textContent = "приоритет " + n + " из 5";
+}
+
+function renderComposeTags(focusInput) {
+  $("#nt-tags").innerHTML = tagsEditor({ tags: compose.draft.tags });
+  if (focusInput) $("#nt-tags [data-newtag]").focus();
+}
+
+function setComposeScope(scope) {
+  const c = compose.draft;
+  c.scope = scope;
+  c.parent = "";
+  $("#nt-scope-label").textContent = scope;
+  loadParents();
+}
+
+function showComposeError(text) {
+  $("#nt-notice").innerHTML = text
+    ? '<div class="notice danger" role="alert" style="margin-bottom:var(--s4)"><div class="grow"><strong>Задача не создана.</strong> ' + esc(text) + "</div></div>"
+    : "";
+}
+
+function showTitleError(text) {
+  $("#nt-title-field").classList.toggle("bad", !!text);
+  $("#nt-err").textContent = text || "";
+}
+
+// syncCompose — читает форму в черновик; зовётся перед любым действием,
+// которое зависит от введённого (отправка, смена типа/scope, правка тегов).
+function syncCompose() {
+  const c = compose.draft;
+  if (!c || !$("#nt-summary")) return;
+  c.summary = $("#nt-summary").value;
+  c.content = $("#nt-content").value;
+  c.status = $("#nt-status").value;
+  c.branch = $("#nt-branch").value;
+  c.workflow = $("#nt-workflow").value;
+  c.parent = c.type === "epic" ? "" : $("#nt-parent").value;
+  c.scope = $("#nt-scope").value;
+}
+
+// addComposeTag — Enter в поле «+ тег…»: тег уходит в черновик, запроса нет
+// (запись ещё не создана).
+function addComposeTag(input) {
+  const v = input.value.trim();
+  if (!v) return;
+  const tags = compose.draft.tags;
+  if (tags.indexOf(v) === -1) { tags.push(v); tags.sort(); }
+  renderComposeTags(true);
+}
+
+// submitCompose — POST /api/memories (задача 17.1). 201 → панель закрывается,
+// доска перечитывается, карточка подсвечивается, тост называет колонку;
+// фильтры, которые спрятали бы новую карточку, сбрасываются. Ошибка → плашка
+// в форме, черновик цел.
+async function submitCompose() {
+  syncCompose();
+  const c = compose.draft;
+  const title = c.summary.trim();
+  if (!title) {
+    showTitleError("Без заголовка не создаётся: агент видит в брифе именно его.");
+    $("#nt-summary").focus();
+    return;
+  }
+  showTitleError("");
+  if (compose.busy) return;
+  compose.busy = true;
+  let created;
+  try {
+    created = await api("/api/memories", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "task", scope: c.scope, type: c.type, status: c.status,
+        summary: title, content: c.content.trim(), importance: c.importance,
+        tags: c.tags, branch: c.branch.trim(), workflow: c.workflow.trim(),
+        links: c.parent ? [{ id: c.parent, rel: "part_of" }] : [],
+      }),
+    });
+  } catch (err) {
+    compose.busy = false;
+    showComposeError(err.status === 0
+      ? "Запрос POST /api/memories завершился ошибкой соединения. Черновик цел — проверь, что memo web запущен, и нажми «Создать» ещё раз."
+      : err.message);
+    return;
+  }
+  const parent = c.parent;
+  closeCompose();
+  flashId = created.id;
+  // фильтры доски, которые спрятали бы новую карточку (§2.6), снимаем
+  const f = boardParams();
+  const next = Object.assign({}, f, {
+    type: f.type && f.type !== created.type ? "" : f.type,
+    parent: f.parent && f.parent !== parent ? "" : f.parent,
+    tag: f.tag && (created.tags || []).indexOf(f.tag) === -1 ? "" : f.tag,
+  });
+  const p = new URLSearchParams();
+  if (next.type) p.set("type", next.type);
+  if (next.parent) p.set("parent", next.parent);
+  if (next.tag) p.set("tag", next.tag);
+  if (!next.lanes) p.set("group", "0");
+  if (next.doneLimit) p.set("doneLimit", String(next.doneLimit));
+  lastScreenKey = "";   // доску перечитать в любом случае: в ней новая карточка
+  navigate({ view: "board", scope: state.scope && state.scope !== created.scope ? created.scope : state.scope, params: p, id: "" });
+  showToast("Создана: «" + title.slice(0, 40) + (title.length > 40 ? "…" : "") + "» — в «" + (STATUS_LABEL[created.status] || created.status) + "»");
+}
+
+// composeClick — действия внутри формы; true — событие обработано. Разметка
+// приоритета и тегов общая с панелью записи, поэтому те же data-imp/data-untag/
+// data-newtag разбираются здесь, пока форма открыта.
+function composeClick(t) {
+  if (t.closest("[data-compose-submit]")) { submitCompose(); return true; }
+  if (t.closest("[data-close-compose]")) { closeCompose(); return true; }
+  if (!t.closest(".compose")) return false;
+  const ib = t.closest("[data-imp]");
+  if (ib) { setComposeImportance(parseInt(ib.getAttribute("data-imp"), 10)); return true; }
+  const untag = t.closest("[data-untag]");
+  if (untag) {
+    const tag = untag.getAttribute("data-untag");
+    compose.draft.tags = compose.draft.tags.filter(function (x) { return x !== tag; });
+    renderComposeTags(true);
+    return true;
+  }
+  return false;
+}
+
 // --- тосты (§5): один активный, замещается следующим, гаснет через 2,6 с ---
 
 let toastTimer = null;
@@ -1195,7 +1556,16 @@ document.addEventListener("click", function (e) {
   const t = e.target;
   if (!(t instanceof Element)) return;
   if (pickerClick(t)) return;
+  if (compose.on && composeClick(t)) return;
   if (state.id && t.closest("#drawer-root") && drawerClick(t)) return;
+  if (t.closest("#b-new")) { openCompose({}, boardParentLabel()); return; }
+  const nw = t.closest("[data-new]");
+  if (nw) { openCompose({ status: nw.getAttribute("data-new") }, boardParentLabel()); return; }
+  const nc = t.closest("[data-new-child]");
+  if (nc) {
+    openCompose({ parent: nc.getAttribute("data-new-child"), type: nc.getAttribute("data-child-type"), scope: nc.getAttribute("data-child-scope") }, nc.getAttribute("data-child-label"));
+    return;
+  }
   if (t.closest("[data-board-reset]")) { setBoardParams({ type: "", parent: "", tag: "" }); return; }
   const bp = t.closest("[data-board-parent]");
   if (bp) { setBoardParams({ parent: bp.getAttribute("data-board-parent") }); return; }
@@ -1230,6 +1600,18 @@ document.addEventListener("click", function (e) {
 });
 
 document.addEventListener("keydown", function (e) {
+  if (compose.on) {
+    if (e.key === "Escape") { e.preventDefault(); closeCompose(); return; }
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitCompose(); return; }
+    if (e.key === "Enter" && e.target.matches("[data-newtag]")) { e.preventDefault(); addComposeTag(e.target); return; }
+    return;
+  }
+  // n — новая задача из любого раздела (§2.6); вне полей ввода и вне панели
+  if (e.key === "n" && !state.id && !e.target.matches("input,textarea,select") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    openCompose({});
+    return;
+  }
   if (e.key === "Escape" && state.id) {
     e.preventDefault();
     // Esc снимает подтверждение или правку, и только потом закрывает панель
