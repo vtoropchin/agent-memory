@@ -434,9 +434,148 @@ async function renderOverview() {
   el.innerHTML = html;
 }
 
+// --- Память (§2.2, задача 16.4): поиск, фильтры, список; ранжирование — бэкенд ---
+
+const PAGE = 50;
+let focusSearch = false;   // после перерисовки вернуть фокус в поле поиска (ввод, «/», смена режима)
+
+// memoryParams — фильтры экрана из хэша: q, mode (semantic|lexical), kind[], archived, offset.
+function memoryParams() {
+  const p = state.params;
+  const mode = p.get("mode") === "lexical" ? "lexical" : "semantic";
+  const kinds = p.getAll("kind").filter(function (k) { return KINDS.indexOf(k) !== -1; });
+  return { q: (p.get("q") || "").trim(), mode: mode, kinds: kinds, archived: p.get("archived") === "1", offset: Math.max(0, parseInt(p.get("offset") || "0", 10) || 0) };
+}
+
+// setMemoryParams — записать фильтры в хэш (смена фильтра сбрасывает offset).
+function setMemoryParams(patch) {
+  const cur = memoryParams();
+  const next = Object.assign({}, cur, patch);
+  const p = new URLSearchParams();
+  if (next.q) p.set("q", next.q);
+  if (next.mode === "lexical") p.set("mode", "lexical");
+  next.kinds.forEach(function (k) { p.append("kind", k); });
+  if (next.archived) p.set("archived", "1");
+  if (patch.offset != null && next.offset > 0) p.set("offset", String(next.offset));
+  navigate({ params: p });
+}
+
+// highlight — подсветка слов запроса в тексте; работает по уже экранированной
+// строке и экранированному слову, чтобы сырые данные не попали в innerHTML.
+function highlight(text, q) {
+  let out = esc(text);
+  if (!q) return out;
+  q.split(/\s+/).filter(function (w) { return w.length > 2; }).forEach(function (w) {
+    const re = new RegExp("(" + esc(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi");
+    out = out.replace(re, '<mark class="hl">$1</mark>');
+  });
+  return out;
+}
+
+function memoryRow(m, q) {
+  const arch = !!m.supersededBy;
+  const src = m.source === "lexical+vector" ? "слова + смысл" : m.source === "vector" ? "по смыслу" : m.source === "lexical" ? "по словам" : "";
+  return '<article class="row rule-' + esc(m.kind) + '" role="listitem" data-open="' + esc(m.id) + '" aria-selected="' + (state.id === m.id) + '">' +
+    '<div class="meta">' + kindTag(m.kind) + '<span class="scope">' + esc(scopeShort(m.scope)) + "</span>" + (m.kind === "task" && m.status ? statusTag(m.status) : "") + "</div>" +
+    '<div class="main"><button type="button" class="title' + (arch ? " archived" : "") + '" data-open="' + esc(m.id) + '">' + highlight(title(m), q) + "</button>" +
+    '<div class="tags">' + tagChips(m.tags) + (arch ? '<span class="chip">в архиве · заменена</span>' : "") +
+    (m.expiresAt ? '<span class="chip">истекает ' + esc(rel(m.expiresAt)) + "</span>" : "") + "</div></div>" +
+    '<div class="side">' + imp(m.importance) + "<span>" + esc(rel(m.createdAt)) + "</span>" + (src ? '<span class="src">' + src + "</span>" : "") + "</div></article>";
+}
+
+async function renderMemory() {
+  const el = $("#screen-memory");
+  const f = memoryParams();
+  const scope = state.scope;
+  const seq = ++renderSeq;
+  const active = f.kinds.length + (f.archived ? 1 : 0) + (scope ? 1 : 0) + (f.q ? 1 : 0);
+  // шапка экрана рисуется сразу — поле поиска доступно, пока грузится список
+  el.innerHTML = '<h2 id="h-memory" class="sr-only">Память</h2>' +
+    '<div class="toolbar"><div class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>' +
+    '<input type="search" id="q" value="' + esc(f.q) + '" name="q" autocomplete="off" spellcheck="false" placeholder="Что искать: слово, термин или смысл… (/)" aria-label="Поиск по памяти"></div>' +
+    '<div class="seg" role="radiogroup" aria-label="Режим поиска">' +
+    '<button type="button" role="radio" aria-checked="' + (f.mode === "semantic") + '" data-mode="semantic">по смыслу</button>' +
+    '<button type="button" role="radio" aria-checked="' + (f.mode === "lexical") + '" data-mode="lexical">по словам</button></div></div>' +
+    '<div class="filters"><span>Вид</span><div class="checks" role="group" aria-label="Вид записи">' + KINDS.map(function (k) {
+      return '<label><input type="checkbox" data-kind="' + k + '"' + (f.kinds.indexOf(k) !== -1 ? " checked" : "") + '><span class="kind ' + k + '">' + KIND_PLURAL[k] + "</span></label>";
+    }).join("") + "</div>" +
+    '<label class="archived"><input type="checkbox" id="archived"' + (f.archived ? " checked" : "") + "> с архивом</label>" +
+    '<div class="active">' + (active ? "<span>" + active + " " + plural(active, "фильтр", "фильтра", "фильтров") + (scope ? " · " + esc(scopeShort(scope)) : "") + '</span><button type="button" class="btn quiet sm" data-reset>Сбросить всё</button>' : "<span>фильтров нет</span>") + "</div></div>" +
+    '<div id="mem-results"><p class="muted">Загрузка…</p></div>';
+  if (focusSearch) {
+    focusSearch = false;
+    const i = $("#q");
+    i.focus();
+    i.setSelectionRange(i.value.length, i.value.length);
+  }
+  const box = $("#mem-results");
+  let items, total, vector = true;
+  try {
+    if (f.q) {
+      const r = await api("/api/search" + qs({ q: f.q, mode: f.mode, kind: f.kinds, scope: scope, limit: PAGE }));
+      items = r.items || []; total = items.length; vector = r.vector !== false;
+    } else {
+      const r = await api("/api/memories" + qs({ scope: scope, kind: f.kinds, superseded: f.archived ? 1 : "", limit: PAGE, offset: f.offset }));
+      items = r.items || []; total = r.total;
+    }
+  } catch (err) {
+    if (seq !== renderSeq) return;
+    screenError(box, err, renderMemory);
+    return;
+  }
+  if (seq !== renderSeq) return;
+  const degraded = f.q && f.mode === "semantic" && !vector;
+  let html = "";
+  if (degraded) {
+    html += '<div class="notice warn" style="margin-bottom:var(--s3)"><div class="grow"><strong>Поиск только по словам.</strong> Эмбеддер не отвечает, поэтому запрос не эмбеддится и перефразировки не найдутся — ищи точными терминами. Как только эмбеддер вернётся, режим «по смыслу» включится сам.</div></div>';
+  }
+  html += '<div class="results-head" aria-live="polite"><span>' + (f.q
+    ? items.length + " " + plural(items.length, "результат", "результата", "результатов") + " по «" + esc(f.q) + "»"
+    : (total ? (f.offset + 1) + "–" + (f.offset + items.length) + " из " + fmtN(total) : "0") + " — новые сверху") + "</span>" +
+    (f.q && f.mode === "semantic" && vector ? "<span>лексика + вектор, RRF</span>" : "") + "</div>";
+  if (items.length) {
+    html += '<div class="list" role="list" aria-label="Записи">' + items.map(function (m) { return memoryRow(m, f.q); }).join("") + "</div>";
+    if (!f.q && total > PAGE) {
+      html += '<div class="pager">' + (f.offset > 0 ? '<button type="button" class="btn sm" data-page="' + Math.max(0, f.offset - PAGE) + '">← Назад</button>' : "") +
+        (f.offset + PAGE < total ? '<button type="button" class="btn sm" data-page="' + (f.offset + PAGE) + '">Дальше →</button>' : "") + "</div>";
+    }
+  } else if (f.q) {
+    html += '<div class="list"><div class="empty"><h3>По запросу «' + esc(f.q) + "» ничего не нашлось</h3><p>" +
+      (degraded ? "Поиск сейчас только по словам: попробуй точный термин из записи или сними фильтры." : "Проверь фильтры вида и scope — они сужают выдачу. Или переформулируй: поиск по смыслу находит и перефразировки.") +
+      '</p><button type="button" class="btn" data-reset>Сбросить фильтры</button></div></div>';
+  } else {
+    html += '<div class="list"><div class="empty"><h3>Записей нет</h3><p>' +
+      (f.kinds.length ? "Под выбранные виды записей в " + esc(scopeLabel(scope)) + " ничего не попадает." : "В " + esc(scopeLabel(scope)) + " пока ничего нет — агент пишет сюда по ходу задач через <code>memory_save</code>.") +
+      "</p>" + (f.kinds.length || scope || f.archived ? '<button type="button" class="btn" data-reset>Сбросить фильтры</button>' : "") + "</div></div>";
+  }
+  box.innerHTML = html;
+}
+
+let qTimer = null;
+document.addEventListener("input", function (e) {
+  if (e.target.id !== "q") return;
+  clearTimeout(qTimer);
+  const v = e.target.value;
+  qTimer = setTimeout(function () { focusSearch = true; setMemoryParams({ q: v.trim() }); }, 260);
+});
+
+document.addEventListener("change", function (e) {
+  const t = e.target;
+  if (!(t instanceof Element)) return;
+  if (t.hasAttribute("data-kind")) {
+    const f = memoryParams();
+    const k = t.getAttribute("data-kind");
+    const kinds = f.kinds.filter(function (x) { return x !== k; });
+    if (t.checked) kinds.push(k);
+    setMemoryParams({ kinds: kinds });
+    return;
+  }
+  if (t.id === "archived") { setMemoryParams({ archived: t.checked }); return; }
+});
+
 const screens = {
   overview: { render: renderOverview },
-  memory: { render: function () { placeholder("memory", "16.4"); } },
+  memory: { render: renderMemory },
   board: { render: function () { placeholder("board", "16.6"); } },
 };
 
@@ -544,6 +683,18 @@ document.addEventListener("click", function (e) {
   if (goto) { navigate({ view: goto.getAttribute("data-goto"), params: new URLSearchParams(), id: "" }); return; }
   const sc = t.closest("[data-scope]");
   if (sc) { navigate({ scope: sc.getAttribute("data-scope") }); return; }
+  const mode = t.closest("[data-mode]");
+  if (mode) { focusSearch = true; setMemoryParams({ mode: mode.getAttribute("data-mode") }); return; }
+  if (t.closest("[data-reset]")) {
+    // «Сбросить всё» (§2.2): вид, архив, запрос и scope; режим поиска остаётся
+    const p = new URLSearchParams();
+    if (memoryParams().mode === "lexical") p.set("mode", "lexical");
+    focusSearch = true;
+    navigate({ scope: "", params: p });
+    return;
+  }
+  const page = t.closest("[data-page]");
+  if (page) { setMemoryParams({ offset: parseInt(page.getAttribute("data-page"), 10) || 0 }); return; }
   if (t.closest(".skip")) {
     // skip link не должен менять хэш (он — маршрут): просто переводим фокус в main
     e.preventDefault();
@@ -552,7 +703,14 @@ document.addEventListener("click", function (e) {
 });
 
 document.addEventListener("keydown", function (e) {
-  if (e.key === "Escape" && state.id) { e.preventDefault(); closeRecord(); }
+  if (e.key === "Escape" && state.id) { e.preventDefault(); closeRecord(); return; }
+  // «/» — в поле поиска (§2.2); из другого раздела — сначала в «Память»
+  if (e.key === "/" && !state.id && !e.target.matches("input,textarea,select") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    focusSearch = true;
+    if (state.view !== "memory") navigate({ view: "memory", params: new URLSearchParams(), id: "" });
+    else { const i = $("#q"); if (i) { focusSearch = false; i.focus(); i.select(); } }
+  }
 });
 
 $("#scope-global").addEventListener("change", function (e) {

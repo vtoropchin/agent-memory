@@ -316,6 +316,44 @@
     .kinds { grid-template-columns: repeat(3, 1fr); }
   }
 
+  /* --- память (§2.2, задача 16.4): поиск, чипы-фильтры, список строк --- */
+  .toolbar { display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap; margin-bottom: var(--s3); }
+  .toolbar .search { flex: 1; min-width: 280px; position: relative; }
+  .toolbar .search input { padding-left: 30px; }
+  .toolbar .search svg { position: absolute; left: 9px; top: 8px; width: 14px; height: 14px; color: var(--ink-3); }
+  .filters { display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap; margin-bottom: var(--s3); font-size: var(--fs-sm); }
+  .filters > span { color: var(--ink-3); }
+  .filters .checks { display: flex; gap: var(--s2); flex-wrap: wrap; }
+  .filters .checks label {
+    display: inline-flex; align-items: center; gap: 4px; color: var(--ink); cursor: pointer; border: 1px solid var(--line);
+    border-radius: 999px; padding: 1px 8px 1px 5px; background: var(--surface);
+  }
+  .filters .checks label:has(:checked) { background: var(--accent-soft); border-color: var(--accent); }
+  .filters .checks input { margin: 0; }
+  .filters .archived { display: inline-flex; gap: 4px; align-items: center; color: var(--ink); cursor: pointer; }
+  .filters .active { margin-left: auto; display: flex; gap: var(--s2); align-items: center; color: var(--ink-3); }
+  .results-head { display: flex; align-items: baseline; justify-content: space-between; font-size: var(--fs-sm); color: var(--ink-3); margin: var(--s2) 0; }
+  .list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+  .row {
+    display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: var(--s4); padding: var(--s3) var(--s4);
+    border-top: 1px solid var(--line); border-left: 3px solid transparent; cursor: pointer; scroll-margin-top: 56px;
+  }
+  .row:first-child { border-top: 0; }
+  .row:hover, .row:focus-within { background: var(--surface-3); }
+  .row[aria-selected="true"] { background: var(--accent-soft); }
+  .row .meta { display: flex; flex-direction: column; gap: 3px; font-size: var(--fs-xs); color: var(--ink-3); align-items: flex-start; }
+  .row .meta .scope { color: var(--ink-2); word-break: break-all; }
+  .row .main { min-width: 0; }
+  .row .title {
+    border: 0; background: none; padding: 0; text-align: left; width: 100%; cursor: pointer; font-family: var(--font-prose);
+    font-size: 15px; line-height: 1.4; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .row .title.archived { color: var(--ink-3); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+  .row .tags { margin-top: 5px; display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .row .side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font-size: var(--fs-xs); color: var(--ink-3); white-space: nowrap; }
+  .row .src { font-size: 11px; color: var(--ink-3); }
+  .pager { display: flex; gap: var(--s2); justify-content: center; margin-top: var(--s3); }
+
   /* --- тост: один, по центру снизу --- */
   .toast {
     position: fixed; left: 50%; bottom: var(--s5); transform: translateX(-50%); z-index: 20;
@@ -324,6 +362,8 @@
 
   @media (max-width: 760px) {
     main { padding: var(--s4); }
+    .row { grid-template-columns: 1fr; }
+    .row .side { flex-direction: row; align-items: center; }
     .topbar { gap: var(--s3); padding: 0 var(--s4); }
     .scopebox span { display: none; }
     :root { --drawer-w: 100vw; }
