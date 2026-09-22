@@ -191,11 +191,13 @@ review → testing → release → done`, тип `epic|story|task`, иерарх
 |--------|------|--------|
 | 16.1 API: `providers`/`jobs` в stats, `expiresBefore`, PATCH `content`/`summary`, `maint_meta` | [16.1-web-api-stats-providers.md](16.1-web-api-stats-providers.md) | ✅ выполнена (2026-09-22): порт Store (`PendingVectors`, `ExpiresBefore`, `SchemaVersion`, `maint_meta`), `maint.RunLog`, `/api/stats` providers/jobs, `expiresBefore`, PATCH content/summary; build/test зелёные, PG-паритет на живом сервере, e2e curl к `bin/memo web` на SQLite и PG |
 | 16.2 Фронт: каркас, токены, роутер, панель записи, тосты | [16.2-web-shell-tokens.md](16.2-web-shell-tokens.md) | ✅ выполнена (2026-09-22): токены/тёмная тема/шрифты из макета в `tailwind.input.css`, `index.html`/`app.js` переписаны — хэш-роутер трёх разделов, единый селект scope с домашним по `homeScope`, панель записи (`dialog`, `inert`, Esc, возврат фокуса, центр ≥ 1200 px), `showToast`, `rel()`; экраны — заглушки; build/test зелёные, ручная проверка в браузере на живом PG |
-| 16.3 Фронт: экран «Обзор» | [16.3-web-overview.md](16.3-web-overview.md) | ⬜ ожидает |
-| 16.4 Фронт: экран «Память» (список, поиск, фильтры, состояния) | [16.4-web-memory-list.md](16.4-web-memory-list.md) | ⬜ ожидает |
-| 16.5 Фронт: панель записи (просмотр, связи, правка, «Забыть») | [16.5-web-record-panel.md](16.5-web-record-panel.md) | ⬜ ожидает |
-| 16.6 Фронт: экран «Доска» и панель задачи | [16.6-web-board-task.md](16.6-web-board-task.md) | ⬜ ожидает |
-| 16.7 Ручная приёмка: сценарии §9 на PostgreSQL и SQLite, темы, клавиатура, контраст | [16.7-web-acceptance.md](16.7-web-acceptance.md) | ⬜ ожидает |
+| 16.3 Фронт: экран «Обзор» | [16.3-web-overview.md](16.3-web-overview.md) | ✅ выполнена (2026-09-22): заголовок/плашка деградации/счётчики видов/«за 7 дней»/«На доске»/Сервисы/«Истекает скоро»/Scope; коммит 960327e |
+| 16.4 Фронт: экран «Память» (список, поиск, фильтры, состояния) | [16.4-web-memory-list.md](16.4-web-memory-list.md) | ✅ выполнена (2026-09-22): поиск по смыслу/словам, чипы видов, архив, «Сбросить всё», пейджер, подсветка, состояния §5; коммит 3ffec20 |
+| 16.5 Фронт: панель записи (просмотр, связи, правка, «Забыть») | [16.5-web-record-panel.md](16.5-web-record-panel.md) | ✅ выполнена (2026-09-22): важность/теги/связи/похожие/служебное, инлайн-правка content+summary, «Забыть» с подтверждением; коммит d7debcc |
+| 16.6 Фронт: экран «Доска» и панель задачи | [16.6-web-board-task.md](16.6-web-board-task.md) | ✅ выполнена (2026-09-22): фильтры в хэше, свимлейны, карточки, DnD + select, поля задачи, part_of и блокировки с пикером; коммит 9e8170e |
+| 16.7 Ручная приёмка: сценарии §9 на PostgreSQL и SQLite, темы, клавиатура, контраст | [16.7-web-acceptance.md](16.7-web-acceptance.md) | ✅ выполнена (2026-09-22): пять сценариев §9 пройдены на PG и SQLite, чек-лист §4 и деградация — ок; локальные дефекты исправлены, существенные вынесены в 16.8/16.9 |
+| 16.8 `tags` в выдаче `/api/search` (дефект приёмки 16.7) | [16.8-search-tags.md](16.8-search-tags.md) | ⬜ ожидает |
+| 16.9 Счётчики обзора по scope в `GET /api/stats` (дефект приёмки 16.7) | [16.9-stats-per-scope.md](16.9-stats-per-scope.md) | ⬜ ожидает |
 
 ### Отклонённые идеи (чтобы не возвращаться)
 

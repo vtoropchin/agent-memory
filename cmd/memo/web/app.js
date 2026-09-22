@@ -356,8 +356,11 @@ function boardRows(board) {
     if (s === "done") return;
     (cols[s] || []).forEach(function (c) { if (c.blocked && !seen[c.id]) { seen[c.id] = 1; out.push(c); } });
   });
-  const blockedN = STATUSES.reduce(function (n, s) { return s === "done" ? n : n + (cols[s] || []).filter(function (c) { return c.blocked; }).length; }, 0);
-  return { rows: out, doing: doing.length, review: review.length, blocked: blockedN };
+  let total = 0, blockedN = 0;
+  STATUSES.forEach(function (s) {
+    (cols[s] || []).forEach(function (c) { total++; if (c.blocked && s !== "done") blockedN++; });
+  });
+  return { rows: out, doing: doing.length, review: review.length, blocked: blockedN, total: total };
 }
 
 async function renderOverview() {
@@ -383,7 +386,7 @@ async function renderOverview() {
       byKind = {};
       KINDS.forEach(function (k, i) { byKind[k] = rs[i].total; });
       live = (stats.byScope || {})[scope] || 0;
-      archived = Math.max(0, rs[5].total - live);
+      archived = rs[5].total - live;   // superseded=1 даёт живые + архив этого scope
     }
   } catch (err) {
     if (seq !== renderSeq) return;
@@ -458,16 +461,24 @@ function setMemoryParams(patch) {
   navigate({ params: p });
 }
 
-// highlight — подсветка слов запроса в тексте; работает по уже экранированной
-// строке и экранированному слову, чтобы сырые данные не попали в innerHTML.
+// highlight — подсветка слов запроса в тексте; наружу отдаёт только экранированные
+// куски, поэтому сырые данные в innerHTML не попадают.
 function highlight(text, q) {
-  let out = esc(text);
-  if (!q) return out;
-  q.split(/\s+/).filter(function (w) { return w.length > 2; }).forEach(function (w) {
-    const re = new RegExp("(" + esc(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi");
-    out = out.replace(re, '<mark class="hl">$1</mark>');
-  });
-  return out;
+  const src = String(text == null ? "" : text);
+  const words = (q || "").split(/\s+/).filter(function (w) { return w.length > 2; })
+    .map(function (w) { return w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); });
+  if (!words.length) return esc(src);
+  // ищем по сырому тексту и экранируем куски отдельно: поиск по уже
+  // экранированной строке одним проходом не матчит вставленную разметку, но
+  // слова вроде «amp», «quot», «mark» попадали внутрь сущностей и ломали их
+  const re = new RegExp(words.join("|"), "gi");
+  let out = "", last = 0, m;
+  while ((m = re.exec(src)) !== null) {
+    if (m[0] === "") { re.lastIndex++; continue; }
+    out += esc(src.slice(last, m.index)) + '<mark class="hl">' + esc(m[0]) + "</mark>";
+    last = m.index + m[0].length;
+  }
+  return out + esc(src.slice(last));
 }
 
 function memoryRow(m, q) {
@@ -486,7 +497,8 @@ async function renderMemory() {
   const f = memoryParams();
   const scope = state.scope;
   const seq = ++renderSeq;
-  const active = f.kinds.length + (f.archived ? 1 : 0) + (scope ? 1 : 0) + (f.q ? 1 : 0);
+  // архив в счётчике фильтров только вне поиска: /api/search живыми и ограничен
+  const active = f.kinds.length + (f.archived && !f.q ? 1 : 0) + (scope ? 1 : 0) + (f.q ? 1 : 0);
   // шапка экрана рисуется сразу — поле поиска доступно, пока грузится список
   el.innerHTML = '<h2 id="h-memory" class="sr-only">Память</h2>' +
     '<div class="toolbar"><div class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>' +
@@ -497,7 +509,8 @@ async function renderMemory() {
     '<div class="filters"><span>Вид</span><div class="checks" role="group" aria-label="Вид записи">' + KINDS.map(function (k) {
       return '<label><input type="checkbox" data-kind="' + k + '"' + (f.kinds.indexOf(k) !== -1 ? " checked" : "") + '><span class="kind ' + k + '">' + KIND_PLURAL[k] + "</span></label>";
     }).join("") + "</div>" +
-    '<label class="archived"><input type="checkbox" id="archived"' + (f.archived ? " checked" : "") + "> с архивом</label>" +
+    '<label class="archived"><input type="checkbox" id="archived"' + (f.archived ? " checked" : "") + (f.q ? " disabled" : "") + "> с архивом" +
+    (f.q ? ' <span class="muted">(поиск идёт только по живым)</span>' : "") + "</label>" +
     '<div class="active">' + (active ? "<span>" + active + " " + plural(active, "фильтр", "фильтра", "фильтров") + (scope ? " · " + esc(scopeShort(scope)) : "") + '</span><button type="button" class="btn quiet sm" data-reset>Сбросить всё</button>' : "<span>фильтров нет</span>") + "</div></div>" +
     '<div id="mem-results"><p class="muted">Загрузка…</p></div>';
   if (focusSearch) {
@@ -529,7 +542,7 @@ async function renderMemory() {
   }
   html += '<div class="results-head" aria-live="polite"><span>' + (f.q
     ? items.length + " " + plural(items.length, "результат", "результата", "результатов") + " по «" + esc(f.q) + "»"
-    : (total ? (f.offset + 1) + "–" + (f.offset + items.length) + " из " + fmtN(total) : "0") + " — новые сверху") + "</span>" +
+    : total ? (f.offset + 1) + "–" + (f.offset + items.length) + " из " + fmtN(total) + " — новые сверху" : "Ничего не найдено") + "</span>" +
     (f.q && f.mode === "semantic" && vector ? "<span>лексика + вектор, RRF</span>" : "") + "</div>";
   if (items.length) {
     html += '<div class="list" role="list" aria-label="Записи">' + items.map(function (m) { return memoryRow(m, f.q); }).join("") + "</div>";
@@ -569,11 +582,10 @@ document.addEventListener("change", function (e) {
     return;
   }
   if (t.id === "archived") { setMemoryParams({ archived: t.checked }); return; }
+  if (state.id && t.closest("#drawer-root") && drawerFieldChange(t)) return;
 });
 
 // --- Доска (§2.4, задача 16.6): рисует ответ board.Build; правило блокировки — бэкенд ---
-
-const DONE_LIMIT = 30;
 
 // boardParams — фильтры доски из хэша: type, parent, tag, group (по умолчанию
 // включены дорожки; «0» — выключены), doneLimit.
@@ -612,7 +624,7 @@ function boardCard(c, lanes) {
     "</select></span></div></article>";
 }
 
-function boardColumn(col, lanes, doneLimit) {
+function boardColumn(col, lanes) {
   const s = col.status, cards = col.cards || [];
   // свимлейны — группировка по parent из ответа (представление, не правило домена)
   const groups = {}, labels = {};
@@ -628,10 +640,11 @@ function boardColumn(col, lanes, doneLimit) {
     if (lanes && keys.length > 1) body += '<div class="lane">' + (k ? "↳ " + esc(labels[k]) : "без родителя") + "</div>";
     body += groups[k].map(function (c) { return boardCard(c, lanes); }).join("");
   });
+  // «показать ещё» — удвоение от показанного: умолчание doneLimit знает ядро
   const more = s === "done" && col.total > cards.length;
   return '<section class="col" data-status="' + s + '" role="listitem" aria-labelledby="col-' + s + '">' +
     '<header><span id="col-' + s + '">' + STATUS_LABEL[s] + '</span><span class="n">' + (s === "done" && col.total > cards.length ? cards.length + " из " + col.total : col.total) + '</span><span class="grow"></span></header>' +
-    '<div class="cards">' + body + (more ? '<button type="button" class="btn quiet sm" data-more="' + (doneLimit || DONE_LIMIT) * 2 + '">показать ещё</button>' : "") + "</div></section>";
+    '<div class="cards">' + body + (more ? '<button type="button" class="btn quiet sm" data-more="' + cards.length * 2 + '">показать ещё</button>' : "") + "</div></section>";
 }
 
 async function renderBoard() {
@@ -656,10 +669,12 @@ async function renderBoard() {
   }
   if (seq !== renderSeq) return;
   const cols = board.columns || [];
-  let n = 0, blocked = 0;
+  // счётчик задач и заблокированных — тот же boardRows, которым считает обзор
+  const b = boardRows(board);
+  const n = b.total, blocked = b.blocked;
   const tags = {};
   cols.forEach(function (c) {
-    (c.cards || []).forEach(function (x) { n++; if (x.blocked && c.status !== "done") blocked++; (x.tags || []).forEach(function (t) { tags[t] = 1; }); });
+    (c.cards || []).forEach(function (x) { (x.tags || []).forEach(function (t) { tags[t] = 1; }); });
   });
   if (f.tag) tags[f.tag] = 1;
   const tagList = Object.keys(tags).sort();
@@ -675,7 +690,7 @@ async function renderBoard() {
     '<span class="muted" style="margin-left:auto">' + n + " " + plural(n, "задача", "задачи", "задач") + (blocked ? " · " + blocked + " заблокировано" : "") + " · " + esc(scope ? scopeShort(scope) : "все scope") + "</span>" +
     (hasFilter ? '<button type="button" class="btn quiet sm" data-board-reset>Сбросить</button>' : "") + "</div>" +
     '<p class="muted hint">Перетащи карточку в другую колонку или открой её и смени стадию — с клавиатуры: Enter на карточке, затем поле «Стадия». Заблокированную задачу дальше «к работе» не пустит сервер.</p>' +
-    '<div class="board" role="list" aria-label="Стадии">' + cols.map(function (c) { return boardColumn(c, f.lanes, f.doneLimit); }).join("") + "</div>";
+    '<div class="board" role="list" aria-label="Стадии">' + cols.map(function (c) { return boardColumn(c, f.lanes); }).join("") + "</div>";
 }
 
 // moveCard — PATCH {status}: оптимистичный перенос карточки в колонку, затем
@@ -704,12 +719,6 @@ document.addEventListener("change", function (e) {
   if (t.id === "b-lanes") { setBoardParams({ lanes: t.checked }); return; }
   const mv = t.getAttribute("data-move");
   if (mv) { const c = t.closest(".card"); moveCard(mv, t.value, c ? c.getAttribute("aria-label") : ""); return; }
-  const field = t.getAttribute("data-field");
-  if (field && drawer.card) {
-    const fields = {};
-    fields[field] = t.value;
-    patchRecord(fields, field === "status" ? "Стадия: " + STATUS_LABEL[t.value] : "", "#f-" + field).then(function (ok) { if (!ok) drawRecord(); });
-  }
 });
 
 // drag & drop (мышь); клавиатурная альтернатива — select «Переместить» и поле «Стадия» в панели
@@ -779,7 +788,14 @@ function pickerClick(t) {
   const input = btn.closest(".picker").querySelector("[data-picker]");
   const kind = input.getAttribute("data-picker"), id = btn.getAttribute("data-pick");
   if (kind === "board-parent") setBoardParams({ parent: id });
-  else if (kind === "task-parent") patchRecord({ links: [{ id: id, rel: "part_of" }] }, "Привязана", '[data-picker="task-parent"]');
+  else if (kind === "task-parent") {
+    // у задачи один родитель part_of: ядро аддитивно (mergeLinks), поэтому смену
+    // родителя фронт шлёт парой — новое ребро плюс снятие прежнего
+    const body = { links: [{ id: id, rel: "part_of" }] };
+    const cur = drawer.card && drawer.card.parent;
+    if (cur) body.unlinks = [{ id: cur.id, rel: "part_of" }];
+    patchRecord(body, "Привязана", '[data-picker="task-parent"]');
+  }
   else if (kind === "task-blocker") patchRecord({ links: [{ id: id, rel: "blocked_by" }] }, "Блокер добавлен", '[data-picker="task-blocker"]');
   return true;
 }
@@ -935,16 +951,32 @@ function drawRecord() {
   $("#rec-scope").textContent = m.scope;
   $("#rec-extra").innerHTML = isTask ? '<button type="button" class="btn quiet sm" data-goto="board">К доске</button>' : "";
   $(".drawer").classList.toggle("editing", drawer.edit);
+  // поле, в котором пользователь работает прямо сейчас: PATCH асинхронный, и к
+  // моменту перерисовки фокус (а с ним и начатый ввод) может быть уже в соседнем
+  // поле — его нельзя отбирать обратно в drawerFocus
+  const act = document.activeElement;
+  const live = act && act.id && $("#drawer-root").contains(act) && act.matches("input,textarea,select")
+    ? { id: act.id, value: act.value, caret: act.selectionStart } : null;
   $("#rec-content").innerHTML = isTask ? taskBody(card) : memoryBody(card);
   const actions = $("#rec-actions");
   actions.hidden = archived;
   actions.innerHTML = archived ? "" : (drawer.edit
     ? '<button type="button" class="btn primary" data-save>Сохранить</button><button type="button" class="btn" data-cancel>Отменить</button>'
     : '<button type="button" class="btn" data-edit>Изменить</button><span class="grow"></span><button type="button" class="btn danger" data-forget-ask>Забыть…</button>');
-  if (drawerFocus) {
-    const f = $(drawerFocus, $("#drawer-root"));
-    drawerFocus = "";
-    if (f) f.focus();
+  const back = drawerFocus ? $(drawerFocus, $("#drawer-root")) : null;
+  drawerFocus = "";
+  const keep = live ? $("#" + live.id, $("#drawer-root")) : null;
+  if (keep && keep !== back) {
+    // фокус остаётся там, где он был: восстанавливаем незавершённый ввод и каретку
+    if (keep.type === "text" || keep.type === "search" || keep.tagName === "TEXTAREA") {
+      keep.value = live.value;
+      keep.focus();
+      if (live.caret != null) keep.setSelectionRange(live.caret, live.caret);
+    } else {
+      keep.focus();
+    }
+  } else if (back) {
+    back.focus();
   }
 }
 
@@ -1046,7 +1078,7 @@ async function patchRecord(fields, okText, focusSel) {
   try {
     await api("/api/memories/" + encodeURIComponent(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) });
   } catch (err) {
-    showToast(patchErrorText(err, drawer.card && drawer.card.memory));
+    showToast(patchErrorText(err, drawer.card && drawer.card.memory, fields));
     return false;
   }
   if (okText) showToast(okText);
@@ -1055,12 +1087,20 @@ async function patchRecord(fields, okText, focusSel) {
   return true;
 }
 
-// patchErrorText — тексты ошибок PATCH (§5): 409 с блокерами, прочее — сообщение сервера.
-function patchErrorText(err, m) {
+// patchErrorText — тексты ошибок PATCH (§5): 409 с блокерами, прочее — сообщение
+// сервера. 409 приходит на два разных действия: перенос заблокированной задачи
+// дальше «к работе» и добавление блокера задаче, которая уже дальше «к работе»
+// — тост должен называть то действие, которое не прошло, поэтому смотрим fields.
+function patchErrorText(err, m, fields) {
   if (err.status === 0) return "Сервер памяти не отвечает — изменение не сохранено.";
   if (err.status === 409 && err.body && err.body.blockers && err.body.blockers.length) {
     const t = m ? (m.summary || m.content || "").slice(0, 40) : "";
-    return "Не переведена: «" + t + "…» заблокирована — " + err.body.blockers.map(function (b) { return (b.summary || b.id).slice(0, 30); }).join(", ");
+    const addsBlocker = fields && Array.isArray(fields.links) && fields.links.some(function (l) { return l.rel === "blocked_by"; });
+    // причину (какие стадии допустимы) формулирует ядро — берём её из тела ответа,
+    // сняв служебный префикс обёртки ошибки («write: …»): он не для читателя
+    if (addsBlocker) return "Блокер не добавлен: «" + t + "…» — " + err.message.replace(/^write:\s*/, "");
+    return "Не переведена: «" + t + "…» заблокирована — " +
+      err.body.blockers.map(function (b) { return (b.summary || b.id).slice(0, 30); }).join(", ");
   }
   return err.message;
 }
@@ -1115,6 +1155,18 @@ function drawerClick(t) {
     return true;
   }
   return false;
+}
+
+// drawerFieldChange — поля задачи (стадия/тип/ветка/процесс, §2.5): PATCH сразу,
+// откат на ошибку — перерисовкой по текущей карточке.
+function drawerFieldChange(t) {
+  const field = t.getAttribute("data-field");
+  if (!field || !drawer.card) return false;
+  const fields = {};
+  fields[field] = t.value;
+  patchRecord(fields, field === "status" ? "Перенесена в «" + STATUS_LABEL[t.value] + "»" : "", "#f-" + field)
+    .then(function (ok) { if (!ok) drawRecord(); });
+  return true;
 }
 
 // addTag — Enter в поле «+ тег…»: PATCH {tags} заменяющей семантикой.
