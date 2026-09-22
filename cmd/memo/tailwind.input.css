@@ -388,6 +388,48 @@
   .picker li button:hover, .picker li button:focus-visible { background: var(--surface-3); }
   .picker .none { padding: 5px 8px; font-size: var(--fs-xs); color: var(--ink-3); }
 
+  /* --- доска (§2.4, задача 16.6): семь колонок, карточки, дорожки, DnD --- */
+  .board-toolbar { display: flex; gap: var(--s3); align-items: center; flex-wrap: wrap; margin-bottom: var(--s3); font-size: var(--fs-sm); }
+  .board-toolbar label { color: var(--ink-3); display: inline-flex; align-items: center; gap: 6px; }
+  .board-toolbar .b-parent { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-3); }
+  .board-toolbar .picker.inline { margin: 0; width: 240px; }
+  .board-toolbar .picker.inline ul { position: absolute; left: 0; right: 0; z-index: 6; }
+  .hint { font-size: var(--fs-xs); margin-bottom: var(--s3); }
+  .board { display: grid; grid-template-columns: repeat(7, minmax(176px, 1fr)); gap: var(--s3); overflow-x: auto; padding-bottom: var(--s3); }
+  .col {
+    background: var(--surface-2); border-radius: var(--r-lg); border: 1px solid var(--line); display: flex; flex-direction: column;
+    min-height: 420px; max-height: calc(100vh - 170px);
+  }
+  .col > header { display: flex; align-items: baseline; gap: var(--s2); padding: var(--s2) var(--s3); font-size: var(--fs-sm); font-weight: 600; border-bottom: 1px solid var(--line); }
+  .col > header .n { color: var(--ink-3); font-weight: 400; font-variant-numeric: tabular-nums; }
+  .col .cards { flex: 1; overflow: auto; padding: var(--s2); display: flex; flex-direction: column; gap: var(--s2); }
+  .col.over { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  .col .cards .empty { padding: var(--s5) var(--s3); font-size: var(--fs-xs); }
+  .lane { font-size: var(--fs-xs); color: var(--ink-3); padding: 6px 4px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+  .lane:first-child { border-top: 0; margin-top: 0; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--k-task); border-radius: var(--r);
+    padding: var(--s2) var(--s3); cursor: grab; position: relative;
+  }
+  .card.epic { border-left-color: var(--ink-2); }
+  .card.story { border-left-color: var(--line-strong); }
+  .card:hover { border-color: var(--line-strong); }
+  .card.dragging { opacity: .5; }
+  body.dragging-any { user-select: none; }
+  .card.blocked { background: repeating-linear-gradient(135deg, transparent 0 6px, var(--surface-2) 6px 7px); }
+  .card .top { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--ink-3); margin-bottom: 4px; }
+  .card .ttl { border: 0; background: none; padding: 0; text-align: left; font: inherit; color: var(--ink); cursor: pointer; line-height: 1.35; display: block; width: 100%; }
+  .card .ttl:hover { color: var(--accent); }
+  .card .foot { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; font-size: 11px; color: var(--ink-3); }
+  .card .blk { color: var(--danger); font-weight: 600; }
+  .card .move { margin-left: auto; }
+  .card .move select { min-height: 22px; padding: 0 4px; font-size: 11px; opacity: 0; }
+  .card:hover .move select, .card:focus-within .move select { opacity: 1; }
+  .card .prog { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 11px; color: var(--ink-3); }
+  .card .prog .progress { flex: 1; height: 4px; }
+  .inline-link { color: inherit; text-decoration: underline; padding: 0 2px; min-height: 0; }
+  .editing .prose { display: none; }
+
   /* --- тост: один, по центру снизу --- */
   .toast {
     position: fixed; left: 50%; bottom: var(--s5); transform: translateX(-50%); z-index: 20;

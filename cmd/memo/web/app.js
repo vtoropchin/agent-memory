@@ -1,4 +1,4 @@
-// app.js — каркас новой веб-морды memo web (Этап 16, задача 16.2).
+// app.js — новая веб-морда memo web (Этап 16: каркас 16.2, экраны 16.3–16.6).
 //
 // Спецификация — design/memo-web-redesign.md, макет — design/memo-web-prototype.html.
 // Фронт — адаптер поверх JSON API (cmd/memo/web.go): доменной логики здесь нет,
@@ -10,9 +10,12 @@
 //     экрана и id открытой записи; parseRoute разбирает хэш в state, navigate пишет
 //     новый хэш, hashchange → applyRoute — единственная точка перерисовки (как в
 //     15.6: ссылка воспроизводит экран);
-//   - экраны — объекты screens[view] с render(); в этой задаче они заглушки,
-//     наполняются задачами 16.3 (обзор), 16.4 (память), 16.6 (доска);
-//   - панель записи (drawer) открывается по id= в хэше, тело — задача 16.5;
+//   - экраны — объекты screens[view] с render(): обзор (16.3), память (16.4),
+//     доска (16.6); ответ устаревшего запроса отбрасывается по renderSeq;
+//   - панель записи (drawer) открывается по id= в хэше (16.5), для задачи —
+//     поля доски, иерархия и блокировки (16.6); правки — PATCH/DELETE через
+//     patchRecord/forgetRecord: успех → перечитать карточку и экран + тост,
+//     ошибка → тост с текстом сервера;
 //   - showToast, api, rel — общие хелперы для всех экранов.
 
 "use strict";
@@ -306,11 +309,6 @@ function screenError(el, err, retry) {
   el.appendChild(apiErrorNotice(err.path || "/api", err, retry));
 }
 
-function placeholder(view, task) {
-  const el = $("#screen-" + view + " [data-placeholder]");
-  if (el) el.textContent = "Scope: " + scopeLabel(state.scope) + " · экран наполняется задачей " + task + ".";
-}
-
 // --- Обзор (§2.1, задача 16.3): только отображение ответов API ---
 
 // emptyScope — пустое состояние (§5): в scope нет живых записей.
@@ -573,10 +571,266 @@ document.addEventListener("change", function (e) {
   if (t.id === "archived") { setMemoryParams({ archived: t.checked }); return; }
 });
 
+// --- Доска (§2.4, задача 16.6): рисует ответ board.Build; правило блокировки — бэкенд ---
+
+const DONE_LIMIT = 30;
+
+// boardParams — фильтры доски из хэша: type, parent, tag, group (по умолчанию
+// включены дорожки; «0» — выключены), doneLimit.
+function boardParams() {
+  const p = state.params;
+  return {
+    type: p.get("type") || "", parent: p.get("parent") || "", tag: p.get("tag") || "",
+    lanes: p.get("group") !== "0", doneLimit: Math.max(0, parseInt(p.get("doneLimit") || "0", 10) || 0),
+  };
+}
+
+function setBoardParams(patch) {
+  const next = Object.assign({}, boardParams(), patch);
+  const p = new URLSearchParams();
+  if (next.type) p.set("type", next.type);
+  if (next.parent) p.set("parent", next.parent);
+  if (next.tag) p.set("tag", next.tag);
+  if (!next.lanes) p.set("group", "0");
+  if (next.doneLimit) p.set("doneLimit", String(next.doneLimit));
+  navigate({ params: p });
+}
+
+function boardCard(c, lanes) {
+  const pr = c.progress;
+  return '<article class="card ' + esc(c.type) + (c.blocked ? " blocked" : "") + '" draggable="true" data-id="' + esc(c.id) + '" data-status="' + esc(c.status) + '" aria-label="' + esc(c.summary || c.id) + '">' +
+    '<div class="top"><span>' + esc(TYPE_LABEL[c.type] || c.type) + "</span>" +
+    (c.blocked ? '<span class="blk" title="' + esc((c.blockedBy || []).map(function (b) { return b.summary || b.id; }).join("; ")) + '">заблокирована</span>' : "") +
+    '<span class="grow"></span>' + imp(c.importance) + "</div>" +
+    '<button type="button" class="ttl" data-open="' + esc(c.id) + '">' + esc(c.summary || c.id) + "</button>" +
+    (pr && pr.total ? '<div class="prog"><div class="progress"><i style="width:' + Math.round(pr.done / pr.total * 100) + '%"></i></div>' + pr.done + "/" + pr.total + "</div>" : "") +
+    '<div class="foot">' + (c.branch ? "<code>" + esc(c.branch) + "</code>" : "") +
+    (!lanes && c.parent ? "<span>↳ " + esc((c.parent.summary || c.parent.id).slice(0, 28)) + "</span>" : "") +
+    "<span>" + esc(rel(c.updatedAt)) + "</span>" +
+    '<span class="move"><label class="sr-only" for="mv-' + esc(c.id) + '">Переместить в стадию</label><select id="mv-' + esc(c.id) + '" data-move="' + esc(c.id) + '">' +
+    STATUSES.map(function (s) { return '<option value="' + s + '"' + (s === c.status ? " selected" : "") + ">" + STATUS_LABEL[s] + "</option>"; }).join("") +
+    "</select></span></div></article>";
+}
+
+function boardColumn(col, lanes, doneLimit) {
+  const s = col.status, cards = col.cards || [];
+  // свимлейны — группировка по parent из ответа (представление, не правило домена)
+  const groups = {}, labels = {};
+  cards.forEach(function (c) {
+    const key = lanes && c.parent ? c.parent.id : "";
+    if (c.parent) labels[key] = c.parent.summary || c.parent.id;
+    (groups[key] = groups[key] || []).push(c);
+  });
+  const keys = Object.keys(groups).sort(function (a, b) { return (a === "" ? 1 : 0) - (b === "" ? 1 : 0) || (labels[a] || "").localeCompare(labels[b] || ""); });
+  let body = "";
+  if (!cards.length) body = '<div class="empty">' + (s === "doing" ? "Ничего не в работе" : "Пусто") + "</div>";
+  else keys.forEach(function (k) {
+    if (lanes && keys.length > 1) body += '<div class="lane">' + (k ? "↳ " + esc(labels[k]) : "без родителя") + "</div>";
+    body += groups[k].map(function (c) { return boardCard(c, lanes); }).join("");
+  });
+  const more = s === "done" && col.total > cards.length;
+  return '<section class="col" data-status="' + s + '" role="listitem" aria-labelledby="col-' + s + '">' +
+    '<header><span id="col-' + s + '">' + STATUS_LABEL[s] + '</span><span class="n">' + (s === "done" && col.total > cards.length ? cards.length + " из " + col.total : col.total) + '</span><span class="grow"></span></header>' +
+    '<div class="cards">' + body + (more ? '<button type="button" class="btn quiet sm" data-more="' + (doneLimit || DONE_LIMIT) * 2 + '">показать ещё</button>' : "") + "</div></section>";
+}
+
+async function renderBoard() {
+  const el = $("#screen-board");
+  const f = boardParams();
+  const scope = state.scope;
+  const seq = ++renderSeq;
+  el.innerHTML = '<h2 id="h-board" class="sr-only">Доска</h2><p class="muted">Загрузка…</p>';
+  let board, parentLabel = "";
+  try {
+    board = await api("/api/board" + qs({ scope: scope, type: f.type, parent: f.parent, tag: f.tag, doneLimit: f.doneLimit }));
+    if (f.parent) {
+      (board.columns || []).forEach(function (c) { (c.cards || []).forEach(function (x) { if (x.parent && x.parent.id === f.parent) parentLabel = x.parent.summary || ""; }); });
+      if (!parentLabel) {
+        try { parentLabel = title((await api("/api/memories/" + encodeURIComponent(f.parent))).memory); } catch (e) { parentLabel = f.parent; }
+      }
+    }
+  } catch (err) {
+    if (seq !== renderSeq) return;
+    screenError(el, err, renderBoard);
+    return;
+  }
+  if (seq !== renderSeq) return;
+  const cols = board.columns || [];
+  let n = 0, blocked = 0;
+  const tags = {};
+  cols.forEach(function (c) {
+    (c.cards || []).forEach(function (x) { n++; if (x.blocked && c.status !== "done") blocked++; (x.tags || []).forEach(function (t) { tags[t] = 1; }); });
+  });
+  if (f.tag) tags[f.tag] = 1;
+  const tagList = Object.keys(tags).sort();
+  const hasFilter = f.type || f.parent || f.tag;
+  el.innerHTML = '<h2 id="h-board" class="sr-only">Доска</h2>' +
+    '<div class="board-toolbar">' +
+    '<label>Тип <select id="b-type"><option value="">любой</option>' + Object.keys(TYPE_LABEL).map(function (k) { return '<option value="' + k + '"' + (f.type === k ? " selected" : "") + ">" + TYPE_LABEL[k] + "</option>"; }).join("") + "</select></label>" +
+    '<span class="b-parent"><label for="b-parent">Внутри</label> ' + (f.parent
+      ? '<span class="chip">' + esc(parentLabel.slice(0, 40)) + '<button type="button" data-board-parent="" aria-label="Снять фильтр по родителю">×</button></span>'
+      : '<span class="picker inline"><input type="search" id="b-parent" placeholder="эпик или история…" autocomplete="off" data-picker="board-parent" aria-label="Внутри: поиск эпика или истории"><ul hidden></ul></span>') + "</span>" +
+    '<label>Тег <select id="b-tag"><option value="">любой</option>' + tagList.map(function (t) { return '<option value="' + esc(t) + '"' + (f.tag === t ? " selected" : "") + ">" + esc(t) + "</option>"; }).join("") + "</select></label>" +
+    '<label><input type="checkbox" id="b-lanes"' + (f.lanes ? " checked" : "") + "> дорожки по родителю</label>" +
+    '<span class="muted" style="margin-left:auto">' + n + " " + plural(n, "задача", "задачи", "задач") + (blocked ? " · " + blocked + " заблокировано" : "") + " · " + esc(scope ? scopeShort(scope) : "все scope") + "</span>" +
+    (hasFilter ? '<button type="button" class="btn quiet sm" data-board-reset>Сбросить</button>' : "") + "</div>" +
+    '<p class="muted hint">Перетащи карточку в другую колонку или открой её и смени стадию — с клавиатуры: Enter на карточке, затем поле «Стадия». Заблокированную задачу дальше «к работе» не пустит сервер.</p>' +
+    '<div class="board" role="list" aria-label="Стадии">' + cols.map(function (c) { return boardColumn(c, f.lanes, f.doneLimit); }).join("") + "</div>";
+}
+
+// moveCard — PATCH {status}: оптимистичный перенос карточки в колонку, затем
+// перечитать доску; 409/400 → доска перечитывается (откат) + тост §5.
+async function moveCard(id, status, summary) {
+  const card = $('.card[data-id="' + id + '"]');
+  if (!card || card.getAttribute("data-status") === status) return;
+  const target = $('.col[data-status="' + status + '"] .cards');
+  if (target) { const e = $(".empty", target); if (e) e.remove(); target.appendChild(card); }
+  try {
+    await api("/api/memories/" + encodeURIComponent(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: status }) });
+  } catch (err) {
+    showToast(patchErrorText(err, { summary: summary }));
+    refreshScreen();
+    return;
+  }
+  showToast("Перенесена в «" + STATUS_LABEL[status] + "»");
+  refreshScreen();
+}
+
+document.addEventListener("change", function (e) {
+  const t = e.target;
+  if (!(t instanceof Element)) return;
+  if (t.id === "b-type") { setBoardParams({ type: t.value }); return; }
+  if (t.id === "b-tag") { setBoardParams({ tag: t.value }); return; }
+  if (t.id === "b-lanes") { setBoardParams({ lanes: t.checked }); return; }
+  const mv = t.getAttribute("data-move");
+  if (mv) { const c = t.closest(".card"); moveCard(mv, t.value, c ? c.getAttribute("aria-label") : ""); return; }
+  const field = t.getAttribute("data-field");
+  if (field && drawer.card) {
+    const fields = {};
+    fields[field] = t.value;
+    patchRecord(fields, field === "status" ? "Стадия: " + STATUS_LABEL[t.value] : "", "#f-" + field).then(function (ok) { if (!ok) drawRecord(); });
+  }
+});
+
+// drag & drop (мышь); клавиатурная альтернатива — select «Переместить» и поле «Стадия» в панели
+let dragId = null;
+document.addEventListener("dragstart", function (e) {
+  const c = e.target instanceof Element ? e.target.closest(".card") : null;
+  if (!c) return;
+  dragId = c.getAttribute("data-id");
+  c.classList.add("dragging");
+  document.body.classList.add("dragging-any");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", dragId);
+});
+document.addEventListener("dragend", function (e) {
+  document.body.classList.remove("dragging-any");
+  const c = e.target instanceof Element ? e.target.closest(".card") : null;
+  if (c) c.classList.remove("dragging");
+  $$(".col.over").forEach(function (x) { x.classList.remove("over"); });
+});
+document.addEventListener("dragover", function (e) {
+  const col = e.target instanceof Element ? e.target.closest(".col") : null;
+  if (!col || !dragId) return;
+  e.preventDefault();
+  $$(".col.over").forEach(function (x) { if (x !== col) x.classList.remove("over"); });
+  col.classList.add("over");
+});
+document.addEventListener("dragleave", function (e) {
+  const col = e.target instanceof Element ? e.target.closest(".col") : null;
+  if (col && !col.contains(e.relatedTarget)) col.classList.remove("over");
+});
+document.addEventListener("drop", function (e) {
+  const col = e.target instanceof Element ? e.target.closest(".col") : null;
+  if (!col || !dragId) return;
+  e.preventDefault();
+  const id = dragId; dragId = null;
+  const c = $('.card[data-id="' + id + '"]');
+  moveCard(id, col.getAttribute("data-status"), c ? c.getAttribute("aria-label") : "");
+});
+
+// --- пикер задачи (§2.4/§2.5): GET /api/search?q&mode=lexical&kind=task ---
+
+let pickTimer = null;
+document.addEventListener("input", function (e) {
+  const t = e.target;
+  if (!(t instanceof Element) || !t.hasAttribute("data-picker")) return;
+  clearTimeout(pickTimer);
+  const list = t.parentElement.querySelector("ul");
+  const q = t.value.trim();
+  if (!q) { list.hidden = true; list.innerHTML = ""; return; }
+  pickTimer = setTimeout(async function () {
+    let r;
+    try {
+      r = await api("/api/search" + qs({ q: q, mode: "lexical", kind: "task", scope: state.scope, limit: 10 }));
+    } catch (err) { showToast(err.status === 0 ? "Сервер памяти не отвечает." : err.message); return; }
+    if (t.value.trim() !== q) return;
+    const items = (r.items || []).filter(function (m) { return m.id !== drawer.id && !m.supersededBy; });
+    list.innerHTML = items.length ? items.map(function (m) {
+      return '<li><button type="button" data-pick="' + esc(m.id) + '">' + esc(TYPE_LABEL[m.type] || m.type) + " · " + esc(title(m)) + " " + statusTag(m.status) + "</button></li>";
+    }).join("") : '<li class="none">Ничего не нашлось</li>';
+    list.hidden = false;
+  }, 260);
+});
+
+function pickerClick(t) {
+  const btn = t.closest("[data-pick]");
+  if (!btn) return false;
+  const input = btn.closest(".picker").querySelector("[data-picker]");
+  const kind = input.getAttribute("data-picker"), id = btn.getAttribute("data-pick");
+  if (kind === "board-parent") setBoardParams({ parent: id });
+  else if (kind === "task-parent") patchRecord({ links: [{ id: id, rel: "part_of" }] }, "Привязана", '[data-picker="task-parent"]');
+  else if (kind === "task-blocker") patchRecord({ links: [{ id: id, rel: "blocked_by" }] }, "Блокер добавлен", '[data-picker="task-blocker"]');
+  return true;
+}
+
+// --- панель задачи (§2.5): поверх общей панели записи ---
+
+function taskBody(card) {
+  const t = card.memory, archived = !!t.supersededBy;
+  const b = card.blockedBy || [], blocks = card.blocks || [], p = card.parent, ch = card.children || [], pr = card.progress;
+  const other = outgoingLinks(card).concat(incomingLinks(card)).filter(function (x) { return x.rel !== "part_of" && x.rel !== "blocked_by"; });
+  let html = "";
+  if (archived) {
+    html += '<div class="notice" style="margin-bottom:var(--s4)"><div class="grow">В архиве с ' + esc(rel(t.updatedAt)) + " — забыта. Архивные записи не редактируются.</div></div>";
+  }
+  html += '<h2 id="rec-title" class="summary task">' + (drawer.edit ? '<input type="text" id="ed-summary" aria-label="Заголовок" autocomplete="off" value="' + esc(t.summary || "") + '">' : esc(t.summary || t.id)) + "</h2>";
+  if (b.length) {
+    html += '<div class="notice danger" style="margin-bottom:var(--s4)"><div class="grow"><strong>Заблокирована.</strong> Дальше «к работе» не перевести, пока ' + (b.length === 1 ? "не закрыта" : "не закрыты") + ": " +
+      b.map(function (x) { return '<button type="button" class="btn quiet sm inline-link" data-open="' + esc(x.id) + '">' + esc(x.summary || x.id) + "</button> (" + esc(STATUS_LABEL[x.status] || x.status) + ")"; }).join(", ") + "</div></div>";
+  }
+  const dis = archived ? " disabled" : "";
+  html += '<div class="fields-2">' +
+    '<div class="field"><label for="f-status">Стадия</label><select id="f-status" data-field="status"' + dis + ">" + STATUSES.map(function (s) { return '<option value="' + s + '"' + (s === t.status ? " selected" : "") + ">" + STATUS_LABEL[s] + "</option>"; }).join("") + "</select></div>" +
+    '<div class="field"><label for="f-type">Тип</label><select id="f-type" data-field="type"' + dis + ">" + Object.keys(TYPE_LABEL).map(function (k) { return '<option value="' + k + '"' + (t.type === k ? " selected" : "") + ">" + TYPE_LABEL[k] + "</option>"; }).join("") + "</select></div>" +
+    '<div class="field"><label for="f-branch">Ветка</label><input type="text" id="f-branch" class="mono" value="' + esc(t.branch || "") + '" placeholder="feat/…" autocomplete="off" spellcheck="false" data-field="branch"' + dis + "></div>" +
+    '<div class="field"><label for="f-workflow">Процесс</label><input type="text" id="f-workflow" value="' + esc(t.workflow || "") + '" placeholder="dev, ultracode…" autocomplete="off" data-field="workflow"' + dis + "></div></div>" +
+    '<div class="hgroup">' + imp(t.importance, !archived && !drawer.edit) + "<span>приоритет " + t.importance + " из 5</span><span class=\"muted\">·</span><span class=\"muted\">создана " + esc(rel(t.createdAt)) + "</span></div>" +
+    '<div class="section"><h3>Описание</h3>' + (drawer.edit ? '<textarea id="ed-content" rows="10" aria-label="Описание">' + esc(t.content) + "</textarea>" : '<div class="prose">' + esc(t.content) + "</div>") + "</div>" +
+    '<div class="section"><h3>Входит в</h3>' + (p
+      ? '<ul class="links"><li><span class="rel">' + esc(TYPE_LABEL[p.type] || p.type) + '</span><span class="to"><button type="button" data-open="' + esc(p.id) + '">' + esc(p.summary || p.id) + "</button> " + statusTag(p.status) + "</span>" +
+        (archived ? "<span></span>" : '<button type="button" class="btn quiet sm" data-unlink="' + esc(p.id) + '" data-rel="part_of">Отвязать</button>') + "</li></ul>"
+      : '<p class="muted small">Ни в какой эпик или историю не входит.</p>') +
+    (archived ? "" : '<div class="picker"><input type="search" placeholder="Найти эпик или историю…" aria-label="Родитель: поиск задачи" autocomplete="off" data-picker="task-parent"><ul hidden></ul></div>') + "</div>";
+  if (ch.length) {
+    html += '<div class="section"><h3>Дочерние <span class="muted">' + (pr ? pr.done + " из " + pr.total + " готово" : ch.length) + "</span></h3>" +
+      (pr && pr.total ? '<div class="progress" style="margin-bottom:6px"><i style="width:' + Math.round(pr.done / pr.total * 100) + '%"></i></div>' : "") +
+      '<ul class="links">' + ch.map(function (c) { return '<li><span class="rel in">включает</span><span class="to"><button type="button" data-open="' + esc(c.id) + '">' + esc(c.summary || c.id) + "</button> " + statusTag(c.status) + "</span><span></span></li>"; }).join("") + "</ul></div>";
+  }
+  html += '<div class="section"><h3>Блокировки</h3>' + (b.length || blocks.length ? '<ul class="links">' +
+    b.map(function (x) { return '<li><span class="rel out">заблокирована</span><span class="to"><button type="button" data-open="' + esc(x.id) + '">' + esc(x.summary || x.id) + "</button> " + statusTag(x.status) + "</span>" + (archived ? "<span></span>" : '<button type="button" class="btn quiet sm" data-unlink="' + esc(x.id) + '" data-rel="blocked_by">Снять</button>') + "</li>"; }).join("") +
+    blocks.map(function (x) { return '<li><span class="rel in">блокирует</span><span class="to"><button type="button" data-open="' + esc(x.id) + '">' + esc(x.summary || x.id) + "</button> " + statusTag(x.status) + "</span><span></span></li>"; }).join("") + "</ul>"
+    : '<p class="muted small">Ничем не заблокирована и ничего не блокирует.</p>') +
+    (archived ? "" : '<div class="picker"><input type="search" placeholder="Добавить блокер: найти задачу…" aria-label="Блокер: поиск задачи" autocomplete="off" data-picker="task-blocker"><ul hidden></ul></div>') + "</div>";
+  if (other.length) html += '<div class="section"><h3>Связано</h3><ul class="links">' + other.map(function (x) { return linkRow(x); }).join("") + "</ul></div>";
+  html += '<div class="section"><h3>Теги</h3>' + tagsEditor(t) + "</div>" + serviceMeta(card) + (drawer.confirm ? forgetConfirm(card) : "");
+  return html;
+}
+
 const screens = {
   overview: { render: renderOverview },
   memory: { render: renderMemory },
-  board: { render: function () { placeholder("board", "16.6"); } },
+  board: { render: renderBoard },
 };
 
 let lastScreenKey = "";  // раздел+scope+фильтры последней отрисовки: смена одного id панели экран не перерисовывает
@@ -785,9 +1039,6 @@ function memoryBody(card) {
   return html;
 }
 
-// taskBody — тело панели задачи (§2.5) — задача 16.6; до неё — общее тело.
-function taskBody(card) { return memoryBody(card); }
-
 // patchRecord — PATCH /api/memories/{id}; успех → перечитать карточку, экран под
 // панелью и тост; ошибка → тост с текстом сервера (§5), состояние не меняется.
 async function patchRecord(fields, okText, focusSel) {
@@ -845,6 +1096,12 @@ function drawerClick(t) {
   if (t.closest("[data-forget-ask]")) { drawer.confirm = true; drawerFocus = "[data-forget]"; drawRecord(); return true; }
   if (t.closest("[data-forget-cancel]")) { drawer.confirm = false; drawerFocus = "[data-forget-ask]"; drawRecord(); return true; }
   if (t.closest("[data-forget]")) { forgetRecord(); return true; }
+  const ul = t.closest("[data-unlink]");
+  if (ul) {
+    const rel_ = ul.getAttribute("data-rel");
+    patchRecord({ unlinks: [{ id: ul.getAttribute("data-unlink"), rel: rel_ }] }, rel_ === "blocked_by" ? "Блокировка снята" : "Отвязано", '[data-picker="' + (rel_ === "blocked_by" ? "task-blocker" : "task-parent") + '"]');
+    return true;
+  }
   const untag = t.closest("[data-untag]");
   if (untag) {
     const tag = untag.getAttribute("data-untag");
@@ -885,7 +1142,13 @@ function showToast(text) {
 document.addEventListener("click", function (e) {
   const t = e.target;
   if (!(t instanceof Element)) return;
+  if (pickerClick(t)) return;
   if (state.id && t.closest("#drawer-root") && drawerClick(t)) return;
+  if (t.closest("[data-board-reset]")) { setBoardParams({ type: "", parent: "", tag: "" }); return; }
+  const bp = t.closest("[data-board-parent]");
+  if (bp) { setBoardParams({ parent: bp.getAttribute("data-board-parent") }); return; }
+  const more = t.closest("[data-more]");
+  if (more) { setBoardParams({ doneLimit: parseInt(more.getAttribute("data-more"), 10) || 0 }); return; }
   const goto = t.closest("[data-goto]");
   if (goto) { navigate({ view: goto.getAttribute("data-goto"), params: new URLSearchParams(), id: "" }); return; }
   if (t.closest("[data-close]")) { closeRecord(); return; }
