@@ -1,0 +1,1006 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memo — прототип веб-морды</title>
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#F5F5F2">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#15171B">
+<meta name="description" content="Дизайн-прототип новой веб-морды memo web: обзор, память, запись, доска, задача. Один файл, данные-заглушки.">
+<style>
+/* ============================================================
+   Design tokens — переносятся в tailwind.input.css как есть
+   ============================================================ */
+:root{
+  color-scheme: light dark;
+  /* поверхности */
+  --bg:#F5F5F2;          /* страница */
+  --surface:#FFFFFF;     /* панели, строки */
+  --surface-2:#ECECE8;   /* колонки доски, вторичные области */
+  --surface-3:#E3E3DE;   /* hover строки */
+  /* текст */
+  --ink:#1C1F23;
+  --ink-2:#464B53;
+  --ink-3:#676C75;       /* ≥ 4.5:1 на surface */
+  /* линии */
+  --line:#DADBD6;
+  --line-strong:#8A8D87;      /* ≥ 3:1 на surface — границы контролов (WCAG 1.4.11) */
+  /* акцент и семантика */
+  --accent:#2E5BDA;
+  --accent-ink:#FFFFFF;
+  --accent-soft:#E6ECFB;
+  --danger:#B4231F;
+  --danger-soft:#FBE7E6;
+  --warn:#7A5300;
+  --warn-soft:#FBF1DC;
+  --ok:#1F6E3A;
+  --ok-soft:#E3F2E7;
+  /* виды памяти (текст-контраст ≥ 4.5 на surface) */
+  --k-semantic:#2F5FB3;
+  --k-episodic:#8A5A10;
+  --k-procedural:#187066;
+  --k-debt:#B3402B;
+  --k-task:#6A4FBF;
+  /* шрифты */
+  --font-ui:-apple-system,"SF Pro Text","Segoe UI",system-ui,Roboto,sans-serif;
+  --font-prose:"Iowan Old Style","Charter","Palatino",Georgia,"Times New Roman",serif;
+  --font-mono:"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  /* шкала */
+  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-lg:16px; --fs-xl:20px; --fs-2xl:28px;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px;
+  --r:4px; --r-lg:8px;
+  --focus:0 0 0 2px var(--surface),0 0 0 4px var(--accent);
+  --drawer-w:600px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15171B; --surface:#1E2126; --surface-2:#191B1F; --surface-3:#272A30;
+    --ink:#E8E9EB; --ink-2:#C0C4CA; --ink-3:#9EA4AD;
+    --line:#32363D; --line-strong:#6B7079;
+    --accent:#8EA7F2; --accent-ink:#0F172A; --accent-soft:#25304A;
+    --danger:#F08C87; --danger-soft:#3B2321;
+    --warn:#E9C06A; --warn-soft:#3A2F16;
+    --ok:#7FD09A; --ok-soft:#1C3324;
+    --k-semantic:#8FB0F0; --k-episodic:#E2B15A; --k-procedural:#6FCABD; --k-debt:#F09480; --k-task:#B9A6F5;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15171B; --surface:#1E2126; --surface-2:#191B1F; --surface-3:#272A30;
+  --ink:#E8E9EB; --ink-2:#C0C4CA; --ink-3:#9EA4AD;
+  --line:#32363D; --line-strong:#6B7079;
+  --accent:#8EA7F2; --accent-ink:#0F172A; --accent-soft:#25304A;
+  --danger:#F08C87; --danger-soft:#3B2321;
+  --warn:#E9C06A; --warn-soft:#3A2F16;
+  --ok:#7FD09A; --ok-soft:#1C3324;
+  --k-semantic:#8FB0F0; --k-episodic:#E2B15A; --k-procedural:#6FCABD; --k-debt:#F09480; --k-task:#B9A6F5;
+}
+
+/* ============================================================
+   База
+   ============================================================ */
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font:var(--fs-md)/1.45 var(--font-ui);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+button,input,select,textarea{font:inherit;color:inherit}
+:focus-visible{outline:none;box-shadow:var(--focus);border-radius:var(--r)}
+.skip{position:absolute;left:var(--s3);top:-40px;background:var(--accent);color:var(--accent-ink);padding:6px 10px;border-radius:var(--r);z-index:40}
+.skip:focus{top:var(--s3)}
+h1,h2,h3{text-wrap:balance}
+.num,.n,.when,.rows .sub{display:block;font-size:var(--fs-xs);color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+.rows .blk{color:var(--danger);font-weight:600}
+.rows .when{font-variant-numeric:tabular-nums}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+[hidden]{display:none!important}
+code,.mono{font-family:var(--font-mono);font-size:0.92em}
+h1,h2,h3{margin:0;font-weight:600;line-height:1.25}
+h1{font-size:var(--fs-xl)}
+h2{font-size:var(--fs-lg)}
+h3{font-size:var(--fs-md)}
+p{margin:0}
+.muted{color:var(--ink-3)}
+.prose{font-family:var(--font-prose);font-size:15.5px;line-height:1.55;max-width:68ch;white-space:pre-wrap;word-wrap:break-word}
+.prose code{font-size:0.85em;background:var(--surface-2);padding:0 3px;border-radius:3px}
+
+/* ============================================================
+   Каркас: шапка + основная область + панель
+   ============================================================ */
+.topbar{position:sticky;top:0;z-index:5;background:var(--surface);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:var(--s5);padding:0 var(--s5);height:48px}
+.brand{font-size:var(--fs-md);font-weight:700;letter-spacing:-0.01em;display:flex;align-items:baseline;gap:var(--s2)}
+.brand small{font-weight:400;color:var(--ink-3);font-size:var(--fs-xs)}
+.nav{display:flex;gap:var(--s1);height:100%}
+.nav button{background:none;border:0;border-bottom:2px solid transparent;padding:0 var(--s3);height:48px;cursor:pointer;color:var(--ink-2)}
+.nav button[aria-current="page"]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.nav button:hover{color:var(--ink)}
+.topbar .grow{flex:1}
+.scopebox{display:flex;align-items:center;gap:var(--s2);font-size:var(--fs-sm);color:var(--ink-2)}
+.scopebox select{max-width:260px}
+main{padding:var(--s5);max-width:1400px;margin:0 auto}
+main.wide{max-width:none}
+
+/* контролы */
+.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-strong);background:var(--surface);
+  padding:5px 10px;border-radius:var(--r);cursor:pointer;line-height:1.3;color:var(--ink);min-height:30px}
+.btn:hover{background:var(--surface-3)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.danger{color:var(--danger);border-color:var(--danger)}
+.btn.danger.solid{background:var(--danger);color:#fff}
+.btn.quiet{border-color:transparent;background:transparent;color:var(--ink-2)}
+.btn.quiet:hover{background:var(--surface-3);color:var(--ink)}
+.btn.sm{padding:2px 8px;min-height:24px;font-size:var(--fs-sm)}
+.btn:disabled{opacity:.5;cursor:default}
+input[type=search],input[type=text],select,textarea{background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r);padding:5px 8px;min-height:30px}
+input[type=search]{width:100%}
+textarea{width:100%;resize:vertical}
+select{padding-right:24px}
+.seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:var(--r);overflow:hidden}
+.seg button{border:0;background:var(--surface);padding:4px 10px;cursor:pointer;color:var(--ink-2);min-height:28px}
+.seg button+button{border-left:1px solid var(--line-strong)}
+.seg button[aria-pressed="true"],.seg button[aria-checked="true"]{background:var(--accent-soft);color:var(--ink);font-weight:600}
+.seg button:focus-visible{box-shadow:inset 0 0 0 2px var(--accent);border-radius:0}
+.chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:1px 8px;font-size:var(--fs-xs);color:var(--ink-2);background:var(--surface)}
+.chip.tag{background:var(--surface-2);border-color:transparent}
+.chip button{border:0;background:none;padding:0 0 0 2px;cursor:pointer;color:var(--ink-3);line-height:1}
+.chip button:hover{color:var(--danger)}
+
+/* вид записи: цветная кромка + слово */
+.kind{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-xs);font-weight:600;letter-spacing:.01em}
+.kind::before{content:"";width:8px;height:8px;border-radius:2px;background:currentColor}
+.kind.semantic{color:var(--k-semantic)}.kind.episodic{color:var(--k-episodic)}.kind.procedural{color:var(--k-procedural)}.kind.debt{color:var(--k-debt)}.kind.task{color:var(--k-task)}
+.rule-semantic{border-left-color:var(--k-semantic)}.rule-episodic{border-left-color:var(--k-episodic)}.rule-procedural{border-left-color:var(--k-procedural)}.rule-debt{border-left-color:var(--k-debt)}.rule-task{border-left-color:var(--k-task)}
+
+/* важность: 5 сегментов */
+.imp{display:inline-flex;gap:2px;vertical-align:middle}
+.imp i{display:block;width:6px;height:10px;border-radius:1px;background:var(--surface);border:1px solid var(--line-strong)}
+.imp i.on{background:var(--ink-2);border-color:var(--ink-2)}
+.imp.edit i{cursor:pointer;width:10px;height:14px}
+.imp.edit i:hover{background:var(--accent)}
+.imp-btn{border:0;background:none;padding:0;cursor:pointer}
+
+/* статус задачи */
+.status{display:inline-block;font-size:var(--fs-xs);padding:1px 7px;border-radius:3px;background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line)}
+.status.doing{background:var(--accent-soft);color:var(--ink);border-color:transparent}
+.status.done{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.status.release,.status.testing,.status.review{border-color:var(--line-strong)}
+
+/* плашки */
+.notice{display:flex;gap:var(--s3);align-items:flex-start;padding:var(--s3) var(--s4);border-radius:var(--r);border:1px solid var(--line);background:var(--surface);font-size:var(--fs-sm)}
+.notice.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.notice.danger{background:var(--danger-soft);color:var(--danger);border-color:transparent}
+.notice.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.notice .grow{flex:1}
+.notice .btn{color:inherit;border-color:currentColor;background:transparent}
+
+/* ============================================================
+   Обзор
+   ============================================================ */
+.overview{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(320px,.8fr);gap:var(--s5);align-items:start}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg)}
+.panel>header{display:flex;align-items:baseline;gap:var(--s3);padding:var(--s3) var(--s4);border-bottom:1px solid var(--line)}
+.panel>header h2{font-size:var(--fs-md)}
+.panel>header .muted{font-size:var(--fs-sm)}
+.panel>header .grow{flex:1}
+.panel .body{padding:var(--s3) var(--s4)}
+.stack{display:grid;gap:var(--s5)}
+.headline{display:flex;align-items:baseline;gap:var(--s4);flex-wrap:wrap;margin-bottom:var(--s5)}
+.headline .num{font-size:var(--fs-2xl);font-weight:600;letter-spacing:-0.02em}
+.headline .muted{font-size:var(--fs-sm)}
+.kinds{display:grid;grid-template-columns:repeat(5,1fr);gap:var(--s3)}
+.kinds button{border:1px solid var(--line);border-left-width:3px;background:var(--surface);border-radius:var(--r);padding:var(--s2) var(--s3);text-align:left;cursor:pointer}
+.kinds button:hover{background:var(--surface-3)}
+.kinds .n{font-size:var(--fs-xl);font-weight:600;display:block;margin-top:2px}
+.kinds .d{font-size:var(--fs-xs);color:var(--ink-3)}
+.rows{list-style:none;margin:0;padding:0}
+.rows li{display:grid;grid-template-columns:96px minmax(0,1fr) auto;gap:var(--s3);align-items:baseline;padding:var(--s2) 0;border-top:1px solid var(--line)}
+.rows li>.kind,.rows li>.status{justify-self:start}
+.rows li>.status{text-align:center;min-width:80px}
+.rows li:first-child{border-top:0}
+.rows .t{min-width:0}
+.rows .t button{border:0;background:none;padding:0;text-align:left;cursor:pointer;color:var(--ink);font:inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;display:block}
+.rows .t button:hover{color:var(--accent);text-decoration:underline}
+.rows .when{font-size:var(--fs-xs);color:var(--ink-3);white-space:nowrap;text-align:right}
+.scopes-list{list-style:none;margin:0;padding:0;font-size:var(--fs-sm)}
+.scopes-list li{display:flex;justify-content:space-between;padding:3px 0}
+.scopes-list button{border:0;background:none;padding:0;cursor:pointer;color:var(--ink);font:inherit}
+.scopes-list button:hover{color:var(--accent);text-decoration:underline}
+.scopes-list .n{color:var(--ink-3);font-variant-numeric:tabular-nums}
+.providers{list-style:none;margin:0;padding:0;font-size:var(--fs-sm)}
+.providers li{display:grid;grid-template-columns:10px 1fr;gap:var(--s2);padding:5px 0;align-items:start}
+.providers .dot{width:8px;height:8px;border-radius:50%;margin-top:6px;background:var(--ok)}
+.providers .dot.off{background:var(--danger)}
+.providers .dot.na{background:var(--line-strong)}
+.providers .d{color:var(--ink-3);font-size:var(--fs-xs)}
+
+/* ============================================================
+   Память: поиск + фильтры + список
+   ============================================================ */
+.toolbar{display:flex;gap:var(--s3);align-items:center;flex-wrap:wrap;margin-bottom:var(--s3)}
+.toolbar .search{flex:1;min-width:280px;position:relative}
+.toolbar .search input{padding-left:30px}
+.toolbar .search svg{position:absolute;left:9px;top:8px;width:14px;height:14px;color:var(--ink-3)}
+.filters{display:flex;gap:var(--s3);align-items:center;flex-wrap:wrap;margin-bottom:var(--s3);font-size:var(--fs-sm)}
+.filters label{color:var(--ink-3)}
+.filters .checks{display:flex;gap:var(--s2);flex-wrap:wrap}
+.filters .checks label{display:inline-flex;align-items:center;gap:4px;color:var(--ink);cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:1px 8px 1px 5px;background:var(--surface)}
+.filters .checks label:has(:checked){background:var(--accent-soft);border-color:var(--accent)}
+.filters .checks input{margin:0}
+.filters .active{margin-left:auto;display:flex;gap:var(--s2);align-items:center;color:var(--ink-3)}
+.results-head{display:flex;align-items:baseline;justify-content:space-between;font-size:var(--fs-sm);color:var(--ink-3);margin:var(--s2) 0}
+.list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden}
+.row{display:grid;grid-template-columns:110px minmax(0,1fr) auto;gap:var(--s4);padding:var(--s3) var(--s4);border-top:1px solid var(--line);border-left:3px solid transparent;cursor:pointer}
+.row:first-child{border-top:0}
+.row:hover{background:var(--surface-3)}
+.row[aria-selected="true"]{background:var(--accent-soft)}
+.row:focus-within{background:var(--surface-3)}
+.row{scroll-margin-top:56px}
+.row .meta{display:flex;flex-direction:column;gap:3px;font-size:var(--fs-xs);color:var(--ink-3)}
+.row .meta .scope{color:var(--ink-2);word-break:break-all}
+.row .main{min-width:0}
+.row .title{border:0;background:none;padding:0;text-align:left;width:100%;cursor:pointer;font-family:var(--font-prose);font-size:15px;line-height:1.4;color:var(--ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.row .title.archived{color:var(--ink-3);text-decoration:line-through;text-decoration-color:var(--line-strong)}
+.row .tags{margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.row .side{display:flex;flex-direction:column;align-items:flex-end;gap:4px;font-size:var(--fs-xs);color:var(--ink-3);white-space:nowrap}
+.row .src{font-size:11px;color:var(--ink-3)}
+.empty{padding:var(--s7) var(--s5);text-align:center;color:var(--ink-2)}
+.empty h3{margin-bottom:var(--s2)}
+.empty p{color:var(--ink-3);max-width:46ch;margin:0 auto var(--s4)}
+.hl{background:var(--warn-soft);color:inherit;border-radius:2px}
+
+/* ============================================================
+   Панель записи / задачи (drawer)
+   ============================================================ */
+.drawer-backdrop{position:fixed;inset:0;background:rgba(20,22,26,.25);z-index:9}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:var(--drawer-w);max-width:100vw;background:var(--surface);border-left:1px solid var(--line);z-index:10;
+  display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.06)}
+/* на широком экране панель у правого края далеко от списка — ставим по центру */
+@media (min-width:1200px){
+  .drawer{top:40px;bottom:40px;right:auto;left:50%;transform:translateX(-50%);width:720px;border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.14)}
+  .drawer>header{border-radius:var(--r-lg) var(--r-lg) 0 0}
+}
+.drawer>header{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s4);border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surface)}
+.drawer>header .grow{flex:1;min-width:0}
+.drawer>.content{flex:1;overflow:auto;overscroll-behavior:contain;padding:var(--s4) var(--s5) var(--s7)}
+.drawer .actions{display:flex;gap:var(--s2);padding:var(--s3) var(--s4);border-top:1px solid var(--line);background:var(--surface);align-items:center}
+.drawer .actions .grow{flex:1}
+.hgroup{display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;font-size:var(--fs-sm);color:var(--ink-2);margin-bottom:var(--s4)}
+.hgroup .scope{color:var(--ink-3)}
+.section{margin-top:var(--s5)}
+.section h3{font-size:var(--fs-sm);color:var(--ink-3);font-weight:600;margin-bottom:var(--s2);display:flex;align-items:baseline;gap:var(--s2)}
+.section h3 .grow{flex:1}
+.summary{font-size:var(--fs-lg);font-family:var(--font-prose);line-height:1.35;margin-bottom:var(--s3)}
+.summary.task{font-size:var(--fs-xl);font-family:var(--font-ui);font-weight:600;letter-spacing:-0.01em}
+.meta-grid{display:grid;grid-template-columns:max-content 1fr;gap:4px var(--s4);font-size:var(--fs-sm)}
+.meta-grid dt{color:var(--ink-3);margin:0}
+.meta-grid dd{margin:0;color:var(--ink-2);word-break:break-all}
+.links{list-style:none;margin:0;padding:0}
+.links li{display:grid;grid-template-columns:110px 1fr auto;gap:var(--s2);align-items:baseline;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm)}
+.links li:first-child{border-top:0}
+.links .rel{color:var(--ink-3);font-size:var(--fs-xs)}
+.links .rel.in::before{content:"← "}
+.links .rel.out::before{content:"→ "}
+.links .to{min-width:0}
+.links .to button{border:0;background:none;padding:0;text-align:left;cursor:pointer;color:var(--ink);font:inherit}
+.links .to button:hover{color:var(--accent);text-decoration:underline}
+.links .to .kind{margin-right:6px}
+.tags-edit{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.tags-edit input{min-height:24px;padding:1px 6px;width:120px;font-size:var(--fs-sm)}
+.confirm{margin-top:var(--s3);padding:var(--s3) var(--s4);border:1px solid var(--danger);border-radius:var(--r);background:var(--danger-soft);color:var(--ink)}
+.confirm p{margin-bottom:var(--s2);font-size:var(--fs-sm)}
+.confirm .btns{display:flex;gap:var(--s2)}
+.field{display:grid;gap:4px;font-size:var(--fs-sm);margin-bottom:var(--s3)}
+.field label{color:var(--ink-3)}
+.fields-2{display:grid;grid-template-columns:1fr 1fr;gap:var(--s3)}
+.progress{height:6px;background:var(--surface-2);border-radius:3px;overflow:hidden;border:1px solid var(--line)}
+.progress i{display:block;height:100%;background:var(--accent)}
+.editing .prose{display:none}
+.toast{position:fixed;left:50%;bottom:var(--s5);transform:translateX(-50%);z-index:20;background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:var(--r);font-size:var(--fs-sm)}
+
+/* ============================================================
+   Доска
+   ============================================================ */
+.board-toolbar{display:flex;gap:var(--s3);align-items:center;flex-wrap:wrap;margin-bottom:var(--s3);font-size:var(--fs-sm)}
+.board-toolbar label{color:var(--ink-3);display:inline-flex;align-items:center;gap:6px}
+.board{display:grid;grid-template-columns:repeat(7,minmax(176px,1fr));gap:var(--s3);overflow-x:auto;padding-bottom:var(--s3)}
+.col{background:var(--surface-2);border-radius:var(--r-lg);border:1px solid var(--line);display:flex;flex-direction:column;min-height:420px;max-height:calc(100vh - 170px)}
+.col>header{display:flex;align-items:baseline;gap:var(--s2);padding:var(--s2) var(--s3);font-size:var(--fs-sm);font-weight:600;border-bottom:1px solid var(--line)}
+.col>header .n{color:var(--ink-3);font-weight:400;font-variant-numeric:tabular-nums}
+.col>header .grow{flex:1}
+.col .cards{flex:1;overflow:auto;padding:var(--s2);display:flex;flex-direction:column;gap:var(--s2)}
+.col.over{outline:2px dashed var(--accent);outline-offset:-2px}
+.lane{font-size:var(--fs-xs);color:var(--ink-3);padding:6px 4px 2px;border-top:1px solid var(--line);margin-top:4px}
+.lane:first-child{border-top:0;margin-top:0}
+.card{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--k-task);border-radius:var(--r);padding:var(--s2) var(--s3);cursor:grab;position:relative}
+.card.epic{border-left-color:var(--ink-2)}
+.card.story{border-left-color:var(--line-strong)}
+.card:hover{border-color:var(--line-strong)}
+.card.dragging{opacity:.5}
+body.dragging-any{user-select:none}
+.card.blocked{background:repeating-linear-gradient(135deg,transparent 0 6px,var(--surface-2) 6px 7px)}
+.card .top{display:flex;align-items:center;gap:6px;font-size:var(--fs-xs);color:var(--ink-3);margin-bottom:4px}
+.card .top .grow{flex:1}
+.card .ttl{border:0;background:none;padding:0;text-align:left;font:inherit;color:var(--ink);cursor:pointer;line-height:1.35;display:block;width:100%}
+.card .ttl:hover{color:var(--accent)}
+.card .foot{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px;font-size:11px;color:var(--ink-3)}
+.card .blk{color:var(--danger);font-weight:600}
+.card .move{margin-left:auto}
+.card .move select{min-height:22px;padding:0 4px;font-size:11px;opacity:0}
+.card:hover .move select,.card:focus-within .move select{opacity:1}
+.card .prog{display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;color:var(--ink-3)}
+.card .prog .progress{flex:1;height:4px}
+.col .cards .empty{padding:var(--s5) var(--s3);font-size:var(--fs-xs)}
+
+/* ============================================================
+   Служебная панель прототипа (не часть продукта)
+   ============================================================ */
+.demo{position:fixed;left:var(--s3);bottom:var(--s3);z-index:30;font-size:var(--fs-xs);background:var(--surface);border:1px dashed var(--line-strong);border-radius:var(--r);padding:6px 10px;color:var(--ink-2);max-width:260px}
+.demo summary{cursor:pointer;font-weight:600}
+.demo label{display:flex;gap:6px;align-items:center;padding:3px 0;cursor:pointer}
+.demo .btn{margin-top:4px}
+
+@media (max-width:1100px){.overview{grid-template-columns:1fr}.kinds{grid-template-columns:repeat(3,1fr)}}
+@media (max-width:760px){main{padding:var(--s4)}.row{grid-template-columns:1fr}.row .side{flex-direction:row;align-items:center}.topbar{gap:var(--s3);padding:0 var(--s4)}.scopebox span{display:none}:root{--drawer-w:100vw}}
+@media (prefers-reduced-motion:no-preference){.drawer{animation:slide .18s ease-out}@keyframes slide{from{opacity:0}to{opacity:1}}}
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">К содержимому</a>
+<header class="topbar">
+  <h1 class="brand">memo <small>память агента · localhost:7070</small></h1>
+  <nav class="nav" aria-label="Разделы">
+    <button type="button" data-nav="overview">Обзор</button>
+    <button type="button" data-nav="memory">Память</button>
+    <button type="button" data-nav="board">Доска</button>
+  </nav>
+  <div class="grow"></div>
+  <div class="scopebox">
+    <label for="scope-global"><span>Scope</span></label>
+    <select id="scope-global" aria-label="Scope записей"></select>
+  </div>
+</header>
+
+<main id="main"></main>
+<div id="drawer-root"></div>
+<div id="toast-root" aria-live="polite"></div>
+
+<!-- Служебная панель прототипа: переключает состояния, которых нет в данных-заглушках -->
+<details class="demo">
+  <summary>Состояния макета</summary>
+  <label><input type="checkbox" id="demo-embedder"> эмбеддер недоступен</label>
+  <label><input type="checkbox" id="demo-reasoner"> reasoner недоступен</label>
+  <label><input type="checkbox" id="demo-apierror"> ошибка API</label>
+  <label><input type="checkbox" id="demo-empty"> память пуста</label>
+  <label><input type="checkbox" id="demo-dark"> тёмная тема</label>
+  <button type="button" class="btn sm" id="demo-reset">Сбросить правки макета</button>
+</details>
+
+<script>
+/* ============================================================
+   Данные-заглушки. Форма — 1:1 с DTO web.go (memoryDTO, boardCardDTO,
+   memoryCardResponse); значения взяты по форме из реальных записей
+   scope project:AgentMemory.
+   ============================================================ */
+const NOW = Math.floor(Date.parse('2026-09-22T11:30:00+03:00')/1000);
+const h = n => NOW - n*3600, d = n => NOW - n*86400;
+
+const SEED = [
+ // ---------- факты ----------
+ {id:'01K0A1STACKSQLITE0000000001',kind:'semantic',scope:'project:AgentMemory',importance:5,createdAt:d(70),updatedAt:d(12),accessedAt:h(3),accessCount:41,
+  summary:'Проект на Go, один бинарь memo: SQLite (FTS5 + sqlite-vec) по умолчанию, PostgreSQL + pgvector — для общей базы команды',
+  content:'Проект на Go. Хранилище — embedded SQLite в одном файле: метаданные + FTS5 (лексика) + sqlite-vec (вектор). С Этапа 12 — второй бэкенд PostgreSQL 18 + pgvector, выбор через `[store] driver`. Обе реализации живут строго за интерфейсом `store.Store`: `Writer`/`Recall`/`Maint` не знают, какой бэкенд активен. Сборка — `CGO_ENABLED=1 go build -tags sqlite_fts5 ./...`.',
+  tags:['stack','sqlite','postgres','store'],links:[{dst:'01K0A2PGBACKEND000000000002',rel:'related'}]},
+ {id:'01K0A2PGBACKEND000000000002',kind:'semantic',scope:'project:AgentMemory',importance:5,createdAt:d(53),updatedAt:d(53),accessedAt:d(2),accessCount:18,
+  summary:'В AgentMemory добавлен второй бэкенд хранилища — PostgreSQL 18 + pgvector — рядом с SQLite; выбор через [store] driver',
+  content:'В AgentMemory добавлен второй бэкенд хранилища — PostgreSQL 18 + pgvector — рядом с SQLite; выбор через `[store] driver = "postgres"`. Лексика — `tsvector` с конфигурацией `russian` + GIN, вектор — `vector(N)` с HNSW (`vector_cosine_ops`). Пароль только из env `MEMO_POSTGRES_PASSWORD`, никогда в TOML. Схему накатывает сам memo при первом старте; база и роль должны существовать заранее.',
+  tags:['postgres','store','архитектура','этап-12'],links:[{dst:'01K0A9ONLYSQLITE00000000009',rel:'supersedes'}]},
+ {id:'01K0A3ROGRABLI0000000000003',kind:'semantic',scope:'project:AgentMemory',importance:4,createdAt:d(53),updatedAt:d(53),accessedAt:d(9),accessCount:6,
+  summary:'Грабли SQLite read-only: DSN file:<path>?mode=ro не создаёт файл, а на несуществующем пути даёт unable to open — проба должна отличать «нет файла» от «нет прав»',
+  content:'Грабли SQLite read-only в AgentMemory (задача 12.1, проверено эмпирически): DSN `file:<path>?mode=ro` не создаёт файл, а на несуществующем пути возвращает `unable to open database file`. Проба подключения в `memo init` обязана отличать «файла ещё нет» (норма для нового проекта) от «нет прав на каталог» — иначе мастер ложно сообщает об ошибке хранилища.',
+  tags:['init','sqlite','store','грабли'],links:[{dst:'01K0A4PGPASSWORD00000000004',rel:'related'}]},
+ {id:'01K0A4PGPASSWORD00000000004',kind:'semantic',scope:'project:AgentMemory',importance:4,createdAt:d(53),updatedAt:d(53),accessedAt:d(20),accessCount:3,
+  summary:'Пароль PostgreSQL memo init никогда не пишет в TOML — только в <dir>/.env как MEMO_POSTGRES_PASSWORD',
+  content:'Пароль PostgreSQL `memo init` никогда не пишет в TOML — только в `<dir>/.env` как `MEMO_POSTGRES_PASSWORD`, через ту же функцию, что раскладывает `DEEPSEEK_API_KEY`/`OPENAI_API_KEY`. В `.mcp.json`/`opencode.json` уходит плейсхолдер `${MEMO_POSTGRES_PASSWORD}`, а не значение.',
+  tags:['dotenv','init','postgres','secrets'],links:[]},
+ {id:'01K0A5PGSERVER000000000005',kind:'semantic',scope:'project:AgentMemory',importance:4,createdAt:d(52),updatedAt:d(52),accessedAt:d(1),accessCount:9,
+  summary:'Общий сервер памяти команды: postgres.lan (192.168.1.110, Debian 13), PostgreSQL 18.4 из репозитория PGDG, pgvector из пакета',
+  content:'Общий сервер памяти команды: postgres.lan (192.168.1.110, Debian 13, VM пользователя), PostgreSQL 18.4 из репозитория PGDG, pgvector из пакета `postgresql-18-pgvector`. База `memo`, роль `memo`. Интеграционные тесты драйвера гоняются против него при `MEMO_TEST_POSTGRES_DSN`.',
+  tags:['postgres','инфраструктура','тесты'],links:[]},
+ {id:'01K0A6STOPWORDS00000000006',kind:'semantic',scope:'project:AgentMemory',importance:3,createdAt:d(50),updatedAt:d(50),accessedAt:null,accessCount:0,
+  summary:'Единственное заметное расхождение выдачи между бэкендами — стоп-слова: SQLite стеммирует всё подряд, PostgreSQL их отбрасывает',
+  content:'Единственное заметное пользователю расхождение выдачи между бэкендами AgentMemory — стоп-слова: SQLite (`normalizeForFTS`) стеммирует все слова подряд, включая предлоги, PostgreSQL с конфигурацией `russian` отбрасывает их на этапе `to_tsvector`. На запросах из знаменательных слов выдача совпадает. Это не дефект паритета, подгонять не нужно.',
+  tags:['fts','postgres','recall','паритет'],links:[]},
+ {id:'01K0A7HOMESCOPE00000000007',kind:'semantic',scope:'project:AgentMemory',importance:3,createdAt:h(26),updatedAt:h(26),accessedAt:null,accessCount:0,
+  summary:'Доска по умолчанию открывает домашний scope инстанса: /api/stats отдаёт homeScope из [scope] project',
+  content:'Доска по умолчанию открывает домашний scope инстанса: `GET /api/stats` отдаёт поле `homeScope` из `[scope] project`, фронт подставляет его в селект при пустом хэше. Без этого на общей базе доска открывалась на первом scope по алфавиту (`project:3D-Print-Project`), а не на своём проекте.',
+  tags:['web','board','scope','15.6'],links:[]},
+ {id:'01K0A8TTLTOKEN0000000000008',kind:'semantic',scope:'project:AgentMemory',importance:3,createdAt:d(6),updatedAt:d(6),accessedAt:null,accessCount:1,expiresAt:d(-8),
+  summary:'Тестовая роль memo_ci на postgres.lan действует до 30 сентября 2026 — после этого интеграционные тесты драйвера начнут падать по auth',
+  content:'Тестовая роль `memo_ci` на postgres.lan действует до 30 сентября 2026 (создана с `VALID UNTIL`). После истечения интеграционные тесты драйвера PostgreSQL начнут падать с ошибкой аутентификации — продлить или пересоздать роль заранее.',
+  tags:['postgres','тесты','ci'],links:[{dst:'01K0A5PGSERVER000000000005',rel:'related'}]},
+ {id:'01K0A9ONLYSQLITE00000000009',kind:'semantic',scope:'project:AgentMemory',importance:3,createdAt:d(120),updatedAt:d(53),accessedAt:d(60),accessCount:12,supersededBy:'01K0A2PGBACKEND000000000002',
+  summary:'Хранилище — только embedded SQLite; PostgreSQL не планируется',
+  content:'Хранилище — только embedded SQLite в одном файле. Второй бэкенд не планируется: один пользователь, одна машина, лишняя зависимость не окупается.',
+  tags:['sqlite','store','решение'],links:[]},
+ {id:'01K0B1KAITENLIMIT0000000010',kind:'semantic',scope:'project:KaitenMCP',importance:3,createdAt:d(30),updatedAt:d(30),accessedAt:null,accessCount:0,
+  summary:'Kaiten API отдаёт не больше 100 карточек на страницу; limit>100 молча урезается — пагинировать по offset',
+  content:'Kaiten API отдаёт не больше 100 карточек на страницу; `limit>100` молча урезается до 100 без ошибки. Пагинировать по `offset`, проверяя длину ответа, а не заголовки.',
+  tags:['kaiten','api','пагинация'],links:[]},
+ // ---------- пользователь / агент ----------
+ {id:'01K0B2USERLANG00000000000011',kind:'semantic',scope:'user:*',importance:4,createdAt:d(80),updatedAt:d(80),accessedAt:h(5),accessCount:55,
+  summary:'Пользователь: комментарии, ошибки и интерфейс — на русском; каждая задача выполняется в отдельной новой сессии',
+  content:'Пользователь: комментарии в коде, сообщения об ошибках и тексты интерфейса — на русском. Каждая задача разработки выполняется в отдельной новой сессии, задача описывается отдельным файлом.',
+  tags:['язык','процесс'],links:[]},
+ {id:'01K0B3USERNOREFACTOR000000012',kind:'semantic',scope:'user:*',importance:4,createdAt:d(75),updatedAt:d(75),accessedAt:d(1),accessCount:23,
+  summary:'Пользователь не любит «заодно отрефакторю»: без абстракций на будущее, feature-флагов и расширения границ задачи',
+  content:'Пользователь не любит «заодно отрефакторю»: не выходить за рамки задачи, без абстракций на будущее и feature-флагов. Найденный по пути долг — записать как debt, а не чинить молча.',
+  tags:['процесс','границы'],links:[]},
+ {id:'01K0B4AGENTRECALL0000000013',kind:'semantic',scope:'agent:self',importance:4,createdAt:d(70),updatedAt:d(70),accessedAt:h(1),accessCount:88,
+  summary:'Правило: recall в начале задачи, save по ходу — конкретные компромиссы хранятся в памяти, а не в CLAUDE.md',
+  content:'Правило работы с памятью проекта: `memory_recall` в начале задачи, `memory_save` по ходу — по одному атомарному факту за вызов. Конкретные отложенные решения и компромиссы хранятся в памяти (scope project), а не в CLAUDE.md.',
+  tags:['memo','процесс'],links:[]},
+ // ---------- процедуры ----------
+ {id:'01K0C1BUILDPROC00000000014',kind:'procedural',scope:'project:AgentMemory',importance:4,createdAt:d(90),updatedAt:d(20),accessedAt:h(2),accessCount:64,
+  summary:'Сборка и проверка: make build / make test (CGO_ENABLED=1, -tags sqlite_fts5); правило зависимостей — TestDependencyRule, базовая линия 5/5/5',
+  content:'Сборка: `make build` (`CGO_ENABLED=1 go build -tags sqlite_fts5 ./...`), бинарь для догфудинга — `make bin/memo`. Тесты: `make test`. Правило зависимостей: `go test -run TestDependencyRule ./internal/memory/` — базовая линия нарушений 5 для write/recall/maint, 0 для memory и board; тест падает и при росте, и при снижении.',
+  tags:['build','тесты','arch'],links:[]},
+ {id:'01K0C2PROBEVAR000000000015',kind:'procedural',scope:'project:AgentMemory',importance:4,createdAt:d(53),updatedAt:d(53),accessedAt:d(14),accessCount:2,
+  summary:'Правя хранилище в memo init, держи probeStoreConnection пакетной переменной — тесты подменяют её, а не поднимают PostgreSQL',
+  content:'Правя хранилище в `memo init`, держи `probeStoreConnection` пакетной переменной (`cmd/memo/init.go`): она вынесена специально, чтобы тесты мастера подменяли пробу подключения, а не поднимали живой PostgreSQL. Инлайнить её обратно — сломать `init_test.go`.',
+  tags:['init','store','грабли','тесты'],links:[{dst:'01K0C1BUILDPROC00000000014',rel:'part_of'}]},
+ {id:'01K0C3SCROLLVERIFY0000000016',kind:'procedural',scope:'project:AgentMemory',importance:3,createdAt:d(40),updatedAt:d(40),accessedAt:null,accessCount:0,
+  summary:'Верификация scroll-фич морды: in-app браузер рендерит страницу в iframe — IntersectionObserver срабатывает только после ресайза окна',
+  content:'Верификация scroll-фич web-морды: in-app preview-браузер рендерит страницу со `document.documentElement` в iframe, поэтому IntersectionObserver-сентинел бесконечного скролла срабатывает только после ресайза окна. Проверять бесконечный скролл в обычном Chrome или через `resize_window`.',
+  tags:['browser','gotcha','verify'],links:[]},
+ // ---------- долг ----------
+ {id:'01K0D1STOREPORT000000000017',kind:'debt',scope:'project:AgentMemory',importance:4,createdAt:d(60),updatedAt:d(60),accessedAt:d(3),accessCount:7,
+  summary:'Порт store.Store объявлен в одном пакете с реализациями sqlite/postgres — write/recall/maint компонуются с драйверами БД; базовая линия 5, не должна расти',
+  content:'Порт `store.Store` объявлен в одном пакете с реализациями (`sqlite.go`, `postgres*.go`), поэтому `write`, `recall` и `maint` компонуются с драйверами БД, хотя пользуются только интерфейсом. Отложено: вынос порта — отдельная задача. Критерий закрытия: `TestDependencyRule` с базовой линией 0 для всех пакетов вариантов использования.',
+  tags:['pkg:store','arch','dependency-rule'],links:[{dst:'01K0T6STOREPORT0000000TASK6',rel:'related'}]},
+ {id:'01K0D2TRUNCATEDUP00000000018',kind:'debt',scope:'project:AgentMemory',importance:2,createdAt:d(100),updatedAt:d(100),accessedAt:null,accessCount:1,
+  summary:'truncate дублируется в embed/ollama.go и reason/deepseek.go — вынести в общую утилиту при следующем касании',
+  content:'`truncate` дублируется в `embed/ollama.go` и `reason/deepseek.go`. Отложено осознанно: два вызова, разные пакеты, общий пакет утилит заводить рано. Критерий закрытия: третий дубль или общий пакет по другой причине.',
+  tags:['pkg:embed','pkg:reason','дубль'],links:[{dst:'01K0D1STOREPORT000000000017',rel:'related'}]},
+ {id:'01K0D3MCPLINKS0000000000019',kind:'debt',scope:'project:AgentMemory',importance:2,createdAt:d(95),updatedAt:d(95),accessedAt:d(40),accessCount:2,
+  summary:'memory_update в MCP-схеме не пробрасывает links (у memory_save есть) — асимметрия §12',
+  content:'`memory_update` в MCP-схеме не пробрасывает `links` (у `memory_save` есть) — асимметрия §12 на будущее. Критерий закрытия: `links` в схеме `memory_update` и тест.',
+  tags:['mcp','§12'],links:[]},
+ // ---------- эпизоды ----------
+ {id:'01K0E1REVIEW156000000000020',kind:'episodic',scope:'project:AgentMemory',importance:2,createdAt:h(30),updatedAt:h(30),accessedAt:null,accessCount:0,source:'sess-9f2c',
+  summary:'Ревью 15.6: подсказка на плашке блокировки перечисляет блокеров; в DESIGN §12 добавлена оговорка, что свимлейны — представление на фронте',
+  content:'22.09.2026, ревью задачи 15.6: подсказка на плашке «заблокирована» теперь перечисляет блокеров с их стадиями; в DESIGN §12 добавлена оговорка, что свимлейны — представление на фронте (группировка по parent из ответа), в `board.Build` не входят.',
+  tags:['15.6','ревью','board'],links:[{dst:'01K0T4BOARDUI00000000TASK4',rel:'related'}]},
+ {id:'01K0E2CHECKOUTLOSS00000000021',kind:'episodic',scope:'project:AgentMemory',importance:3,createdAt:d(85),updatedAt:d(85),accessedAt:d(30),accessCount:4,source:'sess-1a7e',
+  summary:'Инцидент: git checkout откатил правки Этапа 2 в отслеживаемых файлах; восстановлено по файлам задач. Урок — коммитить сразу после финализации',
+  content:'Инцидент: пользователь `git checkout`-ом откатил правки Этапа 2 в отслеживаемых файлах (новые файлы уцелели) — восстановлено агентами по файлам задач. Урок: коммитить сразу после финализации этапа, не копить.',
+  tags:['инцидент','git'],links:[{dst:'01K0B4AGENTRECALL0000000013',rel:'causes'}]},
+ {id:'01K0E3PROTOSTART00000000022',kind:'episodic',scope:'project:AgentMemory',importance:2,createdAt:h(2),updatedAt:h(2),accessedAt:null,accessCount:0,source:'sess-077d',
+  summary:'Начат дизайн-прототип новой веб-морды: один HTML в design/, реальное приложение не трогается',
+  content:'Начат дизайн-прототип новой веб-морды (`design/memo-web-prototype.html`): один самодостаточный HTML, реальное приложение (`cmd/memo/web.go`, `cmd/memo/web/*`) не трогается. Критика текущего UI показана пользователю до макета.',
+  tags:['web','дизайн','прототип'],links:[{dst:'01K0T5PROTOTYPE000000TASK5',rel:'related'}]},
+
+ // ---------- задачи ----------
+ {id:'01K0T1EPIC15000000000TASK1',kind:'task',scope:'project:AgentMemory',importance:5,createdAt:d(25),updatedAt:h(20),accessedAt:h(20),accessCount:30,status:'doing',type:'epic',branch:'',workflow:'dev',
+  summary:'Этап 15 — kanban-доска задач',
+  content:'Цель: задачи агента (kind=task) видны и управляются как kanban-доска — стадии backlog→…→done, блокировки как связи blocked_by, иерархия epic→story→task через part_of.\n\nГраницы: без настраиваемых колонок, без WIP-лимитов, без назначения исполнителей.\n\nКритерий приёмки: все шесть подзадач закрыты, чек-лист ручной проверки 15.6 пройден на SQLite и PostgreSQL.',
+  tags:['этап-15','board'],links:[]},
+ {id:'01K0T2BLOCKEDBY00000000TASK2',kind:'task',scope:'project:AgentMemory',importance:4,createdAt:d(20),updatedAt:d(6),accessedAt:d(6),accessCount:12,status:'done',type:'story',branch:'feat/blocked-by',workflow:'dev',
+  summary:'15.4 Блокировка задач задачами: blocked_by, unlinks, правило пост-состояния',
+  content:'Связь `blocked_by` только между задачами; заблокированную нельзя перевести дальше todo, пока блокер жив и не done. Снятие блокировки — `unlinks` в memory_update либо done/отмена блокера.\n\nКритерий: `write.ErrTaskBlocked` с перечнем блокеров, тесты на пост-состояние.',
+  tags:['15.4','write'],links:[{dst:'01K0T1EPIC15000000000TASK1',rel:'part_of'}]},
+ {id:'01K0T3BOARDAPI00000000TASK3',kind:'task',scope:'project:AgentMemory',importance:4,createdAt:d(18),updatedAt:d(4),accessedAt:d(4),accessCount:9,status:'done',type:'task',branch:'feat/board-api',workflow:'dev',
+  summary:'15.5 Вариант использования «доска» и JSON API морды',
+  content:'Пакет `internal/memory/board`: `Build` (семь колонок, doneLimit) и `Describe` (карточка задачи: parent/children/progress/blockedBy/blocks). `GET /api/board`, расширенный `PATCH /api/memories/{id}`.\n\nКритерий: `board` — 0 нарушений правила зависимостей.',
+  tags:['15.5','board','api'],links:[{dst:'01K0T1EPIC15000000000TASK1',rel:'part_of'}]},
+ {id:'01K0T4BOARDUI00000000TASK4',kind:'task',scope:'project:AgentMemory',importance:4,createdAt:d(14),updatedAt:h(28),accessedAt:h(28),accessCount:15,status:'review',type:'task',branch:'feat/board-ui',workflow:'dev',
+  summary:'15.6 Фронтенд доски: колонки, drag&drop, фильтры, свимлейны, карточка задачи',
+  content:'Экран `#/board` в существующей морде: hash-роутер, семь колонок, HTML5 drag&drop с оптимистичным переносом (`PATCH {status}`), 409 → откат карточки и тост с блокерами, свимлейны по ближайшему родителю.\n\nКритерий: чек-лист ручной проверки пройден, PR открыт.',
+  tags:['15.6','web','board'],links:[{dst:'01K0T1EPIC15000000000TASK1',rel:'part_of'}]},
+ {id:'01K0T11CHECKPG000000000TASK11',kind:'task',scope:'project:AgentMemory',importance:3,createdAt:d(3),updatedAt:h(6),accessedAt:h(6),accessCount:3,status:'testing',type:'task',branch:'feat/board-ui',workflow:'dev',
+  summary:'Чек-лист ручной проверки 15.6 на PostgreSQL-бэкенде',
+  content:'Прогнать чек-лист 15.6 на общей базе postgres.lan: перенос карточек, 409 при блокировке, свимлейны, «показать ещё» у done.\n\nКритерий: все пункты отмечены, расхождений с SQLite нет.',
+  tags:['15.6','postgres','проверка'],links:[{dst:'01K0T1EPIC15000000000TASK1',rel:'part_of'}]},
+ {id:'01K0T12HOMESCOPE000000TASK12',kind:'task',scope:'project:AgentMemory',importance:3,createdAt:d(2),updatedAt:h(25),accessedAt:h(25),accessCount:2,status:'release',type:'task',branch:'fix/board-home-scope',workflow:'dev',
+  summary:'fix(web): доска по умолчанию открывает домашний scope инстанса',
+  content:'`homeScope` в `/api/stats`, подстановка в селект доски при пустом хэше.\n\nКритерий: на общей базе доска открывается на `project:AgentMemory`, не на первом scope по алфавиту.',
+  tags:['web','board','scope'],links:[{dst:'01K0T1EPIC15000000000TASK1',rel:'part_of'},{dst:'01K0A7HOMESCOPE00000000007',rel:'related'}]},
+ {id:'01K0T9EPIC16000000000TASK9',kind:'task',scope:'project:AgentMemory',importance:4,createdAt:d(1),updatedAt:d(1),accessedAt:h(3),accessCount:2,status:'todo',type:'epic',branch:'',workflow:'',
+  summary:'Этап 16 — новая веб-морда',
+  content:'Переработать `memo web` по итогам критики текущего UI: обзор как первый экран, запись в боковой панели, единый фильтр scope, доступная альтернатива drag&drop.\n\nГраницы: API меняется минимально (см. заметки в прототипе). Критерий: пять сценариев прототипа проходятся в реальном приложении.',
+  tags:['этап-16','web'],links:[]},
+ {id:'01K0T5PROTOTYPE000000TASK5',kind:'task',scope:'project:AgentMemory',importance:4,createdAt:h(4),updatedAt:h(2),accessedAt:h(2),accessCount:1,status:'doing',type:'task',branch:'design/web-prototype',workflow:'dev',
+  summary:'Дизайн-прототип новой веб-морды (design/memo-web-prototype.html)',
+  content:'Один самодостаточный HTML с пятью экранами и реалистичными заглушками. Реальное приложение не трогать.\n\nКритерий: пять сценариев проходятся по макету без вопросов «а где это»; список проблем текущего UI покрыт или явно отложен.',
+  tags:['дизайн','web','прототип'],links:[{dst:'01K0T9EPIC16000000000TASK9',rel:'part_of'}]},
+ {id:'01K0T10PROVIDERS00000TASK10',kind:'task',scope:'project:AgentMemory',importance:3,createdAt:h(3),updatedAt:h(3),accessedAt:null,accessCount:0,status:'backlog',type:'task',branch:'',workflow:'',
+  summary:'Состояние провайдеров в /api/stats: эмбеддер, reasoner, хранилище',
+  content:'Расширить `GET /api/stats` полем `providers` (store/embedder/reasoner: provider, model, available) — нужно обзору новой морды, чтобы говорить о деградации до первого поиска.\n\nКритерий: поле в ответе, тест, DESIGN §12.',
+  tags:['api','web','этап-16'],links:[{dst:'01K0T9EPIC16000000000TASK9',rel:'part_of'}]},
+ {id:'01K0T6STOREPORT0000000TASK6',kind:'task',scope:'project:AgentMemory',importance:3,createdAt:d(10),updatedAt:d(10),accessedAt:d(3),accessCount:4,status:'todo',type:'task',branch:'',workflow:'',
+  summary:'Вынести порт store.Store из пакета реализаций',
+  content:'Отдельный пакет для интерфейса `Store` и структур запросов; `sqlite.go`/`postgres*.go` реализуют его снаружи. `write`/`recall`/`maint` импортируют только порт.\n\nКритерий: `make test` зелёный, DESIGN §5 обновлён.',
+  tags:['arch','pkg:store'],links:[{dst:'01K0D1STOREPORT000000000017',rel:'related'}]},
+ {id:'01K0T8BASELINE0000000TASK8',kind:'task',scope:'project:AgentMemory',importance:2,createdAt:d(10),updatedAt:d(10),accessedAt:null,accessCount:0,status:'todo',type:'task',branch:'',workflow:'',
+  summary:'Опустить базовую линию TestDependencyRule до 0 для write/recall/maint',
+  content:'После выноса порта снизить `baseline` в `internal/memory/arch_test.go` с 5 до 0 и убрать из CLAUDE.md абзац «Известное нарушение».\n\nКритерий: тест зелёный на 0.',
+  tags:['arch','тесты'],links:[{dst:'01K0T6STOREPORT0000000TASK6',rel:'blocked_by'}]},
+ {id:'01K0T13EXPORTMD000000TASK13',kind:'task',scope:'project:AgentMemory',importance:2,createdAt:d(8),updatedAt:d(8),accessedAt:null,accessCount:0,status:'backlog',type:'task',branch:'',workflow:'',
+  summary:'Экспорт выборки памяти в Markdown из морды',
+  content:'Кнопка «Скачать как Markdown» на текущей выборке списка — тот же формат, что `memo export`.\n\nКритерий: файл открывается, записи в порядке выборки.',
+  tags:['web','export'],links:[]},
+ {id:'01K0T14KAITEN0000000TASK14',kind:'task',scope:'project:KaitenMCP',importance:3,createdAt:d(12),updatedAt:d(5),accessedAt:d(5),accessCount:2,status:'doing',type:'task',branch:'feat/pagination',workflow:'dev',
+  summary:'Пагинация карточек по offset',
+  content:'Читать карточки страницами по 100 через offset, пока ответ не короче лимита.',
+  tags:['kaiten','api'],links:[{dst:'01K0B1KAITENLIMIT0000000010',rel:'related'}]},
+];
+
+const KIND_LABEL={semantic:'факт',episodic:'эпизод',procedural:'процедура',debt:'долг',task:'задача'};
+const KIND_PLURAL={semantic:'факты',episodic:'эпизоды',procedural:'процедуры',debt:'долг',task:'задачи'};
+const KINDS=['semantic','episodic','procedural','debt','task'];
+const STATUSES=['backlog','todo','doing','review','testing','release','done'];
+const STATUS_LABEL={backlog:'бэклог',todo:'к работе',doing:'в работе',review:'ревью',testing:'проверка',release:'к релизу',done:'готово'};
+const TYPE_LABEL={epic:'эпик',story:'история',task:'задача'};
+const REL_LABEL={related:'связано',supersedes:'заменяет',causes:'следствие',part_of:'часть',blocked_by:'заблокирована'};
+const REL_IN_LABEL={related:'связано',supersedes:'заменена',causes:'причина',part_of:'включает',blocked_by:'блокирует'};
+const HOME_SCOPE='project:AgentMemory';
+
+/* ============================================================
+   Состояние прототипа
+   ============================================================ */
+let DB = JSON.parse(JSON.stringify(SEED));
+const state = {
+  view:'overview',
+  scope:HOME_SCOPE,           // глобальный фильтр scope; '' = все
+  q:'', mode:'semantic', kinds:new Set(), archived:false,
+  board:{type:'', parent:'', tag:'', lanes:true},
+  open:null,                  // id открытой записи
+  edit:false, confirm:false,
+  demo:{embedder:false,reasoner:false,apierror:false,empty:false},
+};
+
+/* ============================================================
+   Утилиты
+   ============================================================ */
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const byId=id=>DB.find(m=>m.id===id);
+function rel(ts){
+  if(!ts) return '—';
+  const s=NOW-ts; if(s<0){const dd=Math.round(-s/86400);return `через ${dd} ${plural(dd,'день','дня','дней')}`}
+  if(s<3600) return `${Math.max(1,Math.round(s/60))} мин назад`;
+  if(s<86400) return `${Math.round(s/3600)} ч назад`;
+  const dd=Math.round(s/86400); if(dd<30) return `${dd} ${plural(dd,'день','дня','дней')} назад`;
+  return new Date(ts*1000).toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric'});
+}
+function fmtDate(ts){const x=new Date(ts*1000);return x.toLocaleDateString('ru-RU',{day:'2-digit',month:'2-digit',year:'numeric'})+' '+x.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}
+function plural(n,a,b,c){const m=n%10,M=n%100;if(M>=11&&M<=19)return c;if(m===1)return a;if(m>=2&&m<=4)return b;return c}
+function fmtN(n){return n.toLocaleString('ru-RU')}
+function imp(n,edit,id){let s=`<span class="imp${edit?' edit':''}" role="img" aria-label="важность ${n} из 5">`;for(let i=1;i<=5;i++)s+=`<i class="${i<=n?'on':''}"${edit?` data-imp="${i}" data-id="${id}" role="button" tabindex="0" aria-label="важность ${i}"`:''}></i>`;return s+'</span>'}
+function kindTag(k){return `<span class="kind ${k}">${KIND_LABEL[k]}</span>`}
+function statusTag(s){return `<span class="status ${s}">${STATUS_LABEL[s]}</span>`}
+function tagChips(tags){return tags.map(t=>`<span class="chip tag">${esc(t)}</span>`).join('')}
+function scopeShort(s){return s.replace(/^project:/,'')}
+function live(m){return !m.supersededBy && !(m.expiresAt && m.expiresAt<NOW)}
+function incoming(id){const r=[];DB.forEach(m=>m.links.forEach(l=>{if(l.dst===id)r.push({from:m,rel:l.rel})}));return r}
+function blockers(t){return t.links.filter(l=>l.rel==='blocked_by').map(l=>byId(l.dst)).filter(b=>b&&live(b)&&b.status!=='done')}
+function parentOf(t){const l=t.links.find(l=>l.rel==='part_of');const p=l&&byId(l.dst);return p&&live(p)?p:null}
+function childrenOf(t){return DB.filter(m=>m.kind==='task'&&live(m)&&m.links.some(l=>l.rel==='part_of'&&l.dst===t.id))}
+function progressOf(t){const c=childrenOf(t);return c.length?{done:c.filter(x=>x.status==='done').length,total:c.length}:null}
+function toast(txt){const r=$('#toast-root');r.innerHTML=`<div class="toast">${esc(txt)}</div>`;clearTimeout(r._t);r._t=setTimeout(()=>r.innerHTML='',2600)}
+function inScope(m){return !state.scope||m.scope===state.scope}
+function highlight(text,q){if(!q)return esc(text);const words=q.trim().split(/\s+/).filter(w=>w.length>2);let out=esc(text);words.forEach(w=>{out=out.replace(new RegExp('('+w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark class="hl">$1</mark>')});return out}
+
+/* ============================================================
+   Рендер
+   ============================================================ */
+function render(){
+  document.querySelectorAll('.nav button').forEach(b=>b.toggleAttribute('aria-current',false)||b.removeAttribute('aria-current'));
+  const cur=document.querySelector(`.nav button[data-nav="${state.view}"]`);cur.setAttribute('aria-current','page');
+  const main=$('#main');main.className=state.view==='board'?'wide':'';
+  if(state.demo.apierror){main.innerHTML=apiError();return}
+  main.innerHTML={overview,memory,board}[state.view]();
+  renderScopeSelect();
+  renderDrawer();
+}
+function apiError(){
+  return `<div class="notice danger" role="alert"><div class="grow"><strong>Сервер памяти не отвечает.</strong> Запрос к <code>/api/${state.view==='board'?'board':'memories'}</code> завершился ошибкой соединения. Проверь, что <code>memo web</code> запущен на localhost:7070.</div><button class="btn" onclick="render()">Повторить</button></div>`;
+}
+function renderScopeSelect(){
+  const sel=$('#scope-global');const scopes=[...new Set(SEED.map(m=>m.scope))].sort();
+  sel.innerHTML=`<option value="">все scope</option>`+scopes.map(s=>`<option value="${esc(s)}"${s===state.scope?' selected':''}>${esc(s)}${s===HOME_SCOPE?' (домашний)':''}</option>`).join('');
+}
+
+/* ---------- (а) Обзор ---------- */
+function overview(){
+  const all=DB.filter(m=>inScope(m)&&!m.supersededBy);
+  const archived=DB.filter(m=>inScope(m)&&m.supersededBy).length;
+  if(state.demo.empty||!all.length) return emptyMemory();
+  const byKind={};KINDS.forEach(k=>byKind[k]=all.filter(m=>m.kind===k).length);
+  const recent=all.filter(m=>m.createdAt>d(7)).sort((a,b)=>b.createdAt-a.createdAt);
+  const doing=all.filter(m=>m.kind==='task'&&m.status==='doing');
+  const review=all.filter(m=>m.kind==='task'&&(m.status==='review'||m.status==='testing'));
+  const blocked=all.filter(m=>m.kind==='task'&&m.status!=='done'&&blockers(m).length);
+  const expiring=all.filter(m=>m.expiresAt&&m.expiresAt-NOW<14*86400);
+  const scopes={};DB.filter(m=>!m.supersededBy).forEach(m=>scopes[m.scope]=(scopes[m.scope]||0)+1);
+  const scopeTitle=state.scope?esc(state.scope):'все scope';
+  const emb=state.demo.embedder, rsn=state.demo.reasoner;
+  return `
+  <div class="headline">
+    <span class="num">${fmtN(all.length)}</span><span>${plural(all.length,'запись','записи','записей')} в ${scopeTitle}</span>
+    <span class="muted">${archived} в архиве · обновлено ${rel(Math.max(...all.map(m=>m.updatedAt)))}</span>
+  </div>
+  ${emb?`<div class="notice warn" style="margin-bottom:var(--s5)" role="status"><div class="grow"><strong>Поиск по смыслу недоступен.</strong> Эмбеддер ollama/bge-m3 не отвечает — поиск работает только по словам, новые записи копят очередь на эмбеддинг. Сохранение и доска работают как обычно.</div></div>`:''}
+  <div class="overview">
+    <div class="stack">
+      <section class="kinds" aria-label="Записи по видам">
+        ${KINDS.map(k=>`<button type="button" class="rule-${k}" data-goto-kind="${k}"><span class="kind ${k}">${KIND_PLURAL[k]}</span><span class="n">${byKind[k]}</span><span class="d">${kindHint(k)}</span></button>`).join('')}
+      </section>
+      <section class="panel" aria-labelledby="h-recent">
+        <header><h2 id="h-recent">Добавлено за 7 дней</h2><span class="muted">${recent.length}</span><span class="grow"></span><button class="btn quiet sm" data-goto="memory">Вся память</button></header>
+        <div class="body">${recent.length?`<ul class="rows">${recent.map(m=>`<li>${kindTag(m.kind)}<span class="t"><button type="button" data-open="${m.id}">${esc(m.summary||m.content)}</button></span><span class="when">${rel(m.createdAt)}</span></li>`).join('')}</ul>`:`<p class="muted">За неделю ничего не добавилось. Агент пишет в память по ходу задач — записи появятся здесь.</p>`}</div>
+      </section>
+      <section class="panel" aria-labelledby="h-doing">
+        <header><h2 id="h-doing">На доске</h2><span class="muted">${doing.length} в работе · ${review.length} на ревью и проверке · ${blocked.length} заблокировано</span><span class="grow"></span><button class="btn quiet sm" data-goto="board">Доска</button></header>
+        <div class="body">
+          <ul class="rows">
+            ${[...doing,...review,...blocked].filter((m,i,a)=>a.indexOf(m)===i).map(m=>`<li>${statusTag(m.status)}<span class="t"><button type="button" data-open="${m.id}">${esc(m.summary)}</button>${blockers(m).length?`<span class="sub"><span class="blk">заблокирована</span> · ждёт: ${esc(blockers(m)[0].summary)}</span>`:''}</span><span class="when">${m.branch?`<code>${esc(m.branch)}</code> · `:''}${rel(m.updatedAt)}</span></li>`).join('')}
+          </ul>
+        </div>
+      </section>
+    </div>
+    <div class="stack">
+      <section class="panel" aria-labelledby="h-prov">
+        <header><h2 id="h-prov">Сервисы</h2></header>
+        <div class="body"><ul class="providers">
+          <li><span class="dot"></span><div>Хранилище — PostgreSQL 18, postgres.lan<div class="d">${fmtN(DB.length)} записей всего · схема v4</div></div></li>
+          <li><span class="dot${emb?' off':''}"></span><div>Эмбеддер — ollama, bge-m3 (1024)<div class="d">${emb?'не отвечает с 10:40 — поиск только по словам, 3 записи ждут эмбеддинга':'отвечает · очередь на эмбеддинг пуста'}</div></div></li>
+          <li><span class="dot${rsn?' off':''}"></span><div>Reasoner — DeepSeek chat<div class="d">${rsn?'нет ключа DEEPSEEK_API_KEY — сводки и консолидация эпизодов выключены':'отвечает · консолидация эпизодов раз в 7 дней'}</div></div></li>
+          <li><span class="dot na"></span><div>Фоновые джобы<div class="d">decay · dedup · consolidate · reindex — последний прогон ${rel(h(4))}</div></div></li>
+        </ul></div>
+      </section>
+      ${expiring.length?`<section class="panel" aria-labelledby="h-exp"><header><h2 id="h-exp">Истекает скоро</h2></header><div class="body"><ul class="rows">${expiring.map(m=>`<li>${kindTag(m.kind)}<span class="t"><button type="button" data-open="${m.id}">${esc(m.summary)}</button></span><span class="when">${rel(m.expiresAt)}</span></li>`).join('')}</ul></div></section>`:''}
+      <section class="panel" aria-labelledby="h-scopes">
+        <header><h2 id="h-scopes">Scope</h2><span class="muted">живые записи</span></header>
+        <div class="body"><ul class="scopes-list">${Object.entries(scopes).sort((a,b)=>b[1]-a[1]).map(([s,n])=>`<li><button type="button" data-scope="${esc(s)}">${esc(s)}${s===HOME_SCOPE?' <span class="muted">домашний</span>':''}</button><span class="n">${n}</span></li>`).join('')}</ul></div>
+      </section>
+    </div>
+  </div>`;
+}
+function kindHint(k){return {semantic:'знания и решения',episodic:'события сессий',procedural:'рецепты',debt:'отложено осознанно',task:'доска'}[k]}
+function emptyMemory(){
+  return `<div class="panel"><div class="empty"><h3>В ${state.scope?esc(state.scope):'памяти'} пока ничего нет</h3><p>Агент пишет сюда по ходу задач через <code>memory_save</code>. Подключи MCP-сервер memo к проекту — первые записи появятся после первой сессии.</p><button class="btn" data-scope="">Показать все scope</button></div></div>`;
+}
+
+/* ---------- (б) Память: список + поиск ---------- */
+function filtered(){
+  let items=DB.filter(inScope);
+  if(!state.archived) items=items.filter(m=>!m.supersededBy);
+  if(state.kinds.size) items=items.filter(m=>state.kinds.has(m.kind));
+  if(state.q.trim()){
+    const q=state.q.toLowerCase().split(/\s+/).filter(Boolean);
+    items=items.map(m=>{const hay=(m.content+' '+(m.summary||'')+' '+m.tags.join(' ')).toLowerCase();
+      const hits=q.filter(w=>hay.includes(w)).length;
+      const lexical=hits>0, vector=!state.demo.embedder&&state.mode==='semantic'&&m.importance>=3&&hits>0;
+      return {m,score:hits/q.length*(0.6+m.importance*0.08),source:lexical&&vector?'lexical+vector':lexical?'lexical':'',hits}})
+      .filter(x=>x.hits).sort((a,b)=>b.score-a.score).map(x=>Object.assign({},x.m,{_score:x.score,_source:x.source}));
+  } else items=items.slice().sort((a,b)=>b.createdAt-a.createdAt);
+  return items;
+}
+function memory(){
+  const items=state.demo.empty?[]:filtered();
+  const totalScope=DB.filter(m=>inScope(m)&&!m.supersededBy).length;
+  const active=[...state.kinds].length+(state.archived?1:0)+(state.scope?1:0)+(state.q?1:0);
+  const degraded=state.demo.embedder&&state.mode==='semantic';
+  return `
+  <div class="toolbar">
+    <div class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>
+      <input type="search" id="q" value="${esc(state.q)}" name="q" autocomplete="off" spellcheck="false" placeholder="Что искать: слово, термин или смысл…" aria-label="Поиск по памяти"></div>
+    <div class="seg" role="radiogroup" aria-label="Режим поиска">
+      <button type="button" role="radio" aria-checked="${state.mode==='semantic'}" data-mode="semantic">по смыслу</button>
+      <button type="button" role="radio" aria-checked="${state.mode==='lexical'}" data-mode="lexical">по словам</button>
+    </div>
+  </div>
+  <div class="filters">
+    <span>Вид</span>
+    <div class="checks" role="group" aria-label="Вид записи">${KINDS.map(k=>`<label><input type="checkbox" data-kind="${k}"${state.kinds.has(k)?' checked':''}><span class="kind ${k}">${KIND_PLURAL[k]}</span></label>`).join('')}</div>
+    <label style="display:inline-flex;gap:4px;align-items:center;color:var(--ink)"><input type="checkbox" id="archived"${state.archived?' checked':''}> с архивом</label>
+    <div class="active">${active?`<span>${active} ${plural(active,'фильтр','фильтра','фильтров')}${state.scope?` · ${esc(scopeShort(state.scope))}`:''}</span><button class="btn quiet sm" id="reset">Сбросить всё</button>`:'<span>фильтров нет</span>'}</div>
+  </div>
+  ${degraded?`<div class="notice warn" style="margin-bottom:var(--s3)" role="status"><div class="grow"><strong>Поиск только по словам.</strong> Эмбеддер не отвечает, поэтому запрос не эмбеддится и перефразировки не найдутся — ищи точными терминами. Как только ollama вернётся, режим «по смыслу» включится сам.</div></div>`:''}
+  <div class="results-head" aria-live="polite"><span>${state.q?`${items.length} ${plural(items.length,'результат','результата','результатов')} по «${esc(state.q)}»`:`${items.length} из ${totalScope} — новые сверху`}</span>${state.q&&!degraded&&state.mode==='semantic'?'<span>лексика + вектор, RRF</span>':''}</div>
+  <div class="list" role="list" aria-label="Записи">
+    ${items.length?items.map(row).join(''):(state.q?noResults():noRecords())}
+  </div>`;
+}
+function row(m){
+  const arch=!!m.supersededBy;
+  return `<article class="row rule-${m.kind}" role="listitem" data-open="${m.id}" aria-selected="${state.open===m.id}">
+    <div class="meta">${kindTag(m.kind)}<span class="scope">${esc(scopeShort(m.scope))}</span>${m.kind==='task'?statusTag(m.status):''}</div>
+    <div class="main"><button type="button" class="title${arch?' archived':''}" data-open="${m.id}">${highlight(m.summary||m.content,state.q)}</button>
+      <div class="tags">${tagChips(m.tags)}${arch?`<span class="chip">в архиве · заменена</span>`:''}${m.expiresAt?`<span class="chip">истекает ${rel(m.expiresAt)}</span>`:''}${m.kind==='task'&&blockers(m).length?`<span class="chip" style="color:var(--danger)">заблокирована</span>`:''}</div></div>
+    <div class="side">${imp(m.importance)}<span>${rel(m.createdAt)}</span>${m._source?`<span class="src">${m._source==='lexical+vector'?'слова + смысл':m._source==='vector'?'по смыслу':'по словам'}</span>`:''}</div>
+  </article>`;
+}
+function noResults(){return `<div class="empty"><h3>По запросу «${esc(state.q)}» ничего не нашлось</h3><p>${state.demo.embedder?'Поиск сейчас только по словам: попробуй точный термин из записи или сними фильтры.':'Проверь фильтры вида и scope — они сужают выдачу. Или переформулируй: поиск по смыслу находит и перефразировки.'}</p><button class="btn" id="reset">Сбросить фильтры</button></div>`}
+function noRecords(){return `<div class="empty"><h3>Записей нет</h3><p>${state.kinds.size?'Под выбранные виды записей в этом scope ничего не попадает.':'В этом scope пока пусто — агент пишет сюда по ходу задач.'}</p>${state.kinds.size||state.scope?`<button class="btn" id="reset">Сбросить фильтры</button>`:''}</div>`}
+
+/* ---------- (г) Доска ---------- */
+function boardTasks(){
+  return DB.filter(m=>m.kind==='task'&&live(m)&&inScope(m)&&(!state.board.type||m.type===state.board.type)&&(!state.board.tag||m.tags.includes(state.board.tag))&&(!state.board.parent||(parentOf(m)&&parentOf(m).id===state.board.parent)));
+}
+function board(){
+  const tasks=state.demo.empty?[]:boardTasks();
+  const epics=DB.filter(m=>m.kind==='task'&&live(m)&&inScope(m)&&m.type!=='task');
+  const tags=[...new Set(DB.filter(m=>m.kind==='task'&&inScope(m)).flatMap(m=>m.tags))].sort();
+  const blockedN=tasks.filter(t=>blockers(t).length&&t.status!=='done').length;
+  return `
+  <div class="board-toolbar">
+    <label>Тип <select id="b-type"><option value="">любой</option>${Object.entries(TYPE_LABEL).map(([k,v])=>`<option value="${k}"${state.board.type===k?' selected':''}>${v}</option>`).join('')}</select></label>
+    <label>Внутри <select id="b-parent" style="max-width:320px"><option value="">всего</option>${epics.map(e=>`<option value="${e.id}"${state.board.parent===e.id?' selected':''}>${esc(e.summary)}</option>`).join('')}</select></label>
+    <label>Тег <select id="b-tag"><option value="">любой</option>${tags.map(t=>`<option${state.board.tag===t?' selected':''}>${esc(t)}</option>`).join('')}</select></label>
+    <label><input type="checkbox" id="b-lanes"${state.board.lanes?' checked':''}> дорожки по родителю</label>
+    <span class="muted" style="margin-left:auto">${tasks.length} ${plural(tasks.length,'задача','задачи','задач')}${blockedN?` · ${blockedN} заблокировано`:''}${state.scope?` · ${esc(scopeShort(state.scope))}`:' · все scope'}</span>
+    ${(state.board.type||state.board.parent||state.board.tag)?`<button class="btn quiet sm" id="b-reset">Сбросить</button>`:''}
+  </div>
+  <p class="muted" style="font-size:var(--fs-xs);margin-bottom:var(--s3)">Перетащи карточку в другую колонку или открой её и смени стадию — с клавиатуры: Enter на карточке, затем поле «Стадия». Заблокированную задачу дальше «к работе» не пустит сервер.</p>
+  <div class="board" role="list" aria-label="Стадии">
+    ${STATUSES.map(s=>column(s,tasks.filter(t=>t.status===s))).join('')}
+  </div>`;
+}
+function column(s,cards){
+  const groups={};
+  if(state.board.lanes){cards.forEach(c=>{const p=parentOf(c);const key=p?p.id:'';(groups[key]=groups[key]||[]).push(c)})}else groups['']=cards;
+  const keys=Object.keys(groups).sort((a,b)=>(a===''?1:0)-(b===''?1:0));
+  return `<section class="col" data-status="${s}" role="listitem" aria-labelledby="col-${s}">
+    <header><span id="col-${s}">${STATUS_LABEL[s]}</span><span class="n">${cards.length}</span><span class="grow"></span>${s==='done'?`<span class="n">30 последних</span>`:''}</header>
+    <div class="cards">
+      ${cards.length?keys.map(k=>`${state.board.lanes&&keys.length>1?`<div class="lane">${k?'↳ '+esc(byId(k).summary):'без родителя'}</div>`:''}${groups[k].map(card).join('')}`).join(''):`<div class="empty">${s==='doing'?'Ничего не в работе':'Пусто'}</div>`}
+    </div>
+  </section>`;
+}
+function card(t){
+  const b=blockers(t), p=parentOf(t), pr=progressOf(t);
+  return `<article class="card ${t.type}${b.length?' blocked':''}" draggable="true" data-id="${t.id}" aria-label="${esc(t.summary)}">
+    <div class="top"><span>${TYPE_LABEL[t.type]}</span>${b.length?`<span class="blk" title="${esc(b.map(x=>x.summary).join('; '))}">заблокирована</span>`:''}<span class="grow"></span>${imp(t.importance)}</div>
+    <button type="button" class="ttl" data-open="${t.id}">${esc(t.summary)}</button>
+    ${pr?`<div class="prog"><div class="progress"><i style="width:${Math.round(pr.done/pr.total*100)}%"></i></div>${pr.done}/${pr.total}</div>`:''}
+    <div class="foot">${t.branch?`<code>${esc(t.branch)}</code>`:''}${!state.board.lanes&&p?`<span>↳ ${esc(p.summary.slice(0,28))}</span>`:''}<span>${rel(t.updatedAt)}</span>
+      <span class="move"><label class="sr-only" for="mv-${t.id}">Переместить в стадию</label><select id="mv-${t.id}" data-move="${t.id}">${STATUSES.map(s=>`<option value="${s}"${s===t.status?' selected':''}>${STATUS_LABEL[s]}</option>`).join('')}</select></span>
+    </div>
+  </article>`;
+}
+
+/* ---------- (в)/(д) Панель записи и задачи ---------- */
+let lastFocus=null;
+function renderDrawer(){
+  const root=$('#drawer-root');
+  const m=state.open&&byId(state.open);
+  $('#main').inert=!!m;document.querySelector('.topbar').inert=!!m;
+  if(!m){root.innerHTML='';return}
+  const isTask=m.kind==='task';
+  root.innerHTML=`<div class="drawer-backdrop" data-close></div>
+  <aside class="drawer${state.edit?' editing':''}" role="dialog" aria-modal="true" aria-labelledby="dr-title">
+    <header>${kindTag(m.kind)}<div class="grow"><span class="scope muted">${esc(m.scope)}</span></div>
+      ${isTask?`<button class="btn quiet sm" data-goto="board" data-close>К доске</button>`:''}
+      <button class="btn quiet sm" data-close aria-label="Закрыть панель">Закрыть ✕</button></header>
+    <div class="content">${isTask?taskBody(m):memoryBody(m)}</div>
+    ${!m.supersededBy?`<div class="actions">
+      ${state.edit?`<button class="btn primary" data-save>Сохранить</button><button class="btn" data-cancel>Отменить</button>`:`<button class="btn" data-edit>Изменить</button>`}
+      <span class="grow"></span>
+      ${!state.edit?`<button class="btn danger" data-forget-ask>Забыть…</button>`:''}
+    </div>`:''}
+  </aside>`;
+  root.querySelector('#dr-title')?.focus?.();
+}
+function memoryBody(m){
+  const out=m.links.map(l=>({to:byId(l.dst),rel:l.rel,dir:'out'})).filter(x=>x.to);
+  const inc=incoming(m.id).map(x=>({to:x.from,rel:x.rel,dir:'in'}));
+  const neighbors=DB.filter(x=>x.id!==m.id&&x.kind!=='task'&&live(x)&&x.tags.some(t=>m.tags.includes(t))).slice(0,3);
+  return `
+  ${m.supersededBy?`<div class="notice" style="margin-bottom:var(--s4)"><div class="grow">В архиве с ${rel(m.updatedAt)} — заменена записью <button class="btn quiet sm" data-open="${m.supersededBy}">${esc(byId(m.supersededBy)?.summary?.slice(0,60)||m.supersededBy)}</button>. Архивные записи не редактируются.</div></div>`:''}
+  ${m.expiresAt?`<div class="notice warn" style="margin-bottom:var(--s4)"><div class="grow">Истекает ${rel(m.expiresAt)} (${fmtDate(m.expiresAt).slice(0,10)}) — после этого выпадет из recall и уйдёт в архив.</div></div>`:''}
+  <h2 id="dr-title" class="sr-only">Запись: ${esc(m.summary||m.content.slice(0,60))}</h2>
+  <div class="hgroup">${imp(m.importance,state.edit,m.id)}<span>${m.importance} из 5</span>${!state.edit?`<span class="muted">·</span><span class="muted">создана ${rel(m.createdAt)}</span>`:''}</div>
+  ${state.edit?`<div class="field"><label for="ed-summary">Кратко (summary)</label><input type="text" id="ed-summary" name="summary" autocomplete="off" value="${esc(m.summary||'')}"></div>
+    <div class="field"><label for="ed-content">Полный текст</label><textarea id="ed-content" name="content" rows="9">${esc(m.content)}</textarea></div>`
+  :`${m.summary?`<p class="summary">${esc(m.summary)}</p>`:''}<div class="prose">${esc(m.content)}</div>`}
+  <div class="section"><h3>Теги</h3>${tagsEditor(m)}</div>
+  <div class="section"><h3>Связи <span class="muted">${out.length+inc.length}</span></h3>
+    ${out.length+inc.length?`<ul class="links">${[...out,...inc].map(linkRow).join('')}</ul>`:'<p class="muted" style="font-size:var(--fs-sm)">Связей нет. Их добавляет агент через memory_update, здесь — только просмотр.</p>'}</div>
+  <div class="section"><h3>Похожие по вектору <span class="muted">${state.demo.embedder?'нет данных — эмбеддер недоступен':'cosine, bge-m3'}</span></h3>
+    ${state.demo.embedder?'':neighbors.length?`<ul class="links">${neighbors.map((n,i)=>`<li><span class="rel">${(0.18+i*0.07).toFixed(2)}</span><span class="to">${kindTag(n.kind)}<button type="button" data-open="${n.id}">${esc(n.summary||n.content)}</button></span><span></span></li>`).join('')}</ul>`:'<p class="muted" style="font-size:var(--fs-sm)">Близких по смыслу записей нет.</p>'}</div>
+  <div class="section"><h3>Служебное</h3><dl class="meta-grid">
+    <dt>id</dt><dd><code>${m.id}</code></dd>
+    <dt>создана</dt><dd>${fmtDate(m.createdAt)}</dd>
+    <dt>изменена</dt><dd>${fmtDate(m.updatedAt)}</dd>
+    <dt>читалась</dt><dd>${m.accessedAt?`${fmtDate(m.accessedAt)} · ${m.accessCount} раз`:'ещё ни разу'}</dd>
+    <dt>источник</dt><dd>${m.source?`сессия <code>${esc(m.source)}</code>`:'—'}</dd>
+    <dt>вектор</dt><dd>${state.demo.embedder&&m.createdAt>h(6)?'в очереди на эмбеддинг':'bge-m3 · 1024'}</dd>
+  </dl></div>
+  ${state.confirm?forgetConfirm(m):''}`;
+}
+function linkRow(x){
+  const t=x.to;const lab=x.dir==='out'?REL_LABEL[x.rel]:REL_IN_LABEL[x.rel];
+  return `<li><span class="rel ${x.dir}">${lab}</span><span class="to">${kindTag(t.kind)}<button type="button" data-open="${t.id}">${esc(t.summary||t.content)}</button>${t.supersededBy?' <span class="chip">в архиве</span>':''}${t.kind==='task'?' '+statusTag(t.status):''}</span><span></span></li>`;
+}
+function tagsEditor(m){
+  if(m.supersededBy) return `<div class="tags-edit">${tagChips(m.tags)}</div>`;
+  return `<div class="tags-edit" data-tags="${m.id}">${m.tags.map(t=>`<span class="chip tag">${esc(t)}<button type="button" data-untag="${esc(t)}" aria-label="Убрать тег ${esc(t)}">×</button></span>`).join('')}<input type="text" placeholder="+ тег…" autocomplete="off" spellcheck="false" aria-label="Новый тег" data-newtag="${m.id}"></div>`;
+}
+function forgetConfirm(m){
+  const inc=incoming(m.id).length;
+  return `<div class="confirm" role="alertdialog" aria-labelledby="fc-h"><h3 id="fc-h" style="color:var(--ink);margin-bottom:6px">Забыть эту ${m.kind==='task'?'задачу':'запись'}?</h3>
+    <p>Она выпадет из recall агента и уйдёт в архив; текст и ${inc?`${inc} ${plural(inc,'связь','связи','связей')}`:'связи'} сохранятся, восстановить можно через <code>memory_update</code>. ${m.kind==='task'&&childrenOf(m).length?`<strong>${childrenOf(m).length} дочерних задач останутся без родителя.</strong>`:''}</p>
+    <div class="btns"><button class="btn danger solid" data-forget="${m.id}">Забыть</button><button class="btn" data-forget-cancel>Оставить</button></div></div>`;
+}
+function taskBody(t){
+  const b=blockers(t), blocks=DB.filter(x=>x.kind==='task'&&live(x)&&x.links.some(l=>l.rel==='blocked_by'&&l.dst===t.id));
+  const p=parentOf(t), ch=childrenOf(t), pr=progressOf(t);
+  const rel_=t.links.filter(l=>l.rel==='related').map(l=>byId(l.dst)).filter(Boolean);
+  const incRel=incoming(t.id).filter(x=>x.rel==='related').map(x=>x.from);
+  return `
+  <h2 id="dr-title" class="summary task">${state.edit?`<input type="text" id="ed-summary" value="${esc(t.summary)}" style="width:100%">`:esc(t.summary)}</h2>
+  ${b.length?`<div class="notice danger" role="status" style="margin-bottom:var(--s4)"><div class="grow"><strong>Заблокирована.</strong> Дальше «к работе» не перевести, пока ${b.length===1?'не закрыта':'не закрыты'}: ${b.map(x=>`<button type="button" class="btn quiet sm" data-open="${x.id}" style="color:inherit;text-decoration:underline;padding:0 2px">${esc(x.summary)}</button> (${STATUS_LABEL[x.status]})`).join(', ')}</div></div>`:''}
+  <div class="fields-2">
+    <div class="field"><label for="f-status">Стадия</label><select id="f-status" data-field="status" data-id="${t.id}">${STATUSES.map(s=>`<option value="${s}"${s===t.status?' selected':''}>${STATUS_LABEL[s]}</option>`).join('')}</select></div>
+    <div class="field"><label for="f-type">Тип</label><select id="f-type" data-field="type" data-id="${t.id}">${Object.entries(TYPE_LABEL).map(([k,v])=>`<option value="${k}"${t.type===k?' selected':''}>${v}</option>`).join('')}</select></div>
+    <div class="field"><label for="f-branch">Ветка</label><input type="text" id="f-branch" class="mono" value="${esc(t.branch)}" placeholder="feat/…" autocomplete="off" spellcheck="false" data-field="branch" data-id="${t.id}"></div>
+    <div class="field"><label for="f-wf">Процесс</label><input type="text" id="f-wf" value="${esc(t.workflow)}" placeholder="dev, ultracode…" autocomplete="off" data-field="workflow" data-id="${t.id}"></div>
+  </div>
+  <div class="hgroup">${imp(t.importance,true,t.id)}<span>приоритет ${t.importance} из 5</span></div>
+  <div class="section"><h3>Описание</h3>${state.edit?`<textarea id="ed-content" rows="10">${esc(t.content)}</textarea>`:`<div class="prose">${esc(t.content)}</div>`}</div>
+  <div class="section"><h3>Входит в</h3>${p?`<ul class="links"><li><span class="rel">${TYPE_LABEL[p.type]}</span><span class="to"><button type="button" data-open="${p.id}">${esc(p.summary)}</button> ${statusTag(p.status)}</span><button class="btn quiet sm" data-unlink="${p.id}" data-rel="part_of" data-id="${t.id}">Отвязать</button></li></ul>`:`<p class="muted" style="font-size:var(--fs-sm)">Ни в какой эпик или историю не входит.</p>`}
+    <div style="margin-top:6px"><input type="search" placeholder="Найти эпик или историю…" aria-label="Родитель: поиск задачи" style="max-width:320px" data-picker="parent"></div></div>
+  ${ch.length?`<div class="section"><h3>Дочерние <span class="muted">${pr.done} из ${pr.total} готово</span></h3><div class="progress" style="margin-bottom:6px"><i style="width:${Math.round(pr.done/pr.total*100)}%"></i></div><ul class="links">${ch.map(c=>`<li><span class="rel in">включает</span><span class="to"><button type="button" data-open="${c.id}">${esc(c.summary)}</button> ${statusTag(c.status)}</span><span></span></li>`).join('')}</ul></div>`:''}
+  <div class="section"><h3>Блокировки</h3>
+    <ul class="links">${b.map(x=>`<li><span class="rel out">заблокирована</span><span class="to"><button type="button" data-open="${x.id}">${esc(x.summary)}</button> ${statusTag(x.status)}</span><button class="btn quiet sm" data-unlink="${x.id}" data-rel="blocked_by" data-id="${t.id}">Снять</button></li>`).join('')}
+    ${blocks.map(x=>`<li><span class="rel in">блокирует</span><span class="to"><button type="button" data-open="${x.id}">${esc(x.summary)}</button> ${statusTag(x.status)}</span><span></span></li>`).join('')}</ul>
+    ${!b.length&&!blocks.length?`<p class="muted" style="font-size:var(--fs-sm)">Ничем не заблокирована и ничего не блокирует.</p>`:''}
+    <div style="margin-top:6px"><input type="search" placeholder="Добавить блокер: найти задачу…" aria-label="Блокер: поиск задачи" style="max-width:320px" data-picker="blocker"></div></div>
+  ${rel_.length+incRel.length?`<div class="section"><h3>Связано</h3><ul class="links">${rel_.map(x=>linkRow({to:x,rel:'related',dir:'out'})).join('')}${incRel.map(x=>linkRow({to:x,rel:'related',dir:'in'})).join('')}</ul></div>`:''}
+  <div class="section"><h3>Теги</h3>${tagsEditor(t)}</div>
+  <div class="section"><h3>Служебное</h3><dl class="meta-grid"><dt>id</dt><dd><code>${t.id}</code></dd><dt>scope</dt><dd>${esc(t.scope)}</dd><dt>создана</dt><dd>${fmtDate(t.createdAt)}</dd><dt>изменена</dt><dd>${fmtDate(t.updatedAt)}</dd></dl></div>
+  ${state.confirm?forgetConfirm(t):''}`;
+}
+
+/* ============================================================
+   Действия (в реальном приложении — вызовы API, здесь правят DB)
+   ============================================================ */
+function openRec(id){lastFocus=document.activeElement;state.open=id;state.edit=false;state.confirm=false;render();setTimeout(()=>$('.drawer header [aria-label="Закрыть панель"]')?.focus(),30)}
+function closeRec(){state.open=null;state.edit=false;state.confirm=false;render();lastFocus?.focus?.()}
+function patch(id,fields){const m=byId(id);if(!m)return;
+  if(fields.status&&fields.status!==m.status){const order=STATUSES.indexOf(fields.status);if(order>1&&blockers(m).length){toast(`Не переведена: «${m.summary.slice(0,40)}…» заблокирована — ${blockers(m).map(b=>b.summary.slice(0,30)+'…').join(', ')}`);render();return false}}
+  Object.assign(m,fields,{updatedAt:NOW});render();return true}
+function forget(id){const m=byId(id);m.supersededBy=m.id;m.updatedAt=NOW;state.confirm=false;state.open=null;render();toast(`Забыта: «${(m.summary||m.content).slice(0,50)}…» — в архиве`)}
+
+document.addEventListener('click',e=>{
+  const t=e.target.closest('[data-nav],[data-goto],[data-goto-kind],[data-open],[data-close],[data-scope],[data-mode],[data-edit],[data-cancel],[data-save],[data-forget-ask],[data-forget-cancel],[data-forget],[data-untag],[data-unlink],[data-imp],#reset,#b-reset');
+  if(!t)return;
+  if(t.dataset.nav){state.view=t.dataset.nav;render();return}
+  if(t.dataset.goto){state.view=t.dataset.goto;if(t.hasAttribute('data-close'))state.open=null;render();return}
+  if(t.dataset.gotoKind){state.view='memory';state.kinds=new Set([t.dataset.gotoKind]);state.q='';render();return}
+  if(t.dataset.open!==undefined&&t.dataset.open){openRec(t.dataset.open);return}
+  if(t.hasAttribute('data-close')){closeRec();return}
+  if(t.dataset.scope!==undefined){state.scope=t.dataset.scope;if(state.view==='overview'&&t.dataset.scope!=='')state.view='memory';render();return}
+  if(t.dataset.mode){state.mode=t.dataset.mode;render();$('#q')?.focus();return}
+  if(t.id==='reset'){state.kinds.clear();state.archived=false;state.q='';state.scope='';render();$('#q')?.focus();return}
+  if(t.id==='b-reset'){state.board={type:'',parent:'',tag:'',lanes:state.board.lanes};render();return}
+  if(t.dataset.edit!==undefined){state.edit=true;state.confirm=false;render();$('#ed-content')?.focus();return}
+  if(t.dataset.cancel!==undefined){state.edit=false;render();return}
+  if(t.dataset.save!==undefined){const m=byId(state.open);const s=$('#ed-summary'),c=$('#ed-content');if(s)m.summary=s.value.trim()||null;if(c)m.content=c.value;m.updatedAt=NOW;state.edit=false;render();toast('Сохранено');return}
+  if(t.dataset.forgetAsk!==undefined){state.confirm=true;render();$('.confirm [data-forget]')?.focus();return}
+  if(t.dataset.forgetCancel!==undefined){state.confirm=false;render();$('[data-forget-ask]')?.focus();return}
+  if(t.dataset.forget){forget(t.dataset.forget);return}
+  if(t.dataset.untag){const m=byId(t.closest('[data-tags]').dataset.tags);m.tags=m.tags.filter(x=>x!==t.dataset.untag);m.updatedAt=NOW;render();toast(`Тег «${t.dataset.untag}» снят`);return}
+  if(t.dataset.unlink){const m=byId(t.dataset.id);m.links=m.links.filter(l=>!(l.dst===t.dataset.unlink&&l.rel===t.dataset.rel));m.updatedAt=NOW;render();toast(t.dataset.rel==='blocked_by'?'Блокировка снята':'Отвязано');return}
+  if(t.dataset.imp){const m=byId(t.dataset.id);m.importance=+t.dataset.imp;m.updatedAt=NOW;render();toast(`Важность ${m.importance} из 5`);return}
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&state.open){if(state.confirm){state.confirm=false;render()}else closeRec();return}
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-imp]')){e.preventDefault();e.target.click();return}
+  if(e.key==='Enter'&&e.target.matches('[data-newtag]')){const m=byId(e.target.dataset.newtag);const v=e.target.value.trim().toLowerCase();if(v&&!m.tags.includes(v)){m.tags.push(v);m.tags.sort();m.updatedAt=NOW;render();$(`[data-newtag="${m.id}"]`)?.focus();toast(`Тег «${v}» добавлен`)}e.preventDefault();return}
+  if(e.key==='/'&&!e.target.matches('input,textarea,select')){e.preventDefault();if(state.view!=='memory'){state.view='memory';render()}$('#q')?.focus()}
+});
+let qTimer;
+document.addEventListener('input',e=>{
+  if(e.target.id==='q'){clearTimeout(qTimer);const v=e.target.value;qTimer=setTimeout(()=>{state.q=v;render();const i=$('#q');i.focus();i.setSelectionRange(v.length,v.length)},260)}
+});
+document.addEventListener('change',e=>{
+  const t=e.target;
+  if(t.id==='scope-global'){state.scope=t.value;render();return}
+  if(t.dataset.kind){t.checked?state.kinds.add(t.dataset.kind):state.kinds.delete(t.dataset.kind);render();return}
+  if(t.id==='archived'){state.archived=t.checked;render();return}
+  if(t.id==='b-type'){state.board.type=t.value;render();return}
+  if(t.id==='b-parent'){state.board.parent=t.value;render();return}
+  if(t.id==='b-tag'){state.board.tag=t.value;render();return}
+  if(t.id==='b-lanes'){state.board.lanes=t.checked;render();return}
+  if(t.dataset.move){const ok=patch(t.dataset.move,{status:t.value});if(ok)toast(`Перенесена в «${STATUS_LABEL[t.value]}»`);return}
+  if(t.dataset.field){const ok=patch(t.dataset.id,{[t.dataset.field]:t.value});if(ok&&t.dataset.field==='status')toast(`Стадия: ${STATUS_LABEL[t.value]}`);return}
+  if(t.id==='demo-embedder'){state.demo.embedder=t.checked;render();return}
+  if(t.id==='demo-reasoner'){state.demo.reasoner=t.checked;render();return}
+  if(t.id==='demo-apierror'){state.demo.apierror=t.checked;render();return}
+  if(t.id==='demo-empty'){state.demo.empty=t.checked;render();return}
+  if(t.id==='demo-dark'){document.documentElement.dataset.theme=t.checked?'dark':'light';return}
+});
+$('#demo-reset').addEventListener('click',()=>{DB=JSON.parse(JSON.stringify(SEED));state.open=null;render();toast('Правки макета сброшены')});
+
+/* drag & drop на доске (мышь); клавиатурная альтернатива — select «Переместить» и поле «Стадия» в панели */
+let dragId=null;
+document.addEventListener('dragstart',e=>{const c=e.target.closest('.card');if(!c)return;dragId=c.dataset.id;c.classList.add('dragging');document.body.classList.add('dragging-any');e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',dragId)});
+document.addEventListener('dragend',e=>{document.body.classList.remove('dragging-any');e.target.closest?.('.card')?.classList.remove('dragging');document.querySelectorAll('.col.over').forEach(c=>c.classList.remove('over'))});
+document.addEventListener('dragover',e=>{const col=e.target.closest('.col');if(!col)return;e.preventDefault();document.querySelectorAll('.col.over').forEach(c=>c!==col&&c.classList.remove('over'));col.classList.add('over')});
+document.addEventListener('dragleave',e=>{const col=e.target.closest('.col');if(col&&!col.contains(e.relatedTarget))col.classList.remove('over')});
+document.addEventListener('drop',e=>{const col=e.target.closest('.col');if(!col||!dragId)return;e.preventDefault();const s=col.dataset.status;const t=byId(dragId);if(t.status!==s){if(patch(dragId,{status:s}))toast(`«${t.summary.slice(0,40)}…» → ${STATUS_LABEL[s]}`)}dragId=null});
+
+render();
+</script>
+
+<!--
+============================================================================
+ЗАМЕТКИ ДЛЯ РЕАЛИЗАЦИИ (по итогам макета)
+============================================================================
+
+Реализуется поверх существующего API без изменений:
+- Обзор: счётчики по видам/scope — GET /api/stats (byKind, byScope, homeScope);
+  «Добавлено за 7 дней» — GET /api/memories?scope=…&limit=10 (ULID сортирует по
+  времени, отсечь по createdAt на клиенте); «На доске» — GET /api/board?scope=…
+  и фильтр по колонкам doing/review/testing + blocked на клиенте.
+- Память: список — GET /api/memories?scope&kind&superseded=1&limit&offset;
+  поиск — GET /api/search?q&mode&kind&scope; плашка деградации — по флагу
+  vector:false в ответе; подпись «слова + смысл» — из source кандидата.
+- Запись: GET /api/memories/{id} (neighbors по графу, semanticNeighbors,
+  embedding, blockedBy/blocks/parent/children/progress); важность и теги —
+  PATCH {importance} / {tags:[…]} (заменяющая семантика тегов, как сейчас);
+  «Забыть» — DELETE /api/memories/{id}; входящие связи — из neighbors (у DTO
+  записи есть только исходящие links, направление берётся по тому, у кого dst).
+- Задача: стадия/тип/ветка/процесс — PATCH {status|type|branch|workflow};
+  снять блокер/родителя — PATCH {unlinks:[{id,rel}]}; добавить — PATCH
+  {links:[…]} с пикером через GET /api/search?q&mode=lexical&kind=task.
+  409 с blockers — тост + откат, как в макете (patch() имитирует 409).
+- Глобальный селект scope — один параметр scope на все три экрана; на доске
+  он же вместо отдельного селекта «проект».
+
+Потребует новых полей/эндпоинтов (или решения):
+1. Состояние сервисов на обзоре (store/embedder/reasoner: provider, model,
+   available, очередь на эмбеддинг, время последнего прогона джобов) — нового
+   поля providers/jobs в GET /api/stats сейчас нет; до него плашку деградации
+   можно показать только после первого /api/search (vector:false). Задача
+   заведена в заглушках доски как «Состояние провайдеров в /api/stats».
+2. Правка текста и summary из браузера («Изменить» в панели записи) —
+   противоречит инварианту DESIGN §12 «content/summary из браузера не
+   редактируются никогда». В макете кнопка оставлена, потому что сценарий 3
+   ТЗ прямо требует «правлю текст». Решение нужно до реализации: либо снять
+   инвариант (PATCH принимает content/summary → Writer.Update с переэмбеддингом),
+   либо оставить только importance/теги и убрать «Изменить». Рекомендация:
+   снять инвариант для content/summary — правка одним пользователем локально
+   безопаснее, чем обходной путь через MCP ради опечатки.
+3. «Истекает скоро» на обзоре — нужен фильтр expiresBefore в GET /api/memories
+   (или клиентская выборка последних N с проверкой expiresAt — дорого).
+4. «Похожие по вектору» показывают расстояние (есть в semanticNeighbors) —
+   без изменений; но «в очереди на эмбеддинг» для свежей записи —
+   embedding.embedded=false, уже есть.
+5. Счётчик «читалась N раз» — accessCount/accessedAt уже в DTO.
+
+Решения, принятые в макете (и почему):
+- Панель справа вместо модалки: правка/забывание не покидает список или
+  доску; переход по связи открывает следующую запись в той же панели.
+- Один глобальный scope в шапке вместо чекбоксов на 20 проектов и отдельного
+  селекта на доске: «фильтр по scope виден и сбрасывается одним действием».
+- Фильтр вида — пять чекбоксов-чипов, не пять кнопок-счётчиков: multiselect
+  нужен (например, «долг + задачи»).
+- Важность — 5 сегментов вместо звёзд: читается как шкала, кликается как
+  контрол; звёзды на доске давали визуальный шум в каждой карточке.
+- Drag&drop оставлен, доступная альтернатива — select «Переместить» в футере
+  карточки (виден при hover/focus) и поле «Стадия» в панели; всё это один и
+  тот же PATCH {status}.
+- Свимлейны по родителю включены по умолчанию — колонка doing с эпиком и его
+  подзадачами вперемешку читается хуже.
+- Подтверждение «Забыть» — инлайн в панели, не отдельный диалог: одно
+  действие, одна поверхность; текст говорит, что именно произойдёт (архив,
+  выпадет из recall, связи сохранятся).
+- Тёмная тема — через те же токены под prefers-color-scheme; служебный
+  переключатель в панели макета только для просмотра.
+-->
+</body>
+</html>
