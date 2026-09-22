@@ -28,7 +28,16 @@ function esc(s) {
   });
 }
 
+const KINDS = ["semantic", "episodic", "procedural", "debt", "task"];
 const KIND_LABEL = { semantic: "факт", episodic: "событие", procedural: "процедура", debt: "долг", task: "задача" };
+const KIND_PLURAL = { semantic: "факты", episodic: "события", procedural: "процедуры", debt: "долг", task: "задачи" };
+const KIND_HINT = { semantic: "знания и решения", episodic: "события сессий", procedural: "рецепты", debt: "отложено осознанно", task: "доска" };
+const STATUSES = ["backlog", "todo", "doing", "review", "testing", "release", "done"];
+const STATUS_LABEL = { backlog: "бэклог", todo: "к работе", doing: "в работе", review: "ревью", testing: "проверка", release: "к релизу", done: "готово" };
+const TYPE_LABEL = { epic: "эпик", story: "история", task: "задача" };
+// подписи связей (§2.3): исходящие «→», входящие «←»
+const REL_LABEL = { related: "связано", supersedes: "заменяет", causes: "следствие", part_of: "часть", blocked_by: "заблокирована" };
+const REL_IN_LABEL = { related: "связано", supersedes: "заменена", causes: "причина", part_of: "включает", blocked_by: "блокирует" };
 
 // plural — форма слова по числу: plural(3, "день", "дня", "дней") → "дня".
 function plural(n, one, few, many) {
@@ -65,6 +74,66 @@ function kindTag(kind) {
   return '<span class="kind ' + esc(kind) + '">' + esc(KIND_LABEL[kind] || kind) + "</span>";
 }
 
+function statusTag(status) {
+  return '<span class="status ' + esc(status) + '">' + esc(STATUS_LABEL[status] || status) + "</span>";
+}
+
+// title — заголовок записи для списков: summary, иначе начало content.
+function title(m) {
+  return m.summary || (m.content || "").slice(0, 120) || m.id;
+}
+
+// fmtDate — полная метка даты и времени (для «Служебного»).
+function fmtDate(ts) {
+  if (!ts) return "—";
+  const x = new Date(ts * 1000);
+  return x.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }) + " " +
+    x.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtN(n) { return Number(n || 0).toLocaleString("ru-RU"); }
+
+// imp — важность: 5 сегментов 6×10 (§3). edit — сегменты становятся кнопками
+// (→ PATCH {importance} в панели записи, 16.5).
+function imp(n, edit) {
+  if (!edit) {
+    let s = '<span class="imp" role="img" aria-label="важность ' + n + ' из 5">';
+    for (let i = 1; i <= 5; i++) s += '<i class="' + (i <= n ? "on" : "") + '"></i>';
+    return s + "</span>";
+  }
+  let s = '<span class="imp edit" role="group" aria-label="Важность">';
+  for (let i = 1; i <= 5; i++) {
+    s += '<button type="button" class="imp-btn" data-imp="' + i + '" aria-label="важность ' + i + '" aria-pressed="' + (i === n) + '">' +
+      '<i class="' + (i <= n ? "on" : "") + '"></i></button>';
+  }
+  return s + "</span>";
+}
+
+function tagChips(tags) {
+  return (tags || []).map(function (t) { return '<span class="chip tag">' + esc(t) + "</span>"; }).join("");
+}
+
+// scopeShort — «project:memo» → «memo» в тесных местах (строка списка, счётчик фильтров).
+function scopeShort(s) { return String(s || "").replace(/^project:/, ""); }
+
+// listRow — строка списков обзора (§2.1): метка 96 px · заголовок-кнопка · дата справа.
+function listRow(label, id, text, sub, when) {
+  return "<li>" + label + '<span class="t"><button type="button" data-open="' + esc(id) + '">' + esc(text) + "</button>" +
+    (sub ? '<span class="sub">' + sub + "</span>" : "") + '</span><span class="when">' + when + "</span></li>";
+}
+
+// qs — query-строка из объекта; массивы → повторяемый параметр; пустые опускаются.
+function qs(o) {
+  const p = new URLSearchParams();
+  Object.keys(o).forEach(function (k) {
+    const v = o[k];
+    if (Array.isArray(v)) v.forEach(function (x) { if (x !== "") p.append(k, x); });
+    else if (v !== "" && v != null) p.set(k, v);
+  });
+  const s = p.toString();
+  return s ? "?" + s : "";
+}
+
 // --- API ---
 
 // api — fetch к JSON API. Не-2xx → Error с полями status и body (тело ответа,
@@ -78,6 +147,7 @@ async function api(path, opts) {
     const err = new Error("ошибка соединения");
     err.status = 0;
     err.body = null;
+    err.path = path;
     throw err;
   }
   let body = null;
@@ -90,6 +160,7 @@ async function api(path, opts) {
     const err = new Error(body && body.error ? body.error : "HTTP " + resp.status);
     err.status = resp.status;
     err.body = body;
+    err.path = path;
     throw err;
   }
   return body;
@@ -223,15 +294,148 @@ function defaultScope(stats) {
   return "";
 }
 
-// --- экраны (заглушки; наполнение — 16.3/16.4/16.6) ---
+// --- экраны ---
+
+// renderSeq — номер последней перерисовки экрана: ответ устаревшего запроса
+// (пользователь успел сменить scope/фильтр) не должен затирать актуальный экран.
+let renderSeq = 0;
+
+// screenError — экран целиком заменяется плашкой ошибки API с «Повторить».
+function screenError(el, err, retry) {
+  el.innerHTML = "";
+  el.appendChild(apiErrorNotice(err.path || "/api", err, retry));
+}
 
 function placeholder(view, task) {
   const el = $("#screen-" + view + " [data-placeholder]");
   if (el) el.textContent = "Scope: " + scopeLabel(state.scope) + " · экран наполняется задачей " + task + ".";
 }
 
+// --- Обзор (§2.1, задача 16.3): только отображение ответов API ---
+
+// emptyScope — пустое состояние (§5): в scope нет живых записей.
+function emptyScope() {
+  return '<div class="panel"><div class="empty"><h3>В ' + (state.scope ? esc(state.scope) : "памяти") + " пока ничего нет</h3>" +
+    "<p>Агент пишет сюда по ходу задач через <code>memory_save</code>. Подключи MCP-сервер memo к проекту — первые записи появятся после первой сессии.</p>" +
+    (state.scope ? '<button type="button" class="btn" data-scope="">Показать все scope</button>' : "") + "</div></div>";
+}
+
+// embedderNotice — плашка деградации на обзоре (§5) по providers.embedder.available.
+function embedderNotice(emb) {
+  const name = emb.provider === "noop" || !emb.provider ? "не настроен (noop)" : esc(emb.provider + (emb.model ? "/" + emb.model : "")) + " не отвечает";
+  return '<div class="notice warn" style="margin-bottom:var(--s5)"><div class="grow"><strong>Поиск по смыслу недоступен.</strong> Эмбеддер ' + name +
+    " — поиск работает только по словам, новые записи копят очередь на эмбеддинг. Сохранение и доска работают как обычно.</div></div>";
+}
+
+// providersList — панель «Сервисы»: точка ok/off/na + одна строка пояснения.
+function providersList(stats) {
+  const p = stats.providers || {}, st = p.store || {}, emb = p.embedder || {}, rs = p.reasoner || {}, jobs = stats.jobs || {};
+  const pending = emb.pending ? fmtN(emb.pending) + " " + plural(emb.pending, "запись ждёт", "записи ждут", "записей ждут") + " эмбеддинга" : "очередь на эмбеддинг пуста";
+  const embName = emb.provider && emb.provider !== "noop" ? esc(emb.provider) + (emb.model ? ", " + esc(emb.model) : "") + (emb.dim ? " (" + emb.dim + ")" : "") : "noop";
+  const embD = emb.available ? "отвечает · " + pending
+    : (emb.provider && emb.provider !== "noop" ? "не отвечает" : "не настроен") + " — поиск только по словам, " + pending;
+  const rsName = rs.provider && rs.provider !== "noop" ? esc(rs.provider) + (rs.model ? ", " + esc(rs.model) : "") : "noop";
+  const rsD = rs.available ? "отвечает · сводки и консолидация эпизодов" : (rs.provider && rs.provider !== "noop" ? "недоступен" : "не настроен") + " — сводки и консолидация эпизодов выключены";
+  return '<ul class="providers">' +
+    '<li><span class="dot"></span><div>Хранилище — ' + esc(st.driver || "?") + (st.target ? ", " + esc(st.target) : "") +
+    '<div class="d">' + fmtN(stats.total + stats.superseded) + " " + plural(stats.total + stats.superseded, "запись", "записи", "записей") + " всего · схема v" + esc(st.schema) + "</div></div></li>" +
+    '<li><span class="dot' + (emb.available ? "" : " off") + '"></span><div>Эмбеддер — ' + embName + '<div class="d">' + embD + "</div></div></li>" +
+    '<li><span class="dot' + (rs.available ? "" : " off") + '"></span><div>Reasoner — ' + rsName + '<div class="d">' + rsD + "</div></div></li>" +
+    '<li><span class="dot na"></span><div>Фоновые джобы<div class="d">decay · dedup · consolidate · reindex — ' +
+    (jobs.lastRunAt ? "последний прогон " + esc(rel(jobs.lastRunAt)) : "ещё не запускались") + "</div></div></li></ul>";
+}
+
+// boardRows — «На доске»: doing, затем review/testing, затем заблокированные из
+// прочих незакрытых колонок (без дублей); порядок и содержимое — из /api/board.
+function boardRows(board) {
+  const cols = {};
+  (board.columns || []).forEach(function (c) { cols[c.status] = c.cards || []; });
+  const doing = cols.doing || [], review = (cols.review || []).concat(cols.testing || []);
+  const seen = {};
+  const out = [];
+  doing.concat(review).forEach(function (c) { if (!seen[c.id]) { seen[c.id] = 1; out.push(c); } });
+  STATUSES.forEach(function (s) {
+    if (s === "done") return;
+    (cols[s] || []).forEach(function (c) { if (c.blocked && !seen[c.id]) { seen[c.id] = 1; out.push(c); } });
+  });
+  const blockedN = STATUSES.reduce(function (n, s) { return s === "done" ? n : n + (cols[s] || []).filter(function (c) { return c.blocked; }).length; }, 0);
+  return { rows: out, doing: doing.length, review: review.length, blocked: blockedN };
+}
+
+async function renderOverview() {
+  const el = $("#screen-overview");
+  const scope = state.scope;
+  const seq = ++renderSeq;
+  el.innerHTML = '<h2 id="h-overview" class="sr-only">Обзор</h2><p class="muted">Загрузка…</p>';
+  let stats, recent, board, expiring, byKind, live, archived;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const r = await Promise.all([
+      api("/api/stats"),
+      api("/api/memories" + qs({ scope: scope, limit: 10 })),
+      api("/api/board" + qs({ scope: scope })),
+      api("/api/memories" + qs({ scope: scope, expiresBefore: now + 14 * 86400, limit: 10 })),
+    ]);
+    stats = r[0]; recent = r[1]; board = r[2]; expiring = r[3];
+    byKind = stats.byKind || {}; live = stats.total; archived = stats.superseded;
+    if (scope) {
+      // счётчики /api/stats глобальные; для scope берём total из списков с limit=1
+      const rs = await Promise.all(KINDS.map(function (k) { return api("/api/memories" + qs({ scope: scope, kind: k, limit: 1 })); })
+        .concat([api("/api/memories" + qs({ scope: scope, superseded: 1, limit: 1 }))]));
+      byKind = {};
+      KINDS.forEach(function (k, i) { byKind[k] = rs[i].total; });
+      live = (stats.byScope || {})[scope] || 0;
+      archived = Math.max(0, rs[5].total - live);
+    }
+  } catch (err) {
+    if (seq !== renderSeq) return;
+    screenError(el, err, renderOverview);
+    return;
+  }
+  if (seq !== renderSeq) return;
+  state.stats = stats;
+  renderScopeSelect();
+
+  const now = Math.floor(Date.now() / 1000);
+  const recentItems = (recent.items || []).filter(function (m) { return !m.supersededBy && m.createdAt >= now - 7 * 86400; });
+  const b = boardRows(board);
+  let updated = 0;
+  (recent.items || []).concat(b.rows).forEach(function (m) { if (m.updatedAt > updated) updated = m.updatedAt; });
+  const emb = (stats.providers || {}).embedder || {};
+
+  let html = '<h2 id="h-overview" class="sr-only">Обзор</h2>';
+  if (!live) { el.innerHTML = html + emptyScope(); return; }
+  html += '<div class="headline"><span class="num">' + fmtN(live) + "</span><span>" + plural(live, "запись", "записи", "записей") + " в " + esc(scopeLabel(scope)) + "</span>" +
+    '<span class="muted">' + fmtN(archived) + " в архиве · обновлено " + esc(rel(updated)) + "</span></div>";
+  if (!emb.available) html += embedderNotice(emb);
+  html += '<div class="overview"><div class="stack">' +
+    '<section class="kinds" aria-label="Записи по видам">' + KINDS.map(function (k) {
+      return '<button type="button" class="rule-' + k + '" data-goto-kind="' + k + '"><span class="kind ' + k + '">' + KIND_PLURAL[k] + '</span><span class="n">' + fmtN(byKind[k] || 0) + '</span><span class="d">' + KIND_HINT[k] + "</span></button>";
+    }).join("") + "</section>" +
+    '<section class="panel" aria-labelledby="h-recent"><header><h2 id="h-recent">Добавлено за 7 дней</h2><span class="muted">' + recentItems.length + '</span><span class="grow"></span><button type="button" class="btn quiet sm" data-goto="memory">Вся память</button></header><div class="body">' +
+    (recentItems.length ? '<ul class="rows">' + recentItems.map(function (m) { return listRow(kindTag(m.kind), m.id, title(m), "", esc(rel(m.createdAt))); }).join("") + "</ul>"
+      : '<p class="muted">За неделю ничего не добавилось. Агент пишет в память по ходу задач — записи появятся здесь.</p>') + "</div></section>" +
+    '<section class="panel" aria-labelledby="h-doing"><header><h2 id="h-doing">На доске</h2><span class="muted">' + b.doing + " в работе · " + b.review + " на ревью и проверке · " + b.blocked + ' заблокировано</span><span class="grow"></span><button type="button" class="btn quiet sm" data-goto="board">Доска</button></header><div class="body">' +
+    (b.rows.length ? '<ul class="rows">' + b.rows.map(function (c) {
+      const blk = c.blocked && c.blockedBy && c.blockedBy.length ? '<span class="blk">заблокирована</span> · ждёт: ' + esc(c.blockedBy[0].summary || c.blockedBy[0].id) : "";
+      return listRow(statusTag(c.status), c.id, c.summary || c.id, blk, (c.branch ? "<code>" + esc(c.branch) + "</code> · " : "") + esc(rel(c.updatedAt)));
+    }).join("") + "</ul>" : '<p class="muted">Ничего не в работе и не на проверке.</p>') + "</div></section></div>" +
+    '<div class="stack"><section class="panel" aria-labelledby="h-prov"><header><h2 id="h-prov">Сервисы</h2></header><div class="body">' + providersList(stats) + "</div></section>";
+  const exp = (expiring.items || []).filter(function (m) { return !m.supersededBy; });
+  if (exp.length) {
+    html += '<section class="panel" aria-labelledby="h-exp"><header><h2 id="h-exp">Истекает скоро</h2></header><div class="body"><ul class="rows">' +
+      exp.map(function (m) { return listRow(kindTag(m.kind), m.id, title(m), "", esc(rel(m.expiresAt))); }).join("") + "</ul></div></section>";
+  }
+  const scopes = Object.keys(stats.byScope || {}).sort(function (a, b2) { return stats.byScope[b2] - stats.byScope[a] || a.localeCompare(b2); });
+  html += '<section class="panel" aria-labelledby="h-scopes"><header><h2 id="h-scopes">Scope</h2><span class="muted">живые записи</span></header><div class="body"><ul class="scopes-list">' +
+    scopes.map(function (s) {
+      return '<li><button type="button" data-scope="' + esc(s) + '"' + (s === scope ? ' aria-current="true"' : "") + ">" + esc(s) + (s === stats.homeScope ? ' <span class="muted">домашний</span>' : "") + '</button><span class="n">' + fmtN(stats.byScope[s]) + "</span></li>";
+    }).join("") + "</ul></div></section></div></div>";
+  el.innerHTML = html;
+}
+
 const screens = {
-  overview: { render: function () { placeholder("overview", "16.3"); } },
+  overview: { render: renderOverview },
   memory: { render: function () { placeholder("memory", "16.4"); } },
   board: { render: function () { placeholder("board", "16.6"); } },
 };
@@ -334,6 +538,12 @@ document.addEventListener("click", function (e) {
   if (t.closest("[data-close]")) { closeRecord(); return; }
   const open = t.closest("[data-open]");
   if (open) { openRecord(open.getAttribute("data-open")); return; }
+  const gotoKind = t.closest("[data-goto-kind]");
+  if (gotoKind) { navigate({ view: "memory", params: new URLSearchParams({ kind: gotoKind.getAttribute("data-goto-kind") }), id: "" }); return; }
+  const goto = t.closest("[data-goto]");
+  if (goto) { navigate({ view: goto.getAttribute("data-goto"), params: new URLSearchParams(), id: "" }); return; }
+  const sc = t.closest("[data-scope]");
+  if (sc) { navigate({ scope: sc.getAttribute("data-scope") }); return; }
   if (t.closest(".skip")) {
     // skip link не должен менять хэш (он — маршрут): просто переводим фокус в main
     e.preventDefault();
