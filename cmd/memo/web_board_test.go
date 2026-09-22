@@ -152,8 +152,8 @@ func TestHandlePatchMemory_TaskFields(t *testing.T) {
 	if resp := patchJSON(t, url, `{"links":[{"id":"`+epic.Id+`","rel":"blocks"}]}`, &e); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("rel blocks: статус = %d, хочу 400", resp.StatusCode)
 	}
-	if resp := patchJSON(t, url, `{"content":"новый"}`, &e); resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("content: статус = %d, хочу 400 (содержание из морды не правится)", resp.StatusCode)
+	if resp := patchJSON(t, url, `{"scope":"project:other"}`, &e); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("scope: статус = %d, хочу 400 (scope из морды не меняется)", resp.StatusCode)
 	}
 	if resp := patchJSON(t, url, `{"links":[{"id":"`+fact.Id+`","rel":"blocked_by"}]}`, &e); resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("blocked_by на факт: статус = %d, хочу 400", resp.StatusCode)

@@ -413,6 +413,13 @@ func (s *pgStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory, in
 	if clause := kindPredicatePG(a, f.Kinds); clause != "" {
 		conds = append(conds, clause)
 	}
+	// Фильтр по сроку меняет и порядок: ближайшие к истечению первыми (см.
+	// BrowseFilter.ExpiresBefore); паритет с sqliteStore.List.
+	orderBy := "m.created_at DESC, m.id DESC"
+	if f.ExpiresBefore > 0 {
+		conds = append(conds, "m.expires_at IS NOT NULL AND m.expires_at > 0 AND m.expires_at < "+a.add(f.ExpiresBefore))
+		orderBy = "m.expires_at ASC, m.id ASC"
+	}
 
 	where := ""
 	if len(conds) > 0 {
@@ -435,7 +442,7 @@ func (s *pgStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory, in
 	query := `
 		SELECT ` + memoryColumns + `
 		FROM memories m` + where + `
-		ORDER BY m.created_at DESC, m.id DESC
+		ORDER BY ` + orderBy + `
 		LIMIT ` + limitPh + ` OFFSET ` + offsetPh
 
 	rows, err := tx.QueryContext(ctx, query, a.args...)
@@ -478,7 +485,22 @@ func (s *pgStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory, in
 // живых записей по scope и kind. Паритет с sqliteStore.Stats — сам запрос общий,
 // statsFromDB (common.go).
 func (s *pgStore) Stats(ctx context.Context) (Stats, error) {
-	return statsFromDB(ctx, s.db)
+	stats, err := statsFromDB(ctx, s.db)
+	if err != nil {
+		return Stats{}, err
+	}
+	// Очередь на эмбеддинг: без memories_vec она по определению пуста —
+	// деградация, не ошибка (DESIGN.md §15). Паритет с sqliteStore.Stats.
+	exists, err := s.hasVecTable(ctx)
+	if err != nil {
+		return Stats{}, err
+	}
+	if exists {
+		if stats.PendingVectors, err = pendingVectorsFromDB(ctx, s.db, s.vecTable()); err != nil {
+			return Stats{}, err
+		}
+	}
+	return stats, nil
 }
 
 // loadTagsAndLinksBatch подгружает Tags и Links для all батчем (loadTagsBatch +

@@ -88,6 +88,14 @@ CREATE TABLE IF NOT EXISTS embed_meta (
     model TEXT NOT NULL,
     dim   INTEGER NOT NULL
 );
+
+-- Отметка последнего прогона планировщика maintenance-джобов (DESIGN.md §14
+-- Этап 16): одна строка, как у embed_meta. Чистый CREATE TABLE IF NOT EXISTS
+-- в базовой схеме, а не шаг миграции — data-шагов нет.
+CREATE TABLE IF NOT EXISTS maint_meta (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    last_run_at INTEGER NOT NULL
+);
 `
 
 // ftsTriggers синхронизирует memories_fts с memories/tags. Выполняется КАЖДЫЙ Open,
@@ -1437,6 +1445,14 @@ func (s *sqliteStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory
 		conds = append(conds, clause)
 		args = append(args, kindArgs...)
 	}
+	// Фильтр по сроку меняет и порядок: ближайшие к истечению первыми (см.
+	// BrowseFilter.ExpiresBefore); тот же предикат, что у ListExpired.
+	orderBy := "m.created_at DESC, m.id DESC"
+	if f.ExpiresBefore > 0 {
+		conds = append(conds, "m.expires_at IS NOT NULL AND m.expires_at > 0 AND m.expires_at < ?")
+		args = append(args, f.ExpiresBefore)
+		orderBy = "m.expires_at ASC, m.id ASC"
+	}
 
 	where := ""
 	if len(conds) > 0 {
@@ -1457,7 +1473,7 @@ func (s *sqliteStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory
 	query := `
 		SELECT ` + memoryColumns + `
 		FROM memories m` + where + `
-		ORDER BY m.created_at DESC, m.id DESC
+		ORDER BY ` + orderBy + `
 		LIMIT ? OFFSET ?
 	`
 	pageArgs := append(append([]any{}, args...), limit, offset)
@@ -1504,7 +1520,51 @@ func (s *sqliteStore) List(ctx context.Context, f BrowseFilter) ([]memory.Memory
 // запрос — statsFromDB (common.go): текст SQL здесь не содержит ни одного диалектного
 // плейсхолдера и побайтово совпадает с pgStore.Stats.
 func (s *sqliteStore) Stats(ctx context.Context) (Stats, error) {
-	return statsFromDB(ctx, s.db)
+	stats, err := statsFromDB(ctx, s.db)
+	if err != nil {
+		return Stats{}, err
+	}
+	// Очередь на эмбеддинг: без memories_vec (Embedder всегда был noop) она по
+	// определению пуста — деградация, не ошибка (DESIGN.md §15).
+	exists, err := s.hasVecTable(ctx)
+	if err != nil {
+		return Stats{}, fmt.Errorf("проверка memories_vec: %w", err)
+	}
+	if exists {
+		if stats.PendingVectors, err = pendingVectorsFromDB(ctx, s.db, "memories_vec"); err != nil {
+			return Stats{}, err
+		}
+	}
+	return stats, nil
+}
+
+// SchemaVersion возвращает PRAGMA user_version — ту же величину, которую migrate
+// доводит до schemaVersion при Open (DESIGN.md §14 Этап 16, подпись хранилища
+// в web-морде).
+func (s *sqliteStore) SchemaVersion(ctx context.Context) (int, error) {
+	var v int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("чтение user_version: %w", err)
+	}
+	return v, nil
+}
+
+// LastMaintRun читает отметку последнего прогона планировщика (maint_meta);
+// 0 — прогонов ещё не было. Сам запрос — lastMaintRunFromDB (common.go).
+func (s *sqliteStore) LastMaintRun(ctx context.Context) (int64, error) {
+	return lastMaintRunFromDB(ctx, s.db)
+}
+
+// SetLastMaintRun перезаписывает единственную строку maint_meta (upsert по id=1).
+func (s *sqliteStore) SetLastMaintRun(ctx context.Context, at int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO maint_meta (id, last_run_at) VALUES (1, ?)
+		ON CONFLICT(id) DO UPDATE SET last_run_at = excluded.last_run_at
+	`, at)
+	if err != nil {
+		return fmt.Errorf("обновление maint_meta: %w", err)
+	}
+	return nil
 }
 
 // Health возвращает быстрый read-only снимок целостности БД (DESIGN.md §15,

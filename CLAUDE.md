@@ -20,7 +20,7 @@
 | Composition root (`Main`) | `cmd/memo/main.go` — `main()` и фабрики `newEmbedder`, `newReasoner`; сборка графа и деградация до `noop` живут только здесь |
 | Ограничение видимости | `internal/`, регистр имени; экспортируется минимум |
 | Подмена в тестах | своя реализация интерфейса, переданная полем/аргументом (`fakeEmbedder` в `write_test.go`, `recall_test.go`, `consolidate_test.go`); моки-библиотеки не используются |
-| Изоляция времени и случайности | порт времени есть в `write` и `recall`: поле `now func() int64` + опция `WithNow` (по умолчанию `time.Now().Unix()`). В `maint` (`decay.go`, `expire.go`, `consolidate.go`) `time.Now()` зовётся напрямую — так делать в новом коде не надо, время передавать полем. Идентификаторы — `oklog/ulid` |
+| Изоляция времени и случайности | порт времени есть в `write` и `recall`: поле `now func() int64` + опция `WithNow` (по умолчанию `time.Now().Unix()`). В `maint` (`decay.go`, `expire.go`, `consolidate.go`) `time.Now()` зовётся напрямую — так делать в новом коде не надо, время передавать полем (образец — `scheduler.go`: поле `now func() int64`). Идентификаторы — `oklog/ulid` |
 
 **Структура**
 

@@ -37,9 +37,20 @@ type Scheduler struct {
 	dedup        *DedupSweeper
 	consolidator *Consolidator
 	reindexer    *Reindexer
+	runLog       RunLog
 
 	interval         time.Duration // как часто запускать RunOnce (decay_interval)
 	consolidateAfter time.Duration // возраст episodic, после которого он консолидируется (consolidate_after)
+	now              func() int64  // порт времени для отметки прогона (тесты подменяют)
+}
+
+// RunLog — узкий порт планировщика для отметки времени завершённого прогона
+// (DESIGN.md §14 Этап 16): её читает `memo web` (строка «фоновые джобы» на
+// обзоре), а планировщик живёт в процессе MCP-сервера — без персистентной
+// отметки морде неоткуда узнать, когда джобы гонялись. Интерфейс объявляет
+// потребитель; store.Store удовлетворяет ему структурно.
+type RunLog interface {
+	SetLastMaintRun(ctx context.Context, at int64) error
 }
 
 // NewScheduler создаёт Scheduler поверх уже сконструированных джобов. Порядок
@@ -49,15 +60,18 @@ type Scheduler struct {
 // (DESIGN.md §13). consolidateAfter используется не только для Consolidate, но и
 // как база порогов Decay — см. годок RunOnce. ExpireSweep параметров конфига не
 // требует (TTL самой записи уже задаёт момент истечения, см. годок Expirer).
-func NewScheduler(e *Expirer, d *Decayer, ds *DedupSweeper, c *Consolidator, r *Reindexer, interval, consolidateAfter time.Duration) *Scheduler {
+// runLog получает отметку времени в конце каждого прогона (см. RunLog).
+func NewScheduler(e *Expirer, d *Decayer, ds *DedupSweeper, c *Consolidator, r *Reindexer, runLog RunLog, interval, consolidateAfter time.Duration) *Scheduler {
 	return &Scheduler{
 		expirer:          e,
 		decayer:          d,
 		dedup:            ds,
 		consolidator:     c,
 		reindexer:        r,
+		runLog:           runLog,
 		interval:         interval,
 		consolidateAfter: consolidateAfter,
+		now:              func() int64 { return time.Now().Unix() },
 	}
 }
 
@@ -76,6 +90,8 @@ func NewScheduler(e *Expirer, d *Decayer, ds *DedupSweeper, c *Consolidator, r *
 //  4. Consolidate(consolidateAfter, consolidateBatchLimit).
 //  5. CheckAndReindex — досчёт векторов, в т.ч. для фактов, только что
 //     созданных консолидацией.
+//  6. Отметка времени прогона в RunLog — после всех джобов, независимо от их
+//     ошибок: «прогон был» — факт даже при частичном сбое.
 //
 // Ошибка отдельного джоба (DESIGN.md §15: деградация, а не падение) логируется
 // в stderr, и выполнение продолжается со следующего джоба — один сбойный джоб
@@ -119,6 +135,10 @@ func (s *Scheduler) RunOnce(ctx context.Context) {
 		consolidateResult.Scanned, consolidateResult.Created, consolidateResult.Merged, consolidateResult.Superseded, consolidateResult.Skipped, consolidateErr,
 		reindexResult.Reindexed, reindexResult.Embedded, reindexResult.Failed, reindexErr,
 	)
+
+	if err := s.runLog.SetLastMaintRun(ctx, s.now()); err != nil {
+		log.Printf("maint: scheduler: отметка прогона: %v", err)
+	}
 }
 
 // Run запускает RunOnce немедленно, затем повторяет его по тикеру interval, пока

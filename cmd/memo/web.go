@@ -3,25 +3,26 @@
 // задача 10.2). Открывает тот же общий файл БД, что и MCP-сервер (WAL +
 // busy_timeout безопасны для параллельных читателей), и отдаёт JSON API
 // поверх read-методов Store (List/Stats/Get/Neighbors/SearchLexical) плюс
-// статический фронтенд (сам фронтенд — задача 6.3/10.1/10.2). Чтение
-// по-прежнему доминирует; write-операций две, обе тонкие обёртки над
-// доменным `write.Writer` (та же семантика, что у одноимённых MCP-
+// статический фронтенд (Этап 16 — новая морда по принятому дизайну, задачи
+// 16.2+). Чтение по-прежнему доминирует; write-операций две, обе тонкие обёртки
+// над доменным `write.Writer` (та же семантика, что у одноимённых MCP-
 // инструментов): мягкое удаление (`DELETE /api/memories/{id}` → `Writer.Forget`,
-// тумстоун) и правка сигналов ранжирования/группировки (`PATCH
-// /api/memories/{id}` → `Writer.Update` с `UpdateInput{Importance,Tags}`,
-// задача 10.2). Content/kind/scope/links из браузера НЕ редактируются —
-// содержание фактов меняет только агент через MCP (`memory_update`/
-// `memory_save` с supersede); морда правит исключительно importance и tags.
-// Создания новых записей из браузера нет, hard DELETE не делается.
+// тумстоун) и правка записи (`PATCH /api/memories/{id}` → `Writer.Update`,
+// whitelist-DTO 1:1 в `write.UpdateInput`): importance/tags (задача 10.2),
+// рабочие метаданные задачи (Этап 15) и — с Этапа 16 — content/summary.
+// Инвариант «содержание из браузера не редактируется» снят (DESIGN.md §14
+// Этап 16); остаются: kind/scope не меняются, записи не создаются, hard DELETE
+// не делается.
 //
-// `/api/search` (задача 10.1) поднимает поверх Store ещё и `recall.Recaller` с
-// реальным Embedder (та же фабрика `newEmbedder`, что у MCP-сервера/CLI) — это
-// единственное место, где морда вызывает внешний сервис (ollama/OpenAI), и
-// только для эмбеддинга ПОИСКОВОГО ЗАПРОСА, не записей: суженный инвариант
-// оффлайновости (DESIGN.md §12) — морда не пишет в БД и не эмбеддит записи,
-// эмбеддинг запроса допустим с полной деградацией до FTS5 при недоступности
-// Embedder. Reasoner мордe не нужен (нет суммаризации в JSON API) — Recaller
-// строится с reason.NewNoop().
+// Embedder (та же фабрика `newEmbedder`, что у MCP-сервера/CLI) морда вызывает
+// в двух местах: `/api/search?mode=semantic` эмбеддит ПОИСКОВЫЙ ЗАПРОС (задача
+// 10.1), а `Writer.Update` при правке content — саму запись (иначе в БД остался
+// бы устаревший вектор, не видимый очереди досчёта). Инвариант оффлайновости
+// (DESIGN.md §12): морда пишет в БД только через доменный `write.Writer` и
+// эмбеддит ровно то же, что MCP `memory_update`; недоступный Embedder — полная
+// деградация до FTS5, а не ошибка. Reasoner мордe не нужен (нет суммаризации в
+// JSON API) — Recaller строится с reason.NewNoop(); фабрика `newReasoner`
+// зовётся только чтобы сообщить его доступность в `/api/stats`.
 package main
 
 import (
@@ -70,8 +71,9 @@ var webFS embed.FS
 
 // runWeb разбирает флаги подкоманды `web` и поднимает HTTP-сервер поверх
 // Store. Вынесена из диспетчера в main.go для тестируемости (по образцу
-// runInit). Reasoner/Embedder не создаются — морда только читает store
-// лексически (без ollama/DeepSeek).
+// runInit). Embedder создаётся той же фабрикой, что у MCP-сервера (поиск по
+// смыслу и переэмбеддинг при правке текста); Reasoner — только чтобы узнать
+// его доступность для панели «Сервисы» (см. комментарий пакета).
 //
 // .env при этом грузится наравне с остальными подкомандами (задача 12: до
 // появления PostgreSQL-бэкенда морде секреты были не нужны вовсе — .env
@@ -84,7 +86,7 @@ func runWeb(args []string, stdout io.Writer) error {
 	flagSet := flag.NewFlagSet("web", flag.ExitOnError)
 	flagSet.SetOutput(stdout)
 	flagSet.Usage = func() {
-		fmt.Fprintln(stdout, "поднимает HTTP-морду для просмотра и поиска памяти в браузере (read-only).")
+		fmt.Fprintln(stdout, "поднимает HTTP-морду памяти в браузере: обзор, поиск, правка записей, доска задач.")
 		fmt.Fprintln(stdout, "Использование: memo web [флаги]")
 		flagSet.PrintDefaults()
 	}
@@ -125,13 +127,22 @@ func runWeb(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("создание embedder: %w", err)
 	}
+	// Reasoner морда не использует — фабрика нужна ради ответа «доступен ли»
+	// в /api/stats (нет ключа/модели → Noop → недоступен; опечатка в provider —
+	// ошибка старта, как у MCP-сервера).
+	reasoner, err := newReasoner(cfg.Reasoner)
+	if err != nil {
+		return fmt.Errorf("создание reasoner: %w", err)
+	}
 
-	w := write.New(s, memembed.NewNoop())
+	// Writer с реальным Embedder: правка content из панели записи (Этап 16)
+	// переэмбеддит запись, как memory_update; при Noop — вектор досчитает reindex.
+	w := write.New(s, embedder)
 	rc := recall.New(s, cfg.Recall, reason.NewNoop(), embedder)
 
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: newWebHandler(s, w, rc, embedder, cfg.Scope.SaveScope()),
+		Handler: newWebHandler(s, w, rc, embedder, newWebInstance(cfg, reasonerAvailable(reasoner))),
 	}
 
 	errCh := make(chan error, 1)
@@ -158,18 +169,54 @@ func runWeb(args []string, stdout io.Writer) error {
 	return nil
 }
 
+// webInstance — то, что о запущенном инстансе знает composition root, а не
+// Store: домашний scope и провайдеры для панели «Сервисы» обзора (DESIGN.md
+// §14 Этап 16). Имена провайдеров и драйвера — из конфига; доступность
+// Reasoner — решение фабрики newReasoner (не Noop); доступность Embedder
+// здесь не хранится — её отдаёт сам экземпляр (Dim() > 0) в handleStats.
+type webInstance struct {
+	HomeScope         string // "project:<name>" из [scope]; пусто при выключенной мультипроектности
+	StoreDriver       string // sqlite | postgres
+	StoreTarget       string // путь к файлу или postgres://host:port/db — без пароля (config.StoreConfig.Target)
+	EmbedderProvider  string // noop | ollama | openai
+	EmbedderModel     string
+	ReasonerProvider  string // noop | deepseek
+	ReasonerModel     string
+	ReasonerAvailable bool
+}
+
+// newWebInstance собирает webInstance из конфига; пустые provider/driver
+// показываются своими дефолтами (noop/sqlite), как их трактуют фабрики.
+func newWebInstance(cfg config.Config, reasonerAvailable bool) webInstance {
+	driver := cfg.Store.Driver
+	if driver == "" {
+		driver = "sqlite"
+	}
+	embedderProvider, embedderModel := providerAndModel(cfg.Embedder.Provider, cfg.Embedder.Model)
+	reasonerProvider, reasonerModel := providerAndModel(cfg.Reasoner.Provider, cfg.Reasoner.Model)
+	return webInstance{
+		HomeScope:         cfg.Scope.SaveScope(),
+		StoreDriver:       driver,
+		StoreTarget:       cfg.Store.Target(),
+		EmbedderProvider:  embedderProvider,
+		EmbedderModel:     embedderModel,
+		ReasonerProvider:  reasonerProvider,
+		ReasonerModel:     reasonerModel,
+		ReasonerAvailable: reasonerAvailable,
+	}
+}
+
 // newWebHandler собирает мультиплексор web-морды: JSON API под /api/ (см.
 // каждый handler) + статика (embed.FS) на /. API-роуты регистрируются до
 // файлового хендлера, чтобы /api/* не перехватывался статикой. w используется
-// для обеих write-операций (DELETE — мягкое удаление, PATCH — правка
-// importance/tags, задача 10.2); rc/embedder — только для /api/search в
-// режиме semantic (задача 10.1) — остальные роуты целиком read-only поверх s.
-// homeScope — домашний scope инстанса ("project:<name>" из [scope], пусто при
-// выключенной мультипроектности): морда открывает доску на нём по умолчанию.
-func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder memembed.Embedder, homeScope string) http.Handler {
+// для обеих write-операций (DELETE — мягкое удаление, PATCH — правка записи);
+// rc — только для /api/search в режиме semantic (задача 10.1); embedder — там
+// же и в /api/stats (доступность/dim для панели «Сервисы») — остальные роуты
+// целиком read-only поверх s. inst — домашний scope и провайдеры инстанса.
+func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder memembed.Embedder, inst webInstance) http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /api/stats", handleStats(s, homeScope))
+	mux.HandleFunc("GET /api/stats", handleStats(s, embedder, inst))
 	mux.HandleFunc("GET /api/memories", handleListMemories(s))
 	mux.HandleFunc("GET /api/memories/{id}", handleGetMemory(s))
 	mux.HandleFunc("PATCH /api/memories/{id}", handlePatchMemory(s, w))
@@ -301,21 +348,85 @@ type statsResponse struct {
 	ByScope    map[string]int `json:"byScope"`
 	ByKind     map[string]int `json:"byKind"`
 	HomeScope  string         `json:"homeScope,omitempty"` // домашний scope инстанса ([scope] project)
+	Providers  providersDTO   `json:"providers"`           // панель «Сервисы» обзора (Этап 16)
+	Jobs       jobsDTO        `json:"jobs"`
 }
 
-func handleStats(s store.Store, homeScope string) http.HandlerFunc {
+// providersDTO — состояние сервисов инстанса для панели «Сервисы» и плашки
+// деградации до первого поиска (DESIGN.md §14 Этап 16). Доступность
+// эмбеддера статическая — на момент старта `memo web` (как флаг vector в
+// /api/search); падение ollama посреди работы обнаружится при следующем запуске.
+type providersDTO struct {
+	Store    storeProviderDTO    `json:"store"`
+	Embedder embedderProviderDTO `json:"embedder"`
+	Reasoner reasonerProviderDTO `json:"reasoner"`
+}
+
+type storeProviderDTO struct {
+	Driver string `json:"driver"`
+	Target string `json:"target"` // без пароля
+	Schema int    `json:"schema"` // версия схемы драйвера (у sqlite и postgres нумерация своя)
+}
+
+type embedderProviderDTO struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	Dim       int    `json:"dim"`       // 0, когда недоступен (Noop)
+	Available bool   `json:"available"` // Dim() > 0 у собранного экземпляра
+	Pending   int    `json:"pending"`   // живые записи без вектора — очередь на эмбеддинг
+}
+
+type reasonerProviderDTO struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	Available bool   `json:"available"`
+}
+
+// jobsDTO — фоновые джобы: время последнего завершённого прогона планировщика
+// MCP-сервера (Store.LastMaintRun); null — прогонов ещё не было.
+type jobsDTO struct {
+	LastRunAt *int64 `json:"lastRunAt"`
+}
+
+func handleStats(s store.Store, embedder memembed.Embedder, inst webInstance) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		stats, err := s.Stats(r.Context())
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, fmt.Errorf("stats: %w", err))
 			return
 		}
+		schema, err := s.SchemaVersion(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("schema version: %w", err))
+			return
+		}
+		lastRun, err := s.LastMaintRun(r.Context())
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, fmt.Errorf("last maint run: %w", err))
+			return
+		}
+		var jobs jobsDTO
+		if lastRun > 0 {
+			jobs.LastRunAt = &lastRun
+		}
 		writeJSON(w, http.StatusOK, statsResponse{
 			Total:      stats.Total,
 			Superseded: stats.Superseded,
 			ByScope:    stats.ByScope,
 			ByKind:     stats.ByKind,
-			HomeScope:  homeScope,
+			HomeScope:  inst.HomeScope,
+			Providers: providersDTO{
+				Store: storeProviderDTO{Driver: inst.StoreDriver, Target: inst.StoreTarget, Schema: schema},
+				Embedder: embedderProviderDTO{
+					Provider:  inst.EmbedderProvider,
+					Model:     inst.EmbedderModel,
+					Dim:       embedder.Dim(),
+					Available: embedder.Dim() > 0,
+					Pending:   stats.PendingVectors,
+				},
+				Reasoner: reasonerProviderDTO{Provider: inst.ReasonerProvider, Model: inst.ReasonerModel, Available: inst.ReasonerAvailable},
+			},
+			Jobs: jobs,
 		})
 	}
 }
@@ -342,6 +453,13 @@ func handleListMemories(s store.Store) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, fmt.Errorf("параметр offset: %w", err))
 			return
 		}
+		// expiresBefore — unix-время: «Истекает скоро» на обзоре (Этап 16);
+		// 0/пусто — без фильтра, порядок и сортировку задаёт BrowseFilter.
+		expiresBefore, err := parseNonNegativeInt(q.Get("expiresBefore"), 0)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("параметр expiresBefore: %w", err))
+			return
+		}
 
 		f := store.BrowseFilter{
 			Scopes:            nonEmpty(q["scope"]),
@@ -349,6 +467,7 @@ func handleListMemories(s store.Store) http.HandlerFunc {
 			IncludeSuperseded: q.Get("superseded") == "1",
 			Limit:             limit,
 			Offset:            offset,
+			ExpiresBefore:     int64(expiresBefore),
 		}
 
 		items, total, err := s.List(r.Context(), f)
@@ -529,6 +648,8 @@ func handleGetMemory(s store.Store) http.HandlerFunc {
 // перечни значений и правило блокировки проверяет домен, морда только маппит
 // его ошибки в HTTP-статусы (см. patchErrorStatus).
 type patchMemoryRequest struct {
+	Content    *string        `json:"content"` // Этап 16: правка текста из панели записи; пустой → 400 (ErrEmptyContent)
+	Summary    *string        `json:"summary"` // Этап 16: пустая строка — снять заголовок (как в memory_update)
 	Importance *int           `json:"importance"`
 	Tags       *[]string      `json:"tags"`
 	Status     *string        `json:"status"`
@@ -549,7 +670,7 @@ type patchLinkDTO struct {
 
 // patchMemoryAllowedFields — перечень допустимых полей тела PATCH
 // /api/memories/{id} для текста ошибки 400 на лишнее поле.
-const patchMemoryAllowedFields = "importance, tags, status, type, branch, workflow, links, unlinks"
+const patchMemoryAllowedFields = "content, summary, importance, tags, status, type, branch, workflow, links, unlinks"
 
 // patchLinks валидирует и переводит links/unlinks PATCH в write.LinkInput:
 // пустой id или rel вне memory.LinkRels — ошибка (400 у вызывающего).
@@ -601,13 +722,15 @@ func writePatchError(rw http.ResponseWriter, id string, err error) {
 	}
 }
 
-// handlePatchMemory — правка importance/tags живой записи (задача 10.2) и, с
-// Этапа 15 (задача 15.5), рабочих метаданных задачи (status/type/branch/
-// workflow, links/unlinks — переносы карточек доски, блокировка, родитель)
-// через доменный write.Writer.Update (write.UpdateInput 1:1): кламп
+// handlePatchMemory — правка importance/tags живой записи (задача 10.2), с
+// Этапа 15 (задача 15.5) — рабочих метаданных задачи (status/type/branch/
+// workflow, links/unlinks — переносы карточек доски, блокировка, родитель), а
+// с Этапа 16 — content/summary (панель записи, «Изменить»; инвариант §12
+// снят) через доменный write.Writer.Update (write.UpdateInput 1:1): кламп
 // importance в 1..5, updated_at, синхронизация FTS5 (триггеры tags_ai/tags_ad
-// на таблице tags, см. sqlite.go) — вся эта логика уже в домене, здесь только
-// разбор входа и HTTP-ответ, ничего не дублируется. accessed_at/access_count
+// на таблице tags, см. sqlite.go), переэмбеддинг при смене content — вся эта
+// логика уже в домене, здесь только разбор входа и HTTP-ответ, ничего не
+// дублируется. accessed_at/access_count
 // НЕ меняются (Update не вызывает Store.Touch) — правка метаданных не
 // сбрасывает decay-часы записи (DESIGN.md §4: accessed_at — сигнал именно
 // ОБРАЩЕНИЯ к факту при recall, а не редактирования).
@@ -671,6 +794,8 @@ func handlePatchMemory(s store.Store, w *write.Writer) http.HandlerFunc {
 		}
 		in := write.UpdateInput{
 			Id:         id,
+			Content:    body.Content,
+			Summary:    body.Summary,
 			Importance: body.Importance,
 			Status:     body.Status,
 			Type:       body.Type,

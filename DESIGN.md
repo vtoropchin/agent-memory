@@ -183,6 +183,12 @@ CREATE TABLE embed_meta (
     model TEXT NOT NULL,
     dim   INTEGER NOT NULL
 );
+
+-- Отметка последнего прогона планировщика maint (Этап 16): читает `memo web`
+CREATE TABLE maint_meta (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    last_run_at INTEGER NOT NULL
+);
 ```
 
 Ключевые решения:
@@ -302,11 +308,15 @@ type Store interface {
     PutVector(ctx context.Context, id string, vec []float32) error
     ListMissingVectors(ctx context.Context, limit int) ([]Memory, error) // очередь досчёта вектора
     // read/ops-выборки (web-морда §6.x, doctor §9.1)
-    Stats(ctx context.Context) (Stats, error)
-    List(ctx context.Context, f BrowseFilter) (items []Memory, total int, err error)
+    Stats(ctx context.Context) (Stats, error)                                        // + PendingVectors — очередь на эмбеддинг (Этап 16)
+    List(ctx context.Context, f BrowseFilter) (items []Memory, total int, err error) // BrowseFilter.ExpiresBefore — «истекает скоро», expires_at ASC (Этап 16)
     VectorStatus(ctx context.Context, id string) (VectorStatus, error)
     SemanticNeighbors(ctx context.Context, id string, k int) ([]Candidate, error)
     Health(ctx context.Context) (HealthInfo, error) // SQLite: PRAGMA quick_check + journal_mode; PostgreSQL: эквивалентные по смыслу серверные проверки
+    SchemaVersion(ctx context.Context) (int, error) // SQLite: PRAGMA user_version; PostgreSQL: schema_version — подпись для морды (Этап 16)
+    // отметка прогона планировщика (maint_meta, Этап 16): пишет maint.Scheduler, читает `memo web`
+    LastMaintRun(ctx context.Context) (int64, error) // 0 — прогонов не было
+    SetLastMaintRun(ctx context.Context, at int64) error
 }
 
 type Embedder interface {
@@ -577,33 +587,37 @@ DeepSeek chat (OpenAI-совместимый) в роли текстового �
 
 Транспорт: MCP over stdio (`/cmd/memo`).
 
-**Web-морда (read + курирование метаданных).** `memo web` (Этап 6, `cmd/memo`) поднимает
+**Web-морда (read + курирование записей).** `memo web` (Этап 6, `cmd/memo`) поднимает
 отдельный HTTP-режим того же бинаря поверх того же файла БД: JSON API (`/api/stats`,
-`/api/memories`, `/api/memories/{id}`, `/api/search`) на read-методах Store (`List`/`Stats`/`Get`/
-`Neighbors`/`SearchLexical`, а также `VectorStatus`/`SemanticNeighbors` для карточки записи) —
-правок содержимого и создания новых записей из браузера нет. Write-операций две, обе тонкие
+`/api/memories`, `/api/memories/{id}`, `/api/search`, `/api/board`) на read-методах Store
+(`List`/`Stats`/`Get`/`Neighbors`/`SearchLexical`, а также `VectorStatus`/`SemanticNeighbors`
+для карточки записи) — создания новых записей из браузера нет. Write-операций две, обе тонкие
 обёртки над доменным `write.Writer` (та же семантика, что у одноимённых MCP-инструментов):
 `DELETE /api/memories/{id}` — мягкое удаление через `Writer.Forget` (тумстоун
 `Store.Supersede(id, id)`, та же семантика, что у `memory_forget`; hard DELETE не делается,
-история и связи сохраняются) и `PATCH /api/memories/{id}` (задача 10.2) — правка importance/tags
-живой записи через `Writer.Update` (`UpdateInput{Importance, Tags}`): тело `{"importance":5,
-"tags":["a","b"]}`, оба поля опциональны (отсутствующее — не трогать, частичный PATCH), `tags:[]`
-— валидное «снять все теги» (заменяющая семантика Tags, не аддитивная); importance вне 1..5 не
-отклоняется 400, а клампится — симметрично поведению MCP `memory_update` (единый источник
-нормализации `write.ClampImportance` для обоих вызывающих). Content/kind/scope/links в PATCH не
-принимаются — присутствие лишнего поля в теле → 400 с перечнем допустимых полей: это жёсткая
-граница, а не временное ограничение MVP — **содержание фактов из браузера не редактируется
-никогда**, его меняет только агент через MCP (`memory_update`/`memory_save` + supersede); морда
-правит исключительно сигналы ранжирования (importance) и группировки (tags), а с Этапа 15 — ещё
-и **рабочие метаданные задачи** (`status`/`type`/`branch`/`workflow` и связи через `links`/
-`unlinks`, см. §14 Этап 15): kanban-доска без переноса карточек между колонками бессмысленна, а
-стадия задачи — метаданные, не содержание. Граница формулируется явным списком, а не словом
-«метаданные»: из браузера **никогда** не меняются `content`, `kind`, `scope`, `summary`, не
-создаются записи и не делается hard DELETE; PATCH остаётся whitelist-DTO 1:1 в
-`write.UpdateInput` без собственной логики. Тумстоун
-(`SupersededBy != nil`) — 409, правка архивной записи недоступна. Обе write-операции — не bulk,
-только одна запись за запрос. Слушает по умолчанию только `127.0.0.1:7070` (localhost, наружу не
-выставляется). Поиск (`/api/search?q=...&mode=lexical|semantic`, задача 10.1) — `mode=semantic`
+история и связи сохраняются) и `PATCH /api/memories/{id}` — правка живой записи через
+`Writer.Update`, **whitelist-DTO 1:1 в `write.UpdateInput` без собственной логики**: тело
+`{"content","summary","importance","tags","status","type","branch","workflow","links","unlinks"}`,
+все поля опциональны (отсутствующее — не трогать, частичный PATCH). `importance`/`tags` —
+задача 10.2 (`tags:[]` — валидное «снять все теги», заменяющая семантика; importance вне 1..5 не
+отклоняется 400, а клампится — симметрично MCP `memory_update`, единый `write.ClampImportance`);
+рабочие метаданные задачи `status`/`type`/`branch`/`workflow`/`links`/`unlinks` — Этап 15
+(kanban-доска без переноса карточек бессмысленна); `content`/`summary` — Этап 16 (панель
+записи, «Изменить»: пустой `summary` снимает заголовок, пустой `content` → 400
+`ErrEmptyContent`, переэмбеддинг делает `Writer.Update`). До Этапа 16 действовал инвариант
+«содержание из браузера не редактируется никогда» — снят решением пользователя вместе с
+принятием макета (§14 Этап 16). Граница по-прежнему формулируется явным списком: из браузера
+**никогда** не меняются `kind` и `scope`, не создаются записи и не делается hard DELETE;
+лишнее поле в теле → 400 с перечнем допустимых. Тумстоун (`SupersededBy != nil`) — 409, правка
+архивной записи недоступна. Обе write-операции — не bulk, только одна запись за запрос.
+Слушает по умолчанию только `127.0.0.1:7070` (localhost, наружу не выставляется).
+`GET /api/stats` (Этап 16) кроме счётчиков отдаёт `homeScope`, `providers:{store:{driver,
+target, schema}, embedder:{provider, model, dim, available, pending}, reasoner:{provider,
+model, available}}` (имена — из конфига composition root, `available` эмбеддера — `Dim() > 0`
+собранного экземпляра, `pending` — `Stats.PendingVectors`, `schema` — `Store.SchemaVersion`;
+у noop-провайдера модель пустая) и `jobs:{lastRunAt|null}` (`Store.LastMaintRun`, пишет
+планировщик MCP-сервера). `GET /api/memories` принимает `expiresBefore=<unix>` →
+`BrowseFilter.ExpiresBefore` (ближайшие к истечению первыми). Поиск (`/api/search?q=...&mode=lexical|semantic`, задача 10.1) — `mode=semantic`
 (дефолт) гоняет тот же гибридный путь, что и MCP `memory_recall` (`recall.Recaller.Candidates` —
 FTS5 + вектор при доступном Embedder, RRF, бизнес-ранжирование, без сборки Markdown-брифа);
 `mode=lexical` — прежний чистый `Store.SearchLexical`, для сравнения глазами. Ответ несёт `source`
@@ -648,14 +662,18 @@ workflow/родителя/блокеров тем же PATCH; доменной �
 Представление остаётся на фронте: свимлейны — группировка по `parent` из ответа
 (в `board.Build` не входит), «показать ещё» — удвоение `doneLimit`.
 
-**Суженный инвариант оффлайновости (задача 10.1).** До этой задачи морда была строгим
-read-only-читателем: ни одного вызова Embedder/Reasoner. `/api/search?mode=semantic` вводит
-одно точечное исключение — эмбеддинг ПОИСКОВОГО ЗАПРОСА (один вызов ollama/OpenAI на запрос,
-через ту же фабрику `newEmbedder`, что у MCP-сервера/CLI); Reasoner по-прежнему не используется
-(`recall.Recaller` строится с `reason.NewNoop()` — в JSON API нет суммаризации). Инвариант
-теперь: **морда не пишет в БД и не эмбеддит записи** (эмбеддинги содержимого — только на
-write-пути `write.Writer`/фоновом `Reindexer`, §9/§11) — эмбеддинг запроса при поиске допустим,
-и деградирует до чистого FTS5 целиком (без частичного отказа/ошибки), если Embedder недоступен.
+**Суженный инвариант оффлайновости (задачи 10.1, 16.1).** До задачи 10.1 морда была строгим
+read-only-читателем: ни одного вызова Embedder/Reasoner. `/api/search?mode=semantic` ввёл
+эмбеддинг ПОИСКОВОГО ЗАПРОСА (один вызов ollama/OpenAI на запрос, через ту же фабрику
+`newEmbedder`, что у MCP-сервера/CLI); Этап 16 добавил второе место — `Writer` морды собирается
+с тем же реальным Embedder, и правка `content` через PATCH переэмбеддит запись (иначе в БД
+оставался бы устаревший вектор, невидимый очереди досчёта `ListMissingVectors`). Reasoner
+по-прежнему не используется (`recall.Recaller` строится с `reason.NewNoop()` — в JSON API нет
+суммаризации; фабрика `newReasoner` вызывается только ради `available` в `/api/stats`).
+Инвариант теперь: **морда пишет в БД только через доменный `write.Writer` и эмбеддит ровно то
+же, что MCP `memory_update`** — запрос при поиске и запись при правке её текста; при
+недоступном Embedder поиск деградирует до чистого FTS5 целиком, а правка текста, как и в MCP,
+оставляет прежний вектор до следующего полного reindex.
 
 **CLI (одноразовые save/recall).** `memo recall "<запрос>"` и `memo save` (Этап 7,
 задача 7.1, `cmd/memo`) — one-shot подкоманды поверх тех же Writer/Recaller, что и MCP-сервер,
@@ -1117,6 +1135,79 @@ git-ветке и к процессу (`workflow`). Все решения ниж
   автоматический разворот перевёрнутых `part_of` в старых данных, подкоманда
   `memo task` в CLI, история переходов статуса (нет `updated_at` по стадиям —
   только общий `updated_at`).
+
+**Этап 16 — Новая веб-морда по принятому дизайну.**
+Морда переписывается под спецификацию
+[`design/memo-web-redesign.md`](design/memo-web-redesign.md) (макет —
+`design/memo-web-prototype.html`, принят 2026-09-22): три раздела «Обзор ·
+Память · Доска», один глобальный селект scope, панель записи вместо модалки,
+клавиатурная альтернатива DnD, тёмная тема на токенах. Спецификация первична
+по виду и поведению; здесь — только решения, меняющие контракт API и
+инварианты. Порядок: сначала бэкенд (16.1), затем фронт (16.2 каркас → 16.3
+обзор → 16.4 память → 16.5 запись → 16.6 доска) и ручная приёмка (16.7);
+каждая задача — отдельная сессия.
+
+- **Инвариант §12 «content/summary из браузера не редактируются» снят**
+  (решение пользователя вместе с принятием макета: сценарий 3 ТЗ — «поправил
+  текст, не покидая списка»; обходной путь через MCP ради опечатки дороже
+  риска). `PATCH /api/memories/{id}` принимает `content`/`summary` → те же
+  поля `write.UpdateInput` (пустой `summary` — снять, как в `memory_update`;
+  пустой `content` → `ErrEmptyContent` → 400). Whitelist-DTO 1:1 остаётся:
+  `kind`/`scope`, создание записей и hard DELETE из браузера по-прежнему
+  недоступны. Следствие для оффлайн-инварианта: `Writer` в `memo web`
+  собирается с **реальным** Embedder (тем же, что у `/api/search`), а не с
+  Noop — иначе правка текста оставляла бы в БД устаревший вектор, а запись
+  не попадала бы в очередь досчёта (`ListMissingVectors` видит только записи
+  без строки в `memories_vec`). Инвариант теперь: **морда пишет в БД только
+  через доменный `write.Writer`; эмбеддит поисковый запрос и запись при
+  правке её текста** — ровно то, что делает MCP `memory_update`. При
+  недоступном Embedder правка текста, как и в MCP, оставляет прежний вектор
+  до следующего полного reindex — известное ограничение write path, не
+  морды.
+- **`GET /api/stats` → `providers` и `jobs`.** Обзор должен сообщать
+  деградацию до первого поиска (сейчас плашка появляется только по
+  `vector:false` из `/api/search`). Кто что знает: имена провайдеров и
+  драйвера — composition root (`cmd/memo`: конфиг + фабрики
+  `newEmbedder`/`newReasoner`), доступность Embedder — `Dim() > 0` у
+  собранного экземпляра (статическая, на момент старта — как у флага
+  `vector` в `/api/search`; падение ollama посреди работы обнаружится при
+  следующем запуске), доступность Reasoner — `newReasoner` вернул не Noop
+  (клиент DeepSeek при этом не используется: суммаризации в JSON API нет),
+  очередь на эмбеддинг и версия схемы — Store. Ответ:
+  `providers:{store:{driver, target, schema}, embedder:{provider, model, dim,
+  available, pending}, reasoner:{provider, model, available}}`, `target` —
+  `config.StoreConfig.Target()` (без пароля); `jobs:{lastRunAt|null}`.
+- **Три расширения порта Store** (обе реализации, паритет sqlite/postgres):
+  `Stats.PendingVectors` — живые записи без строки в векторном индексе (тот
+  же предикат, что у `ListMissingVectors`; нет индекса — 0), считается в
+  `Stats`, а не отдельным методом; `SchemaVersion(ctx)` — `PRAGMA
+  user_version` в SQLite и `schema_version` в PostgreSQL (у драйверов разная
+  нумерация, §14 Этап 15 — это подпись, не признак совместимости);
+  `LastMaintRun`/`SetLastMaintRun` — время последнего завершённого прогона
+  планировщика в однострочной таблице `maint_meta` (по образцу `embed_meta`,
+  чистый `CREATE TABLE IF NOT EXISTS` в базовой схеме обоих драйверов, без
+  шага миграции — data-шагов нет). Пишет её `maint.Scheduler` в конце
+  `RunOnce` через свой узкий порт (интерфейс объявляет потребитель); читает
+  `memo web` — планировщик живёт в процессе MCP-сервера, морда его не
+  запускает, поэтому без персистентности «последний прогон» не узнать.
+  Записывается один момент на весь прогон, не по джобам: обзору нужна одна
+  строка «фоновые джобы — последний прогон N часов назад».
+- **`expiresBefore=<unix>` в `GET /api/memories`** → `BrowseFilter.ExpiresBefore`
+  (`expires_at IS NOT NULL AND expires_at > 0 AND expires_at < ?`); при
+  заданном фильтре сортировка — `expires_at ASC` (ближайшие первыми), иначе
+  прежняя `created_at DESC`: секция «Истекает скоро» иначе усекалась бы по
+  давности создания, а не по сроку. Отдельного `ListExpired` морда не
+  использует — у него нет scope.
+- **Фронт: стек прежний** (vanilla JS + Tailwind, бандл в бинаре, hash-роутер);
+  `index.html`/`app.js` переписываются, не дописываются; доменной логики на
+  фронте нет (правило блокировки, направление `part_of`, усечение `done` —
+  бэкенд). Токены `:root` макета → `tailwind.input.css`; тексты — §5
+  спецификации.
+- **Отложено осознанно:** динамическая проверка доступности Embedder
+  (health-пинг ollama по запросу `/api/stats`) — статической достаточно,
+  пересмотр, если деградация посреди сеанса станет частой; время последнего
+  прогона по каждому джобу отдельно; тесты фронта (проверка ручная, §9
+  спецификации).
 
 ---
 

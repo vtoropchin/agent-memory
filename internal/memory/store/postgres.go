@@ -250,6 +250,13 @@ var baseSchemaStatements = []string{
 		model text NOT NULL,
 		dim   integer NOT NULL
 	)`,
+	// Отметка последнего прогона планировщика maintenance-джобов (DESIGN.md §14
+	// Этап 16): одна строка, как embed_meta; чистый DDL без data-шагов — в базовой
+	// схеме, а не в pgMigrations (см. §14 Этап 15 про то, что туда попадает).
+	`CREATE TABLE IF NOT EXISTS maint_meta (
+		id          smallint PRIMARY KEY CHECK (id = 1),
+		last_run_at bigint NOT NULL
+	)`,
 }
 
 // searchVecTriggerStatements синхронизирует memories.search_vec с content/summary
@@ -596,6 +603,42 @@ func applySearchVecTriggers(ctx context.Context, conn *sql.Conn) error {
 //     текущий вызывающий код (см. grep JournalMode) это поле для postgres не
 //     показывает, но комментарий у HealthInfo обещает "текущий режим журнала" — здесь
 //     это её PostgreSQL-аналог, а не пустая строка.
+//
+// SchemaVersion читает schema_version.version — ту величину, которую migrate
+// доводит до pgSchemaVersion при Open; 0, если строки ещё нет (DESIGN.md §14
+// Этап 16, подпись хранилища в web-морде).
+func (s *pgStore) SchemaVersion(ctx context.Context) (int, error) {
+	var v int
+	err := s.db.QueryRowContext(ctx, `SELECT version FROM schema_version WHERE id = 1`).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("чтение schema_version: %w", err)
+	}
+	return v, nil
+}
+
+// LastMaintRun читает отметку последнего прогона планировщика (maint_meta);
+// 0 — прогонов ещё не было. Паритет с sqliteStore.LastMaintRun — сам запрос
+// общий, lastMaintRunFromDB (common.go).
+func (s *pgStore) LastMaintRun(ctx context.Context) (int64, error) {
+	return lastMaintRunFromDB(ctx, s.db)
+}
+
+// SetLastMaintRun перезаписывает единственную строку maint_meta (upsert по id=1).
+// Паритет с sqliteStore.SetLastMaintRun.
+func (s *pgStore) SetLastMaintRun(ctx context.Context, at int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO maint_meta (id, last_run_at) VALUES (1, $1)
+		ON CONFLICT (id) DO UPDATE SET last_run_at = EXCLUDED.last_run_at
+	`, at)
+	if err != nil {
+		return fmt.Errorf("обновление maint_meta: %w", err)
+	}
+	return nil
+}
+
 func (s *pgStore) Health(ctx context.Context) (HealthInfo, error) {
 	var probe int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1`).Scan(&probe); err != nil {

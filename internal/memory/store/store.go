@@ -22,6 +22,12 @@ type BrowseFilter struct {
 	IncludeSuperseded bool     // false (дефолт) — только живые (superseded_by IS NULL)
 	Limit             int      // размер страницы; <=0 → дефолт (listDefaultLimit)
 	Offset            int      // смещение для пагинации; <0 трактовать как 0
+	// ExpiresBefore — только записи с явным TTL, истекающим до этого момента
+	// (0 < expires_at < ExpiresBefore); 0 — без фильтра. При заданном фильтре
+	// порядок выдачи — expires_at ASC (ближайшие первыми), а не created_at DESC:
+	// секция «Истекает скоро» новой web-морды (DESIGN.md §14 Этап 16) иначе
+	// усекалась бы по давности создания, а не по сроку.
+	ExpiresBefore int64
 }
 
 // Stats — сводные счётчики памяти для дашборда web-морды (DESIGN.md §12).
@@ -30,6 +36,11 @@ type Stats struct {
 	Superseded int            // архивных (superseded_by IS NOT NULL)
 	ByScope    map[string]int // живые записи по scope
 	ByKind     map[string]int // живые записи по kind
+	// PendingVectors — живые записи без строки в векторном индексе: очередь на
+	// досчёт вектора (тот же предикат, что у ListMissingVectors). Нет индекса
+	// (Embedder всегда был noop) — 0 без ошибки. Панель «Сервисы» новой
+	// web-морды (DESIGN.md §14 Этап 16).
+	PendingVectors int
 }
 
 // VectorStatus — состояние векторного слоя для одной записи (для карточки
@@ -156,4 +167,20 @@ type Store interface {
 	// journal_mode. Не изменяет данные, не выполняет полный integrity_check
 	// (дорогой на больших БД) — только быструю проверку.
 	Health(ctx context.Context) (HealthInfo, error)
+	// SchemaVersion возвращает текущую версию схемы хранилища: SQLite — PRAGMA
+	// user_version, PostgreSQL — таблица schema_version (0, если строки нет).
+	// Нумерация у драйверов разная (см. sqlite.go schemaVersion и postgres.go
+	// pgSchemaVersion) — это подпись для панели «Сервисы» web-морды (DESIGN.md
+	// §14 Этап 16), а не признак совместимости между бэкендами.
+	SchemaVersion(ctx context.Context) (int, error)
+	// LastMaintRun возвращает unix-время последнего завершённого прогона
+	// планировщика maintenance-джобов (maint.Scheduler.RunOnce); 0 — прогонов
+	// ещё не было. Хранится в однострочной таблице maint_meta (по образцу
+	// embed_meta): планировщик живёт в процессе MCP-сервера, а читает отметку
+	// `memo web` — без персистентности «последний прогон» не узнать (DESIGN.md
+	// §14 Этап 16).
+	LastMaintRun(ctx context.Context) (int64, error)
+	// SetLastMaintRun записывает время завершения прогона планировщика,
+	// перезаписывая предыдущее (одна отметка на весь прогон, не по джобам).
+	SetLastMaintRun(ctx context.Context, at int64) error
 }

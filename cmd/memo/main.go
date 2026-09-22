@@ -212,6 +212,7 @@ func run(args []string) error {
 		maint.NewDedupSweeper(s),
 		maint.NewConsolidator(s, reasoner, w),
 		maint.NewReindexer(s, embedder),
+		s, // отметка последнего прогона — читает `memo web` (панель «Сервисы»)
 		decayInterval, consolidateAfter,
 	)
 	go scheduler.Run(ctx)
@@ -277,6 +278,28 @@ func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 	default:
 		return nil, fmt.Errorf("неизвестный reasoner.provider %q", cfg.Provider)
 	}
+}
+
+// reasonerAvailable отвечает, включён ли LLM-слой у экземпляра, собранного
+// newReasoner: фабрика деградирует до Noop (нет ключа/модели/provider), и
+// это решение восстанавливается здесь же, рядом с ней, а не в потребителе —
+// правило «Noop = недоступен» существует в одном месте (панель «Сервисы»
+// `memo web`, DESIGN.md §14 Этап 16). Расширять порт Reasoner ради UI не нужно.
+func reasonerAvailable(r reason.Reasoner) bool {
+	_, noop := r.(*reason.Noop)
+	return !noop
+}
+
+// providerAndModel нормализует пару provider/model из конфига для показа в
+// `memo web`: пустой provider — это noop (та же трактовка, что у newEmbedder/
+// newReasoner), а у noop нет модели, даже если config.Load подставил дефолт
+// (bge-m3/deepseek-chat) — иначе панель показала бы «noop, bge-m3». Живёт
+// рядом с фабриками, чтобы смена их дефолта не разошлась с панелью.
+func providerAndModel(provider, model string) (string, string) {
+	if provider == "" || provider == "noop" {
+		return "noop", ""
+	}
+	return provider, model
 }
 
 // newEmbedder создаёт Embedder по конфигу (симметрично newReasoner). "" и "noop"

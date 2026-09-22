@@ -175,6 +175,28 @@ review → testing → release → done`, тип `epic|story|task`, иерарх
 | 15.5 Вариант использования «доска» + JSON API морды | [15.5-board-usecase-api.md](15.5-board-usecase-api.md) | ✅ выполнена (2026-09-20): `Store.ListTasks`, пакет `board` (`Build`, `Describe`; 0 в `TestDependencyRule`), `GET /api/board`, PATCH со status/type/branch/workflow/links/unlinks и 409 на блокировку, карточка через `board.Describe` (долг дубля mcp/web закрыт); build/vet/тесты зелёные, curl к живому `memo web` не выполнялся |
 | 15.6 Фронтенд доски: колонки, drag&drop, фильтры, карточка задачи | [15.6-board-frontend.md](15.6-board-frontend.md) | ✅ выполнена (2026-09-20): `#/board` — hash-роутер, фильтры в URL-хэше, 7 колонок/свимлейны, нативный DnD с откатом и тостом блокеров, модалка задачи (стадия/тип/ветка/workflow/родитель/блокеры), `tailwind.css` пересобран; build/тесты `cmd/memo` зелёные, `node --check` чист; ручная проверка в браузере — ожидает |
 
+## Этап 16 — Новая веб-морда по принятому дизайну
+
+Морда переписывается под `design/memo-web-redesign.md` (макет
+`design/memo-web-prototype.html`, принят 2026-09-22): три раздела «Обзор ·
+Память · Доска», один глобальный scope, панель записи вместо модалки,
+клавиатурная альтернатива DnD, тёмная тема на токенах. Решения по контракту API
+и инвариантам — DESIGN.md §14 Этап 16 (инвариант «content/summary из браузера
+не редактируются» снят; `providers`/`jobs` в `/api/stats`; `expiresBefore`).
+Порядок: 16.1 — бэкенд, первой; 16.2 — каркас фронта; 16.3–16.6 — экраны
+(16.5 после 16.4, 16.6 после 16.5); 16.7 — ручная приёмка на обеих базах.
+Каждая задача — отдельная сессия.
+
+| Задача | Файл | Статус |
+|--------|------|--------|
+| 16.1 API: `providers`/`jobs` в stats, `expiresBefore`, PATCH `content`/`summary`, `maint_meta` | [16.1-web-api-stats-providers.md](16.1-web-api-stats-providers.md) | ✅ выполнена (2026-09-22): порт Store (`PendingVectors`, `ExpiresBefore`, `SchemaVersion`, `maint_meta`), `maint.RunLog`, `/api/stats` providers/jobs, `expiresBefore`, PATCH content/summary; build/test зелёные, PG-паритет на живом сервере, e2e curl к `bin/memo web` на SQLite и PG |
+| 16.2 Фронт: каркас, токены, роутер, панель записи, тосты | [16.2-web-shell-tokens.md](16.2-web-shell-tokens.md) | ⬜ ожидает |
+| 16.3 Фронт: экран «Обзор» | [16.3-web-overview.md](16.3-web-overview.md) | ⬜ ожидает |
+| 16.4 Фронт: экран «Память» (список, поиск, фильтры, состояния) | [16.4-web-memory-list.md](16.4-web-memory-list.md) | ⬜ ожидает |
+| 16.5 Фронт: панель записи (просмотр, связи, правка, «Забыть») | [16.5-web-record-panel.md](16.5-web-record-panel.md) | ⬜ ожидает |
+| 16.6 Фронт: экран «Доска» и панель задачи | [16.6-web-board-task.md](16.6-web-board-task.md) | ⬜ ожидает |
+| 16.7 Ручная приёмка: сценарии §9 на PostgreSQL и SQLite, темы, клавиатура, контраст | [16.7-web-acceptance.md](16.7-web-acceptance.md) | ⬜ ожидает |
+
 ### Отклонённые идеи (чтобы не возвращаться)
 
 - **Автоклассификация `kind`/связей через LLM** — против DESIGN §7 (классификацию

@@ -25,9 +25,50 @@ func newTestScheduler(s store.Store, r reason.Reasoner, e embed.Embedder) *Sched
 		NewDedupSweeper(s),
 		NewConsolidator(s, r, w),
 		NewReindexer(s, e),
+		s,         // отметка последнего прогона — в тот же Store
 		time.Hour, // interval — RunOnce его не использует напрямую
 		time.Hour, // consolidateAfter
 	)
+}
+
+// TestSchedulerRunOnceRecordsLastRun проверяет, что завершённый прогон
+// оставляет в Store отметку времени (LastMaintRun) — её читает `memo web` для
+// строки «фоновые джобы» (DESIGN.md §14 Этап 16). Время — через поле now, не
+// time.Now().
+func TestSchedulerRunOnceRecordsLastRun(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	sched := newTestScheduler(s, &echoReasoner{}, embed.NewNoop())
+	sched.now = func() int64 { return 424242 }
+
+	sched.RunOnce(ctx)
+
+	at, err := s.LastMaintRun(ctx)
+	if err != nil {
+		t.Fatalf("LastMaintRun: %v", err)
+	}
+	if at != 424242 {
+		t.Fatalf("LastMaintRun = %d, want 424242 (отметка прогона)", at)
+	}
+}
+
+// failingRunLog — порт отметки прогона, который всегда отказывает: сбой записи
+// отметки не должен ронять RunOnce (DESIGN.md §15).
+type failingRunLog struct{}
+
+func (failingRunLog) SetLastMaintRun(context.Context, int64) error {
+	return errors.New("искусственная ошибка записи отметки")
+}
+
+func TestSchedulerRunOnceRunLogErrorDoesNotPanic(t *testing.T) {
+	s := newTestStore(t)
+	w := write.New(s, embed.NewNoop())
+	sched := NewScheduler(
+		NewExpirer(s), NewDecayer(s, w), NewDedupSweeper(s),
+		NewConsolidator(s, &echoReasoner{}, w), NewReindexer(s, embed.NewNoop()),
+		failingRunLog{}, time.Hour, time.Hour,
+	)
+	sched.RunOnce(context.Background()) // не паникует, ошибка — в лог
 }
 
 // TestSchedulerRunOnceCallsAllJobs проверяет, что один прогон RunOnce реально

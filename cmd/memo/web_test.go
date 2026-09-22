@@ -57,7 +57,7 @@ func newTestWebHandler(s store.Store) http.Handler {
 func newTestWebHandlerWithEmbedder(s store.Store, embedder embed.Embedder) http.Handler {
 	w := write.New(s, embed.NewNoop())
 	rc := recall.New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: testRecallWeights()}, reason.NewNoop(), embedder)
-	return newWebHandler(s, w, rc, embedder, "")
+	return newWebHandler(s, w, rc, embedder, webInstance{})
 }
 
 // fakeEmbedder — тестовая реализация embed.Embedder (тот же паттерн, что в
@@ -89,7 +89,7 @@ func TestHandleStats_HomeScope(t *testing.T) {
 	s := newTestWebStore(t)
 	w := write.New(s, embed.NewNoop())
 	rc := recall.New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: testRecallWeights()}, reason.NewNoop(), embed.NewNoop())
-	srv := httptest.NewServer(newWebHandler(s, w, rc, embed.NewNoop(), "project:home"))
+	srv := httptest.NewServer(newWebHandler(s, w, rc, embed.NewNoop(), webInstance{HomeScope: "project:home"}))
 	defer srv.Close()
 	var got statsResponse
 	getJSON(t, srv.URL+"/api/stats", &got)
@@ -558,9 +558,11 @@ func TestHandlePatchMemory_UnknownFieldBadRequest(t *testing.T) {
 	srv := httptest.NewServer(newTestWebHandler(s))
 	defer srv.Close()
 
-	resp := patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"content":"новое содержание"}`, nil)
+	// kind (как и scope) из браузера не меняется — жёсткая граница §12; content
+	// с Этапа 16 допустим, поэтому лишним полем здесь служит kind.
+	resp := patchJSON(t, srv.URL+"/api/memories/"+m.Id, `{"kind":"episodic"}`, nil)
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("статус = %d, хочу 400 (content не допускается в PATCH)", resp.StatusCode)
+		t.Errorf("статус = %d, хочу 400 (kind не допускается в PATCH)", resp.StatusCode)
 	}
 }
 

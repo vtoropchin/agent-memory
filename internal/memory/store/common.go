@@ -75,6 +75,43 @@ func statsFromDB(ctx context.Context, db *sql.DB) (Stats, error) {
 	return stats, nil
 }
 
+// pendingVectorsFromDB считает живые записи без строки в векторном индексе
+// vecTable — очередь на досчёт вектора (тот же предикат, что у
+// ListMissingVectors обоих драйверов). Вызывающий сам проверяет, что таблица
+// существует (hasVecTable): имя таблицы у драйверов разное (в PostgreSQL —
+// схема-квалифицированное, см. pgStore.vecTable), поэтому передаётся параметром;
+// подставляется из кода, не из пользовательского ввода.
+func pendingVectorsFromDB(ctx context.Context, db *sql.DB, vecTable string) (int, error) {
+	var n int
+	query := `
+		SELECT COUNT(*)
+		FROM memories m
+		LEFT JOIN ` + vecTable + ` v ON v.memory_id = m.id
+		WHERE m.superseded_by IS NULL AND v.memory_id IS NULL
+	`
+	if err := db.QueryRowContext(ctx, query).Scan(&n); err != nil {
+		return 0, fmt.Errorf("подсчёт очереди на эмбеддинг: %w", err)
+	}
+	return n, nil
+}
+
+// lastMaintRunFromDB читает отметку последнего прогона планировщика из maint_meta;
+// нет строки — 0 без ошибки (прогонов ещё не было). Текст запроса общий для
+// sqliteStore.LastMaintRun и pgStore.LastMaintRun (параметров нет — плейсхолдеры
+// драйверов не расходятся); запись — в каждом драйвере своя (upsert с
+// плейсхолдером).
+func lastMaintRunFromDB(ctx context.Context, db *sql.DB) (int64, error) {
+	var at int64
+	err := db.QueryRowContext(ctx, `SELECT last_run_at FROM maint_meta WHERE id = 1`).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("чтение maint_meta: %w", err)
+	}
+	return at, nil
+}
+
 // embedMetaFromDB возвращает модель и размерность вектора, зафиксированные последним
 // reindex. Если reindex ещё не запускался, возвращает ("", 0, nil). Текст запроса
 // побайтово совпадает у sqliteStore.EmbedMeta и pgStore.EmbedMeta.
