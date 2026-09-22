@@ -579,16 +579,34 @@ const screens = {
   board: { render: function () { placeholder("board", "16.6"); } },
 };
 
+let lastScreenKey = "";  // раздел+scope+фильтры последней отрисовки: смена одного id панели экран не перерисовывает
+
 function renderView() {
   Object.keys(screens).forEach(function (v) { $("#screen-" + v).hidden = v !== state.view; });
   // доске нужна ширина под 7 колонок; остальные экраны — не шире 1400 px
   $("#main").classList.toggle("wide", state.view === "board");
+  const key = state.view + "|" + state.scope + "|" + state.params.toString();
+  if (key === lastScreenKey) {
+    // открытие/закрытие панели: список остаётся (и элемент, к которому вернётся фокус, тоже)
+    $$(".row[data-open]").forEach(function (r) { r.setAttribute("aria-selected", String(r.getAttribute("data-open") === state.id)); });
+    return;
+  }
+  lastScreenKey = key;
   screens[state.view].render();
 }
 
-// --- панель записи (drawer, §2.3) ---
+// refreshScreen — перечитать экран под панелью после PATCH/DELETE (данные изменились).
+function refreshScreen() {
+  lastScreenKey = "";
+  renderView();
+}
 
-let drawerId = "";      // id записи, которая сейчас отрисована в панели
+// --- панель записи (drawer, §2.3, задача 16.5) ---
+
+// drawer — состояние открытой панели: карточка /api/memories/{id}, режим
+// правки и инлайн-подтверждение «Забыть» (в хэш не пишутся — это не адрес).
+const drawer = { id: "", card: null, edit: false, confirm: false };
+let drawerFocus = "";   // селектор элемента, которому вернуть фокус после перерисовки тела
 
 function openRecord(id) { navigate({ id: id }); }
 function closeRecord() { navigate({ id: "" }); }
@@ -605,8 +623,8 @@ function setBackgroundInert(on) {
 function renderDrawer() {
   const root = $("#drawer-root");
   if (!state.id) {
-    if (!drawerId && !root.firstChild) return;
-    drawerId = "";
+    if (!drawer.id && !root.firstChild) return;
+    drawer.id = ""; drawer.card = null; drawer.edit = false; drawer.confirm = false;
     root.innerHTML = "";
     setBackgroundInert(false);
     // возврат фокуса: на открывший элемент, если он ещё в документе, иначе на main
@@ -615,48 +633,241 @@ function renderDrawer() {
     back.focus();
     return;
   }
-  if (state.id === drawerId) return;
-  drawerId = state.id;
+  if (state.id === drawer.id) return;
+  drawer.id = state.id; drawer.card = null; drawer.edit = false; drawer.confirm = false;
   setBackgroundInert(true);
   root.innerHTML =
     '<div class="drawer-backdrop" data-close></div>' +
     '<aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="rec-title" tabindex="-1">' +
     '<header><span id="rec-kind"></span><div class="grow"><span class="muted" id="rec-scope"></span></div>' +
+    '<span id="rec-extra"></span>' +
     '<button type="button" class="btn quiet sm" data-close aria-label="Закрыть панель">Закрыть ✕</button></header>' +
-    '<div class="content"><h2 id="rec-title" class="summary">Запись</h2><div id="rec-body"></div></div>' +
+    '<div class="content" id="rec-content"><h2 id="rec-title" class="summary">Запись</h2><p class="muted">Загрузка…</p></div>' +
+    '<div class="actions" id="rec-actions" hidden></div>' +
     "</aside>";
   $(".drawer", root).focus();
   loadRecord(state.id);
 }
 
-// loadRecord — GET /api/memories/{id} (карточка: {memory, neighbors, embedding,
-// semanticNeighbors, parent, children, …}) → шапка (вид, scope) и заглушка тела
-// (summary + текст серифом); полное тело панели — задача 16.5.
+// loadRecord — GET /api/memories/{id} → drawRecord. Ответ на уже закрытую или
+// сменившуюся панель отбрасывается.
 async function loadRecord(id) {
-  const body = $("#rec-body");
-  if (!body) return;
-  body.innerHTML = '<p class="muted">Загрузка…</p>';
-  let m;
+  let card;
   try {
-    m = (await api("/api/memories/" + encodeURIComponent(id))).memory;
+    card = await api("/api/memories/" + encodeURIComponent(id));
   } catch (err) {
-    if (drawerId !== id || !$("#rec-body")) return;
-    body.innerHTML = "";
+    if (drawer.id !== id || !$("#rec-content")) return;
+    const body = $("#rec-content");
+    body.innerHTML = '<h2 id="rec-title" class="summary">Запись</h2>';
     if (err.status === 404) {
-      body.innerHTML = '<div class="notice warn">Записи <code>' + esc(id) + "</code> нет — удалена или id указан с ошибкой.</div>";
+      body.innerHTML += '<div class="notice warn">Записи <code>' + esc(id) + "</code> нет — удалена или id указан с ошибкой.</div>";
     } else {
-      body.appendChild(apiErrorNotice("/api/memories/" + id, err, function () { loadRecord(id); }));
+      body.appendChild(apiErrorNotice(err.path, err, function () { loadRecord(id); }));
     }
     return;
   }
-  if (drawerId !== id || !$("#rec-body")) return;
+  if (drawer.id !== id || !$("#rec-content")) return;
+  drawer.card = card;
+  drawRecord();
+}
+
+// drawRecord — шапка, тело и футер панели по карточке; после перерисовки —
+// фокус на элемент из drawerFocus (тег-поле, сегмент важности, кнопка).
+function drawRecord() {
+  const card = drawer.card, m = card.memory;
+  const isTask = m.kind === "task";
+  const archived = !!m.supersededBy;
   $("#rec-kind").innerHTML = kindTag(m.kind);
   $("#rec-scope").textContent = m.scope;
-  $("#rec-title").textContent = m.summary || m.content.slice(0, 120);
-  body.innerHTML =
-    (m.summary ? '<div class="prose">' + esc(m.content) + "</div>" : "") +
-    '<p class="muted" style="margin-top:var(--s4)">создана ' + esc(rel(m.createdAt)) +
-    " · просмотр, связи и правка — задача 16.5.</p>";
+  $("#rec-extra").innerHTML = isTask ? '<button type="button" class="btn quiet sm" data-goto="board">К доске</button>' : "";
+  $(".drawer").classList.toggle("editing", drawer.edit);
+  $("#rec-content").innerHTML = isTask ? taskBody(card) : memoryBody(card);
+  const actions = $("#rec-actions");
+  actions.hidden = archived;
+  actions.innerHTML = archived ? "" : (drawer.edit
+    ? '<button type="button" class="btn primary" data-save>Сохранить</button><button type="button" class="btn" data-cancel>Отменить</button>'
+    : '<button type="button" class="btn" data-edit>Изменить</button><span class="grow"></span><button type="button" class="btn danger" data-forget-ask>Забыть…</button>');
+  if (drawerFocus) {
+    const f = $(drawerFocus, $("#drawer-root"));
+    drawerFocus = "";
+    if (f) f.focus();
+  }
+}
+
+// incomingLinks — входящие связи из neighbors: у кого dst == id (у DTO записи
+// только исходящие links).
+function incomingLinks(card) {
+  const id = card.memory.id, out = [];
+  (card.neighbors || []).forEach(function (n) {
+    (n.links || []).forEach(function (l) { if (l.dst === id) out.push({ to: n, rel: l.rel, dir: "in" }); });
+  });
+  return out;
+}
+
+// outgoingLinks — исходящие links записи; цель берётся из neighbors (тумстоуны
+// в neighbors не приходят — тогда показываем только id).
+function outgoingLinks(card) {
+  const byId = {};
+  (card.neighbors || []).forEach(function (n) { byId[n.id] = n; });
+  return (card.memory.links || []).map(function (l) { return { to: byId[l.dst] || { id: l.dst }, rel: l.rel, dir: "out" }; });
+}
+
+function linkRow(x, action) {
+  const t = x.to, lab = x.dir === "out" ? REL_LABEL[x.rel] : REL_IN_LABEL[x.rel];
+  return '<li><span class="rel ' + x.dir + '">' + esc(lab || x.rel) + '</span><span class="to">' + (t.kind ? kindTag(t.kind) : "") +
+    '<button type="button" data-open="' + esc(t.id) + '">' + (t.kind ? esc(title(t)) : "<code>" + esc(t.id) + "</code>") + "</button>" +
+    (t.kind === "task" && t.status ? " " + statusTag(t.status) : "") + "</span>" + (action || "<span></span>") + "</li>";
+}
+
+function tagsEditor(m) {
+  if (m.supersededBy) return '<div class="tags-edit">' + (m.tags && m.tags.length ? tagChips(m.tags) : '<span class="muted">тегов нет</span>') + "</div>";
+  return '<div class="tags-edit">' + (m.tags || []).map(function (t) {
+    return '<span class="chip tag">' + esc(t) + '<button type="button" data-untag="' + esc(t) + '" aria-label="Убрать тег ' + esc(t) + '">×</button></span>';
+  }).join("") + '<input type="text" placeholder="+ тег…" autocomplete="off" spellcheck="false" aria-label="Новый тег" data-newtag></div>';
+}
+
+// forgetConfirm — инлайн-подтверждение (§5): число связей, для задачи с детьми — предупреждение.
+function forgetConfirm(card) {
+  const m = card.memory;
+  const n = (m.links || []).length + incomingLinks(card).length;
+  const kids = (card.children || []).length;
+  return '<div class="confirm" role="alertdialog" aria-labelledby="fc-h"><h3 id="fc-h">Забыть эту ' + (m.kind === "task" ? "задачу" : "запись") + "?</h3>" +
+    "<p>Она выпадет из recall агента и уйдёт в архив; текст и " + (n ? n + " " + plural(n, "связь", "связи", "связей") : "связи") + " сохранятся, восстановить можно через <code>memory_update</code>. " +
+    (kids ? "<strong>" + kids + " " + plural(kids, "дочерняя задача останется", "дочерние задачи останутся", "дочерних задач останутся") + " без родителя.</strong>" : "") + "</p>" +
+    '<div class="btns"><button type="button" class="btn danger solid" data-forget>Забыть</button><button type="button" class="btn" data-forget-cancel>Оставить</button></div></div>';
+}
+
+// serviceMeta — «Служебное»: id, полные даты, чтения, источник, вектор.
+function serviceMeta(card) {
+  const m = card.memory, e = card.embedding || {};
+  return '<div class="section"><h3>Служебное</h3><dl class="meta-grid">' +
+    "<dt>id</dt><dd><code>" + esc(m.id) + "</code></dd><dt>scope</dt><dd>" + esc(m.scope) + "</dd>" +
+    "<dt>создана</dt><dd>" + esc(fmtDate(m.createdAt)) + "</dd><dt>изменена</dt><dd>" + esc(fmtDate(m.updatedAt)) + "</dd>" +
+    "<dt>читалась</dt><dd>" + (m.accessedAt ? esc(fmtDate(m.accessedAt)) + " · " + m.accessCount + " " + plural(m.accessCount, "раз", "раза", "раз") : "ещё ни разу") + "</dd>" +
+    "<dt>источник</dt><dd>" + (m.source ? "<code>" + esc(m.source) + "</code>" : "—") + "</dd>" +
+    (m.expiresAt ? "<dt>истекает</dt><dd>" + esc(fmtDate(m.expiresAt)) + "</dd>" : "") +
+    "<dt>вектор</dt><dd>" + (e.embedded ? esc(e.model || "есть") + (e.dim ? " · " + e.dim : "") : "в очереди на эмбеддинг") + "</dd></dl></div>";
+}
+
+// memoryBody — тело панели для факта/события/процедуры/долга (§2.3).
+function memoryBody(card) {
+  const m = card.memory, archived = !!m.supersededBy, e = card.embedding || {};
+  const links = outgoingLinks(card).concat(incomingLinks(card));
+  const sem = card.semanticNeighbors || [];
+  let html = "";
+  if (archived) {
+    const self = m.supersededBy === m.id;
+    html += '<div class="notice" style="margin-bottom:var(--s4)"><div class="grow">В архиве с ' + esc(rel(m.updatedAt)) +
+      (self ? " — забыта" : ' — заменена записью <button type="button" class="btn quiet sm" data-open="' + esc(m.supersededBy) + '"><code>' + esc(m.supersededBy) + "</code></button>") +
+      ". Архивные записи не редактируются.</div></div>";
+  }
+  if (m.expiresAt && !archived) {
+    html += '<div class="notice warn" style="margin-bottom:var(--s4)"><div class="grow">Истекает ' + esc(rel(m.expiresAt)) + " (" + esc(fmtDate(m.expiresAt).slice(0, 10)) + ") — после этого выпадет из recall и уйдёт в архив.</div></div>";
+  }
+  html += '<h2 id="rec-title" class="sr-only">Запись: ' + esc(title(m)) + "</h2>" +
+    '<div class="hgroup">' + imp(m.importance, !archived && !drawer.edit) + "<span>" + m.importance + " из 5</span>" +
+    '<span class="muted">·</span><span class="muted">создана ' + esc(rel(m.createdAt)) + "</span></div>";
+  if (drawer.edit) {
+    html += '<div class="field"><label for="ed-summary">Кратко (summary)</label><input type="text" id="ed-summary" autocomplete="off" value="' + esc(m.summary || "") + '"></div>' +
+      '<div class="field"><label for="ed-content">Полный текст</label><textarea id="ed-content" rows="10">' + esc(m.content) + "</textarea></div>";
+  } else {
+    html += (m.summary ? '<p class="summary">' + esc(m.summary) + "</p>" : "") + '<div class="prose">' + esc(m.content) + "</div>";
+  }
+  html += '<div class="section"><h3>Теги</h3>' + tagsEditor(m) + "</div>" +
+    '<div class="section"><h3>Связи <span class="muted">' + links.length + "</span></h3>" +
+    (links.length ? '<ul class="links">' + links.map(function (x) { return linkRow(x); }).join("") + "</ul>"
+      : '<p class="muted small">Связей нет. Их добавляет агент через <code>memory_update</code>, здесь — только просмотр.</p>') + "</div>" +
+    '<div class="section"><h3>Похожие по вектору <span class="muted">' + (e.embedded ? "cosine" + (e.model ? ", " + esc(e.model) : "") : "нет данных — эмбеддер недоступен или запись в очереди") + "</span></h3>" +
+    (!e.embedded ? "" : sem.length ? '<ul class="links">' + sem.map(function (n) {
+      return '<li><span class="rel">' + Number(n.distance).toFixed(2) + '</span><span class="to">' + kindTag(n.kind) + '<button type="button" data-open="' + esc(n.id) + '">' + esc(title(n)) + "</button></span><span></span></li>";
+    }).join("") + "</ul>" : '<p class="muted small">Близких по смыслу записей нет.</p>') + "</div>" +
+    serviceMeta(card) + (drawer.confirm ? forgetConfirm(card) : "");
+  return html;
+}
+
+// taskBody — тело панели задачи (§2.5) — задача 16.6; до неё — общее тело.
+function taskBody(card) { return memoryBody(card); }
+
+// patchRecord — PATCH /api/memories/{id}; успех → перечитать карточку, экран под
+// панелью и тост; ошибка → тост с текстом сервера (§5), состояние не меняется.
+async function patchRecord(fields, okText, focusSel) {
+  const id = drawer.id;
+  try {
+    await api("/api/memories/" + encodeURIComponent(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields) });
+  } catch (err) {
+    showToast(patchErrorText(err, drawer.card && drawer.card.memory));
+    return false;
+  }
+  if (okText) showToast(okText);
+  if (drawer.id === id) { drawerFocus = focusSel || ""; await loadRecord(id); }
+  refreshScreen();
+  return true;
+}
+
+// patchErrorText — тексты ошибок PATCH (§5): 409 с блокерами, прочее — сообщение сервера.
+function patchErrorText(err, m) {
+  if (err.status === 0) return "Сервер памяти не отвечает — изменение не сохранено.";
+  if (err.status === 409 && err.body && err.body.blockers && err.body.blockers.length) {
+    const t = m ? (m.summary || m.content || "").slice(0, 40) : "";
+    return "Не переведена: «" + t + "…» заблокирована — " + err.body.blockers.map(function (b) { return (b.summary || b.id).slice(0, 30); }).join(", ");
+  }
+  return err.message;
+}
+
+async function forgetRecord() {
+  const id = drawer.id, m = drawer.card.memory;
+  try {
+    await api("/api/memories/" + encodeURIComponent(id), { method: "DELETE" });
+  } catch (err) {
+    showToast(err.status === 0 ? "Сервер памяти не отвечает — запись не забыта." : err.message);
+    return;
+  }
+  showToast("Забыта: «" + title(m).slice(0, 50) + "» — в архиве");
+  closeRecord();
+  refreshScreen();
+}
+
+// drawerClick — действия внутри панели; true — событие обработано.
+function drawerClick(t) {
+  if (!drawer.card) return false;
+  const m = drawer.card.memory;
+  if (t.closest("[data-edit]")) { drawer.edit = true; drawer.confirm = false; drawerFocus = "#ed-content"; drawRecord(); return true; }
+  if (t.closest("[data-cancel]")) { drawer.edit = false; drawerFocus = "[data-edit]"; drawRecord(); return true; }
+  if (t.closest("[data-save]")) {
+    const s = $("#ed-summary"), c = $("#ed-content");
+    const fields = {};
+    if (c) fields.content = c.value;
+    if (s) fields.summary = s.value.trim();
+    drawer.edit = false;
+    patchRecord(fields, "Сохранено", "[data-edit]").then(function (ok) { if (!ok) { drawer.edit = true; drawRecord(); } });
+    return true;
+  }
+  if (t.closest("[data-forget-ask]")) { drawer.confirm = true; drawerFocus = "[data-forget]"; drawRecord(); return true; }
+  if (t.closest("[data-forget-cancel]")) { drawer.confirm = false; drawerFocus = "[data-forget-ask]"; drawRecord(); return true; }
+  if (t.closest("[data-forget]")) { forgetRecord(); return true; }
+  const untag = t.closest("[data-untag]");
+  if (untag) {
+    const tag = untag.getAttribute("data-untag");
+    patchRecord({ tags: (m.tags || []).filter(function (x) { return x !== tag; }) }, "Тег «" + tag + "» снят", "[data-newtag]");
+    return true;
+  }
+  const ib = t.closest("[data-imp]");
+  if (ib) {
+    const n = parseInt(ib.getAttribute("data-imp"), 10);
+    patchRecord({ importance: n }, "Важность " + n + " из 5", '[data-imp="' + n + '"]');
+    return true;
+  }
+  return false;
+}
+
+// addTag — Enter в поле «+ тег…»: PATCH {tags} заменяющей семантикой.
+function addTag(input) {
+  const m = drawer.card && drawer.card.memory;
+  if (!m) return;
+  const v = input.value.trim();
+  if (!v) return;
+  if ((m.tags || []).indexOf(v) !== -1) { input.value = ""; return; }
+  patchRecord({ tags: (m.tags || []).concat([v]) }, "Тег «" + v + "» добавлен", "[data-newtag]");
 }
 
 // --- тосты (§5): один активный, замещается следующим, гаснет через 2,6 с ---
@@ -674,13 +885,14 @@ function showToast(text) {
 document.addEventListener("click", function (e) {
   const t = e.target;
   if (!(t instanceof Element)) return;
+  if (state.id && t.closest("#drawer-root") && drawerClick(t)) return;
+  const goto = t.closest("[data-goto]");
+  if (goto) { navigate({ view: goto.getAttribute("data-goto"), params: new URLSearchParams(), id: "" }); return; }
   if (t.closest("[data-close]")) { closeRecord(); return; }
   const open = t.closest("[data-open]");
   if (open) { openRecord(open.getAttribute("data-open")); return; }
   const gotoKind = t.closest("[data-goto-kind]");
   if (gotoKind) { navigate({ view: "memory", params: new URLSearchParams({ kind: gotoKind.getAttribute("data-goto-kind") }), id: "" }); return; }
-  const goto = t.closest("[data-goto]");
-  if (goto) { navigate({ view: goto.getAttribute("data-goto"), params: new URLSearchParams(), id: "" }); return; }
   const sc = t.closest("[data-scope]");
   if (sc) { navigate({ scope: sc.getAttribute("data-scope") }); return; }
   const mode = t.closest("[data-mode]");
@@ -703,7 +915,15 @@ document.addEventListener("click", function (e) {
 });
 
 document.addEventListener("keydown", function (e) {
-  if (e.key === "Escape" && state.id) { e.preventDefault(); closeRecord(); return; }
+  if (e.key === "Escape" && state.id) {
+    e.preventDefault();
+    // Esc снимает подтверждение или правку, и только потом закрывает панель
+    if (drawer.confirm) { drawer.confirm = false; drawerFocus = "[data-forget-ask]"; drawRecord(); }
+    else if (drawer.edit) { drawer.edit = false; drawerFocus = "[data-edit]"; drawRecord(); }
+    else closeRecord();
+    return;
+  }
+  if (e.key === "Enter" && e.target.matches("[data-newtag]")) { e.preventDefault(); addTag(e.target); return; }
   // «/» — в поле поиска (§2.2); из другого раздела — сначала в «Память»
   if (e.key === "/" && !state.id && !e.target.matches("input,textarea,select") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
