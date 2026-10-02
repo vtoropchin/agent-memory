@@ -1,10 +1,18 @@
-// Подкоманда `memo hook -event <name> [-config path]` — тонкая обёртка над
-// recall-путём 7.1 (doRecall, cli.go) для хуков агентского харнесса Claude
-// Code (SessionStart/UserPromptSubmit, DESIGN.md §12, задача 7.2). Харнесс
-// передаёт хук-команде на stdin JSON события и вставляет её stdout прямиком в
-// контекст сессии (для этих двух событий — как обычный текст, без обёртки в
-// JSON), поэтому вывод — либо готовый Markdown-бриф под заголовком, либо
-// абсолютно пусто.
+// Подкоманда `memo hook -event <name> [-config path] [-format text|json]` —
+// тонкая обёртка над recall-путём 7.1 (doRecall, cli.go) для хуков агентских
+// харнессов (DESIGN.md §12, задача 7.2). Харнесс передаёт хук-команде на stdin
+// JSON события и вставляет её stdout в контекст сессии, поэтому вывод — либо
+// готовый Markdown-бриф под заголовком, либо абсолютно пусто.
+//
+// Два формата вывода (флаг -format): Claude Code для SessionStart и
+// UserPromptSubmit вставляет в контекст обычный stdout как есть — это text
+// (дефолт, поведение не менялось). Мосты, которые разбирают stdout как
+// структуру, читают контекст только из поля hookSpecificOutput.additionalContext
+// (обычный текст они не используют вовсе) — для них json: тот же бриф, но в
+// обёртке Claude Code. Сейчас это DeepSeek Harness (мост
+// dsh-hooks-claude-code, проверено на живом харнессе: с text контекст не
+// доезжает), но флаг описывает формат, а не харнесс — следующее приложение с
+// тем же контрактом переиспользует json.
 //
 // ЖЕЛЕЗНЫЙ инвариант: хук никогда не ломает сессию агента. Любая ошибка (нет
 // конфига, нет БД, битый stdin, неизвестный -event) должна привести к пустому
@@ -51,7 +59,37 @@ const (
 	// prompt-submit ничего не делает: короткие реплики ("да", "ok", "продолжай")
 	// не несут смысловой нагрузки для поиска и только тратят время на recall.
 	hookPromptSubmitMinRunes = 15
+
+	// hookFormatText / hookFormatJSON — форматы вывода хука (флаг -format):
+	// text — готовый Markdown-бриф в stdout (Claude Code для SessionStart и
+	// UserPromptSubmit вставляет обычный stdout в контекст как есть), json —
+	// та же строка в обёртке Claude Code hookSpecificOutput.additionalContext
+	// (её читают мосты, разбирающие stdout как структуру; см. шапку файла).
+	hookFormatText = "text"
+	hookFormatJSON = "json"
 )
+
+// hookFormatOptions — значения флага -format для текста usage/ошибок.
+var hookFormatOptions = []string{hookFormatText, hookFormatJSON}
+
+// hookClaudeEventNames — имя события в терминах Claude Code: обёртка json
+// обязана называть событие точно (поле hookEventName), иначе адресат
+// отбрасывает event-scoped поля, сверив его с фактически сработавшим событием.
+var hookClaudeEventNames = map[string]string{
+	"session-start": "SessionStart",
+	"prompt-submit": "UserPromptSubmit",
+}
+
+// hookSpecificOutput / hookJSONOutput — форма обёртки Claude Code, в которую
+// упаковывается бриф в формате json.
+type hookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"`
+	AdditionalContext string `json:"additionalContext"`
+}
+
+type hookJSONOutput struct {
+	HookSpecificOutput hookSpecificOutput `json:"hookSpecificOutput"`
+}
 
 // hookEvent — минимальный набор полей стандартного JSON, который харнесс
 // Claude Code передаёт хук-команде на stdin (SessionStart/UserPromptSubmit).
@@ -77,14 +115,18 @@ func runHook(args []string, stdin io.Reader, out io.Writer) error {
 	// stderr ещё раз.
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "хук для .claude/settings.json — печатает Markdown-бриф в stdout, пуст при любой ошибке (exit 0).")
-		fmt.Fprintln(os.Stderr, "Использование: memo hook -event <session-start|prompt-submit> [-config path] < event.json")
+		fmt.Fprintln(os.Stderr, "хук харнесса (Claude Code, dsh) — печатает Markdown-бриф в stdout, пуст при любой ошибке (exit 0).")
+		fmt.Fprintln(os.Stderr, "Использование: memo hook -event <session-start|prompt-submit> [-config path] [-format text|json] < event.json")
 		fs.PrintDefaults()
 	}
 	event := fs.String("event", "", "событие хука: session-start | prompt-submit")
 	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально; если задан — обязан существовать)")
+	format := fs.String("format", hookFormatText, fmt.Sprintf("формат вывода: %s — бриф как есть в stdout (Claude Code), %s — обёртка Claude Code hookSpecificOutput.additionalContext (мосты dsh и подобные)", hookFormatText, hookFormatJSON))
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("hook: разбор флагов: %w", err)
+	}
+	if *format != hookFormatText && *format != hookFormatJSON {
+		return fmt.Errorf("hook: неизвестный -format %q — поддерживаются: %s", *format, strings.Join(hookFormatOptions, ", "))
 	}
 
 	var ev hookEvent
@@ -104,9 +146,9 @@ func runHook(args []string, stdin io.Reader, out io.Writer) error {
 	ctx := context.Background()
 	switch *event {
 	case "session-start":
-		return runHookSessionStart(ctx, cfg, out)
+		return runHookSessionStart(ctx, cfg, *format, out)
 	case "prompt-submit":
-		return runHookPromptSubmit(ctx, cfg, ev.Prompt, out)
+		return runHookPromptSubmit(ctx, cfg, ev.Prompt, *format, out)
 	default:
 		return fmt.Errorf("hook: неизвестное или не заданное -event %q (ожидается session-start | prompt-submit)", *event)
 	}
@@ -117,7 +159,7 @@ func runHook(args []string, stdin io.Reader, out io.Writer) error {
 // всем kinds — на старте сессии агент ещё не сформулировал задачу, поэтому
 // фильтровать по типу факта нечем. Summarize выключен (латентность хука).
 // Пустой бриф (Count==0) — пустой out, без заголовка.
-func runHookSessionStart(ctx context.Context, cfg config.Config, out io.Writer) error {
+func runHookSessionStart(ctx context.Context, cfg config.Config, format string, out io.Writer) error {
 	brief, err := doRecall(ctx, cfg, "memo hook", memory.Query{
 		Text:        hookSessionStartQuery,
 		Scopes:      cfg.Scope.RecallScopes(),
@@ -127,14 +169,14 @@ func runHookSessionStart(ctx context.Context, cfg config.Config, out io.Writer) 
 	if err != nil {
 		return fmt.Errorf("hook session-start: %w", err)
 	}
-	return writeHookBrief(out, brief)
+	return writeHookBrief(out, brief, format, "session-start")
 }
 
 // runHookPromptSubmit выполняет recall по тексту prompt (взят из stdin-JSON
 // события). Короткий prompt (< hookPromptSubmitMinRunes рун после обрезки
 // пробелов) — заведомо мусорный запрос ("да", "ok", "погнали") — recall не
 // выполняется вовсе, out остаётся пустым.
-func runHookPromptSubmit(ctx context.Context, cfg config.Config, prompt string, out io.Writer) error {
+func runHookPromptSubmit(ctx context.Context, cfg config.Config, prompt, format string, out io.Writer) error {
 	prompt = strings.TrimSpace(prompt)
 	if utf8.RuneCountInString(prompt) < hookPromptSubmitMinRunes {
 		return nil
@@ -149,18 +191,36 @@ func runHookPromptSubmit(ctx context.Context, cfg config.Config, prompt string, 
 	if err != nil {
 		return fmt.Errorf("hook prompt-submit: %w", err)
 	}
-	return writeHookBrief(out, brief)
+	return writeHookBrief(out, brief, format, "prompt-submit")
 }
 
 // writeHookBrief печатает brief в out под hookBriefHeader — но только если в
 // нём есть хоть одна запись; пустая память не должна вставлять в контекст
-// заголовок без содержимого.
-func writeHookBrief(out io.Writer, brief memory.Brief) error {
+// заголовок без содержимого (пусто — это и для json: stdout остаётся пустым,
+// а не «{}» с пустым контекстом). event — имя события хука (ключ
+// hookClaudeEventNames), нужное только обёртке json.
+func writeHookBrief(out io.Writer, brief memory.Brief, format, event string) error {
 	if brief.Count == 0 {
 		return nil
 	}
-	fmt.Fprintln(out, hookBriefHeader)
-	fmt.Fprintln(out)
-	fmt.Fprint(out, brief.Markdown)
-	return nil
+
+	switch format {
+	case hookFormatJSON:
+		payload, err := json.Marshal(hookJSONOutput{HookSpecificOutput: hookSpecificOutput{
+			HookEventName:     hookClaudeEventNames[event],
+			AdditionalContext: hookBriefHeader + "\n\n" + brief.Markdown,
+		}})
+		if err != nil {
+			// На практике недостижимо (в структуре только строки), но инвариант
+			// тот же: ошибка — пустой stdout и строка в stderr.
+			return fmt.Errorf("hook: сборка JSON-вывода: %w", err)
+		}
+		fmt.Fprintln(out, string(payload))
+		return nil
+	default:
+		fmt.Fprintln(out, hookBriefHeader)
+		fmt.Fprintln(out)
+		fmt.Fprint(out, brief.Markdown)
+		return nil
+	}
 }

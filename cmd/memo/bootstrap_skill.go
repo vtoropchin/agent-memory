@@ -81,7 +81,11 @@ func bootstrapSkillDescription(project string) string {
 // renderBootstrapSkillMD оборачивает bootstrapSkillBodyTemplate в SKILL.md —
 // валидный YAML-фронтматтер (name/description) поверх тела, по образцу
 // renderSkillMD (skill.go). Второй рендерер в memorySkills (init.go).
+// description кавычится по той же причине, что в renderSkillMD — и здесь это
+// не теория: без кавычек двоеточие в bootstrapSkillDescription делало
+// фронтматтер невалидным YAML, и скил memo-bootstrap молча выпадал из каталога
+// скилов харнесса (проверено на dsh: в каталоге сессии было только `memo`).
 func renderBootstrapSkillMD(project string) string {
-	frontMatter := fmt.Sprintf("---\nname: memo-bootstrap\ndescription: %s\n---\n\n", bootstrapSkillDescription(project))
+	frontMatter := fmt.Sprintf("---\nname: memo-bootstrap\ndescription: %s\n---\n\n", yamlQuoteSingle(bootstrapSkillDescription(project)))
 	return frontMatter + fmt.Sprintf(bootstrapSkillBodyTemplate, project)
 }

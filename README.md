@@ -50,12 +50,14 @@ make install
 memo init
 ```
 
-В интерактивном режиме спросит агентское приложение (`claude` или `opencode`), имя
+В интерактивном режиме спросит агентское приложение (`claude`, `opencode` или `dsh`), имя
 проекта, адрес и модель ollama, ключ DeepSeek и модель reasoner (по желанию), а затем
 хранилище — файл SQLite или общая база PostgreSQL, см.
 [переезд на PostgreSQL](#общая-база-команды-переезд-на-postgresql) — и разложит:
 
-- MCP-конфиг (`.mcp.json` для Claude Code или `opencode.json` для opencode);
+- MCP-конфиг: `.mcp.json` для Claude Code, `opencode.json` для opencode или проектный
+  patch-оверлей `.dsh/memo.cordis.yml` для DeepSeek Harness (см.
+  [подключение оверлея](#deepseek-harness-dsh-проектный-оверлей));
 - два скила — «Протокол работы с памятью» (`memo`) и разовый bootstrap
   «Первичная инициализация памяти» (`memo-bootstrap`), см. [раздел ниже](#скил-протокол-работы-с-памятью);
 - `agentmemory.toml` со введёнными настройками;
@@ -67,7 +69,32 @@ memo init
 memo init -project myproject -agent claude -no-input
 ```
 
-После этого агентское приложение само поднимает `memo` как MCP-сервер `memo`.
+После этого агентское приложение само поднимает `memo` как MCP-сервер `memo`. У Claude Code
+и opencode — сразу; у DeepSeek Harness остаётся один ручной шаг, у харнесса нет проектного
+MCP-конфига:
+
+### DeepSeek Harness (`dsh`): проектный оверлей
+
+`memo init -agent dsh` пишет запись сервера в проектный patch-оверлей
+`.dsh/memo.cordis.yml` (Cordis, YAML) — подключить его к профилю харнесса нужно самому:
+
+```sh
+dsh web --patch .dsh/memo.cordis.yml
+```
+
+Чтобы сервер поднимался всегда, скопируй строки оверлея (начиная с `- insert:`) в patch-слой
+профиля — `$DSH_HOME/cordis.patch.yml` (все профили) или
+`$DSH_HOME/profiles/<профиль>/cordis.patch.yml` (один профиль; Desktop-приложение
+`DeepSeek Harness.app` использует профиль `desktop`). Профиль с включённым HMR подхватит
+правку без перезапуска. Пути в оверлее абсолютные — dsh запускает MCP-процесс с рабочим
+каталогом процесса харнесса, а не проекта, поэтому относительный `agentmemory.toml` не
+разрешается. В один профиль монтируется оверлей ОДНОГО проекта: имя сервера
+(`serverName: memo`) уникально в дереве плагинов, и вторая строка с тем же именем не
+загрузится.
+
+Хуки ambient-режима у dsh есть, но не свои, а через мост `@deepseek-ai/dsh-hooks-claude-code`:
+`memo init` кладёт в проект конфиг хуков `.dsh/memo-hooks.json` и строку моста в тот же
+оверлей — то есть включаются они вместе с оверлеем (флаг `-hooks`, вопрос визарда).
 Агенту в системный промпт/скил уже прописано: `memory_recall` — в начале задачи (подтянуть
 контекст), `memory_save` — по ходу работы, когда появляется факт стоит запомнить.
 
@@ -89,6 +116,7 @@ localhost.
 
 - Claude Code — `.claude/skills/memo/SKILL.md`
 - opencode — `.opencode/skills/memo/SKILL.md`
+- DeepSeek Harness — `.agents/skills/memo/SKILL.md` (общий корень конвенции agents)
 
 Тело скила одно для всех приложений (различаются только путь файла и формат MCP-конфига),
 и агентское приложение подхватывает его само — по полю `description` оно понимает, когда
@@ -116,6 +144,7 @@ localhost.
 
 - Claude Code — `.claude/skills/memo-bootstrap/SKILL.md`
 - opencode — `.opencode/skills/memo-bootstrap/SKILL.md`
+- DeepSeek Harness — `.agents/skills/memo-bootstrap/SKILL.md`
 
 Протокол `memo` бесполезен, пока памяти нечего recall'ить, — в свежем проекте она пуста.
 Bootstrap закрывает этот разрыв: запусти его **один раз** сразу после `memo init`, и агент
@@ -169,7 +198,7 @@ Bootstrap закрывает этот разрыв: запусти его **од
 | `-project` | имя проекта (дефолт — базовое имя каталога `-dir`) |
 | `-dir` | каталог, в который скаффолдить артефакты (дефолт `.`) |
 | `-force` | перезаписывать существующие файлы скиллов SKILL.md (agentmemory.toml/mcp-конфиг всегда синхронизируются, `.env` всегда мержится — `-force` на них не влияет) |
-| `-agent` | `claude` или `opencode` (дефолт `claude`) |
+| `-agent` | `claude`, `opencode` или `dsh` (DeepSeek Harness; дефолт `claude`) |
 | `-ollama-url` | base URL ollama (дефолт `http://localhost:11434`) |
 | `-ollama-model` | модель эмбеддингов ollama (дефолт `bge-m3`) |
 | `-store` | путь к файлу SQLite (дефолт `~/.agentmemory/memory.db`) |

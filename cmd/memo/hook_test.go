@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -192,5 +193,72 @@ func TestRunHook_UnknownEventDegradesToEmptyOutput(t *testing.T) {
 	}
 	if out.String() != "" {
 		t.Errorf("runHook с неизвестным -event вывел %q, хочу пустой stdout", out.String())
+	}
+}
+
+// TestRunHook_JSONFormatWrapsBrief проверяет формат -format json, которым
+// пользуется dsh (мост dsh-hooks-claude-code читает контекст только из
+// hookSpecificOutput.additionalContext, обычный stdout игнорирует): бриф целиком
+// уезжает в additionalContext, а hookEventName называет событие точно — мост
+// сверяет его с фактически сработавшим и иначе отбрасывает поля.
+func TestRunHook_JSONFormatWrapsBrief(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "memory.db")
+	cfgPath := writeHookConfig(t, dir, "alpha", []string{"user:*"}, dbPath)
+	if err := runSave([]string{"-config", cfgPath, "-db", dbPath, "-kind", "semantic", "-content", "состояние проекта: этап 7 хуков в разработке"}, strings.NewReader(""), &bytes.Buffer{}); err != nil {
+		t.Fatalf("runSave: %v", err)
+	}
+
+	for event, wantName := range map[string]string{"session-start": "SessionStart", "prompt-submit": "UserPromptSubmit"} {
+		var out bytes.Buffer
+		stdin := strings.NewReader(`{"prompt":"расскажи про состояние проекта и хуки в разработке"}`)
+		if err := runHook([]string{"-event", event, "-config", cfgPath, "-format", "json"}, stdin, &out); err != nil {
+			t.Fatalf("runHook (%s): %v", event, err)
+		}
+
+		var payload hookJSONOutput
+		if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+			t.Fatalf("вывод в формате json не разбирается (%s): %v\n%s", event, err, out.String())
+		}
+		if payload.HookSpecificOutput.HookEventName != wantName {
+			t.Errorf("hookEventName = %q, хочу %q", payload.HookSpecificOutput.HookEventName, wantName)
+		}
+		context := payload.HookSpecificOutput.AdditionalContext
+		if !strings.HasPrefix(context, hookBriefHeader) || !strings.Contains(context, "этап 7 хуков") {
+			t.Errorf("additionalContext = %q, хочу бриф с заголовком и сохранённым фактом", context)
+		}
+	}
+}
+
+// TestRunHook_JSONFormatEmptyMemoryStaysEmpty проверяет, что пустая память и в
+// json-формате даёт пустой stdout (никакой обёртки с пустым контекстом).
+func TestRunHook_JSONFormatEmptyMemoryStaysEmpty(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "memory.db")
+	cfgPath := writeHookConfig(t, dir, "alpha", []string{"user:*"}, dbPath)
+
+	var out bytes.Buffer
+	if err := runHook([]string{"-event", "session-start", "-config", cfgPath, "-format", "json"}, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("runHook: %v", err)
+	}
+	if out.String() != "" {
+		t.Errorf("пустая память в json-формате вывела %q, хочу пустой stdout", out.String())
+	}
+}
+
+// TestRunHook_UnknownFormatDegradesToEmptyOutput проверяет, что опечатка в
+// -format не печатает ничего (ЖЕЛЕЗНЫЙ инвариант) и возвращает ошибку.
+func TestRunHook_UnknownFormatDegradesToEmptyOutput(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "memory.db")
+	cfgPath := writeHookConfig(t, dir, "alpha", []string{"user:*"}, dbPath)
+
+	var out bytes.Buffer
+	err := runHook([]string{"-event", "session-start", "-config", cfgPath, "-format", "yaml"}, strings.NewReader(""), &out)
+	if err == nil {
+		t.Fatalf("runHook = nil error, хочу ошибку неизвестного -format")
+	}
+	if out.String() != "" {
+		t.Errorf("runHook с неизвестным -format вывел %q, хочу пустой stdout", out.String())
 	}
 }

@@ -78,6 +78,13 @@ func TestDoInit_WritesAllFiles(t *testing.T) {
 		t.Errorf("Store.Path = %q, хочу %q", cfg.Store.Path, defaultStorePath)
 	}
 
+	// Подсказка про одобрение проектного MCP-сервера — специфика Claude Code и
+	// самый частый барьер на первом запуске, поэтому печатается его scaffold'ом
+	// (у opencode/dsh одобрения нет).
+	if !strings.Contains(out.String(), "одобри проектный MCP-сервер") {
+		t.Errorf("вывод не подсказывает одобрить проектный MCP-сервер Claude Code: %s", out.String())
+	}
+
 	skillPath := filepath.Join(dir, ".claude", "skills", "memo", "SKILL.md")
 	skillRaw, err := os.ReadFile(skillPath)
 	if err != nil {
@@ -563,6 +570,298 @@ func TestDoInit_OpencodeTarget(t *testing.T) {
 	}
 	if !strings.Contains(bootstrap, "memory_save") {
 		t.Errorf("SKILL.md bootstrap не упоминает memory_save: %s", bootstrap)
+	}
+}
+
+// TestDoInit_DshTarget проверяет артефакты DeepSeek Harness: проектный
+// patch-оверлей .dsh/memo.cordis.yml с записью MCP-сервера memo (абсолютные
+// пути — dsh запускает MCP-процесс с рабочим каталогом процесса харнесса),
+// скилы под общим корнем .agents/skills и подсказку про ручное подключение
+// оверлея (проектного MCP-конфига у dsh нет). Файлов чужих харнессов init в
+// этом режиме не создаёт.
+func TestDoInit_DshTarget(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh"}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	overlayPath := filepath.Join(dir, ".dsh", "memo.cordis.yml")
+	overlayRaw, err := os.ReadFile(overlayPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", overlayPath, err)
+	}
+	overlay := string(overlayRaw)
+	for _, want := range []string{
+		"- insert:",
+		"    - id: memo\n",
+		"name: '@deepseek-ai/dsh-mcp-client'",
+		"serverName: memo",
+		"transport: stdio",
+		"- '-config'",
+		yamlQuoteSingle(filepath.Join(dir, "agentmemory.toml")),
+		"DEEPSEEK_API_KEY: !!js process.env.DEEPSEEK_API_KEY ?? ''",
+	} {
+		if !strings.Contains(overlay, want) {
+			t.Errorf("оверлей dsh не содержит %q:\n%s", want, overlay)
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	if !strings.Contains(overlay, yamlQuoteSingle(exe)) {
+		t.Errorf("оверлей dsh не содержит путь к memo %q:\n%s", exe, overlay)
+	}
+	// embedder по умолчанию ollama — плейсхолдера OPENAI_API_KEY быть не должно.
+	if strings.Contains(overlay, "OPENAI_API_KEY") {
+		t.Errorf("оверлей dsh содержит OPENAI_API_KEY при embedder=ollama:\n%s", overlay)
+	}
+	// Строки моста хуков нет: хуки в этом прогоне не выбраны.
+	if strings.Contains(overlay, "memo-hooks") {
+		t.Errorf("оверлей dsh содержит строку моста хуков без -hooks:\n%s", overlay)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".dsh", "memo-hooks.json")); !os.IsNotExist(err) {
+		t.Errorf("memo-hooks.json создан без -hooks: err=%v", err)
+	}
+
+	// Файлы чужих харнессов dsh-прогон не трогает.
+	for _, foreign := range []string{".mcp.json", "opencode.json", filepath.Join(".claude", "settings.json")} {
+		if _, err := os.Stat(filepath.Join(dir, foreign)); !os.IsNotExist(err) {
+			t.Errorf("%s создан при Agent=dsh: err=%v", foreign, err)
+		}
+	}
+
+	for _, name := range []string{"memo", "memo-bootstrap"} {
+		skillPath := filepath.Join(dir, ".agents", "skills", name, "SKILL.md")
+		raw, err := os.ReadFile(skillPath)
+		if err != nil {
+			t.Fatalf("чтение %s: %v", skillPath, err)
+		}
+		if !strings.HasPrefix(string(raw), "---\nname: "+name+"\ndescription:") {
+			t.Errorf("%s не начинается с фронтматтера name/description", skillPath)
+		}
+	}
+
+	// Харнесс читает сервер не из проектного файла — вывод обязан сказать,
+	// как подключить оверлей.
+	if !strings.Contains(out.String(), "dsh web --patch") || !strings.Contains(out.String(), "cordis.patch.yml") {
+		t.Errorf("вывод не подсказывает, как подключить оверлей dsh: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "ambient-режим") || !strings.Contains(out.String(), hooksSessionStart) {
+		t.Errorf("вывод не сообщает, что ambient-режим не подключён и как его включить: %s", out.String())
+	}
+}
+
+// TestDoInit_DshHooks проверяет ambient-режим dsh: конфиг хуков
+// .dsh/memo-hooks.json (формат Claude Code — его читает мост
+// dsh-hooks-claude-code) с выбранными событиями и абсолютным -config, и строку
+// моста в оверлее со ссылкой на этот файл.
+func TestDoInit_DshHooks(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksBoth}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	hooksPath := filepath.Join(dir, ".dsh", "memo-hooks.json")
+	raw, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("чтение %s: %v", hooksPath, err)
+	}
+	var cfg struct {
+		Hooks map[string][]hookMatcherEntry `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("memo-hooks.json невалиден: %v\n%s", err, raw)
+	}
+	for event, memoEvent := range map[string]string{"SessionStart": "session-start", "UserPromptSubmit": "prompt-submit"} {
+		entries, ok := cfg.Hooks[event]
+		if !ok || len(entries) != 1 || len(entries[0].Hooks) != 1 {
+			t.Fatalf("memo-hooks.json: событие %s = %+v, хочу одну matcher-запись с одной командой", event, cfg.Hooks[event])
+		}
+		command, _ := entries[0].Hooks[0]["command"].(string)
+		if !strings.Contains(command, "hook -event "+memoEvent) {
+			t.Errorf("команда хука %s = %q, хочу -event %s", event, command, memoEvent)
+		}
+		// Абсолютный -config: мост подставляет ${CLAUDE_PROJECT_DIR} каталогом
+		// сессии (он может быть подкаталогом проекта), поэтому якорь Claude Code
+		// здесь не годится.
+		if !strings.Contains(command, filepath.Join(dir, "agentmemory.toml")) {
+			t.Errorf("команда хука %s = %q, хочу абсолютный -config в %s", event, command, dir)
+		}
+	}
+
+	overlayRaw, err := os.ReadFile(filepath.Join(dir, ".dsh", "memo.cordis.yml"))
+	if err != nil {
+		t.Fatalf("чтение оверлея: %v", err)
+	}
+	overlay := string(overlayRaw)
+	if !strings.Contains(overlay, "name: '@deepseek-ai/dsh-hooks-claude-code'") || !strings.Contains(overlay, yamlQuoteSingle(hooksPath)) {
+		t.Errorf("оверлей dsh не содержит строки моста хуков со ссылкой на %s:\n%s", hooksPath, overlay)
+	}
+}
+
+// TestDoInit_DshHooksNoneDoesNotWriteHooks проверяет, что -hooks none (и пустое
+// значение, как в -no-input) не создаёт конфиг хуков и не добавляет строку
+// моста в оверлей.
+func TestDoInit_DshHooksNoneDoesNotWriteHooks(t *testing.T) {
+	for _, hooks := range []string{hooksNone, ""} {
+		dir := t.TempDir()
+		var out strings.Builder
+		if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooks}, &out); err != nil {
+			t.Fatalf("doInit (Hooks=%q): %v", hooks, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".dsh", "memo-hooks.json")); !os.IsNotExist(err) {
+			t.Errorf("Hooks=%q: memo-hooks.json создан: err=%v", hooks, err)
+		}
+		overlayRaw, err := os.ReadFile(filepath.Join(dir, ".dsh", "memo.cordis.yml"))
+		if err != nil {
+			t.Fatalf("Hooks=%q: чтение оверлея: %v", hooks, err)
+		}
+		if strings.Contains(string(overlayRaw), "dsh-hooks-claude-code") {
+			t.Errorf("Hooks=%q: оверлей содержит строку моста хуков:\n%s", hooks, overlayRaw)
+		}
+	}
+}
+
+// TestDoInit_DshRerunIdempotent проверяет повторный прогон dsh: оверлей
+// перегенерируется целиком (не дублирует строки), скилы без -force не
+// перетираются, а конфиг хуков перегенерируется без задвоения команд.
+func TestDoInit_DshRerunIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	var first strings.Builder
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksSessionStart}, &first); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+	overlayPath := filepath.Join(dir, ".dsh", "memo.cordis.yml")
+	before, err := os.ReadFile(overlayPath)
+	if err != nil {
+		t.Fatalf("чтение оверлея: %v", err)
+	}
+
+	var second strings.Builder
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksSessionStart}, &second); err != nil {
+		t.Fatalf("повторный doInit: %v", err)
+	}
+	after, err := os.ReadFile(overlayPath)
+	if err != nil {
+		t.Fatalf("чтение оверлея после повтора: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("оверлей изменился при повторном прогоне:\nбыло:\n%s\nстало:\n%s", before, after)
+	}
+	if strings.Count(string(after), "id: memo\n") != 1 {
+		t.Errorf("оверлей задвоил запись сервера memo:\n%s", after)
+	}
+	if !strings.Contains(second.String(), "пропущено (уже существует)") {
+		t.Errorf("повторный прогон перетёр скилы без -force: %s", second.String())
+	}
+
+	hooksRaw, err := os.ReadFile(filepath.Join(dir, ".dsh", "memo-hooks.json"))
+	if err != nil {
+		t.Fatalf("чтение memo-hooks.json: %v", err)
+	}
+	var cfg struct {
+		Hooks map[string][]hookMatcherEntry `json:"hooks"`
+	}
+	if err := json.Unmarshal(hooksRaw, &cfg); err != nil {
+		t.Fatalf("memo-hooks.json невалиден: %v", err)
+	}
+	if len(cfg.Hooks["SessionStart"]) != 1 {
+		t.Errorf("повторный прогон задвоил команду хука: %+v", cfg.Hooks["SessionStart"])
+	}
+}
+
+// TestWriteDshHooks_RegeneratesFile проверяет, что конфиг хуков dsh
+// перегенерируется целиком, а не мержится: повторный init с суженным -hooks
+// обязан выключить событие, вписанное прошлым прогоном. Иначе выключить
+// ambient-режим было бы нельзя (мерж оставлял бы «залипшее» событие), а
+// -format json у команды переживёт любую правку формата только если файл
+// перезаписывается.
+func TestWriteDshHooks_RegeneratesFile(t *testing.T) {
+	dir := t.TempDir()
+	hooksPath := filepath.Join(dir, ".dsh", "memo-hooks.json")
+
+	// Прогон «оба события», затем — сужение до одного.
+	if err := writeDshHooks(dir, "/opt/memo", hookEventsByChoice[hooksBoth], &strings.Builder{}); err != nil {
+		t.Fatalf("writeDshHooks (оба): %v", err)
+	}
+	if err := writeDshHooks(dir, "/opt/memo", hookEventsByChoice[hooksSessionStart], &strings.Builder{}); err != nil {
+		t.Fatalf("writeDshHooks (session-start): %v", err)
+	}
+
+	raw, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("чтение memo-hooks.json: %v", err)
+	}
+	var cfg struct {
+		Hooks map[string][]hookMatcherEntry `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("memo-hooks.json невалиден: %v\n%s", err, raw)
+	}
+	if _, ok := cfg.Hooks["UserPromptSubmit"]; ok {
+		t.Errorf("сужение -hooks до session-start оставило UserPromptSubmit: %+v", cfg.Hooks)
+	}
+	if len(cfg.Hooks["SessionStart"]) != 1 {
+		t.Errorf("SessionStart = %+v, хочу одну matcher-запись", cfg.Hooks["SessionStart"])
+	}
+	command, _ := cfg.Hooks["SessionStart"][0].Hooks[0]["command"].(string)
+	if !strings.Contains(command, "-format "+hookFormatJSON) {
+		t.Errorf("команда хука = %q, хочу -format %s (мост dsh читает только structured output)", command, hookFormatJSON)
+	}
+}
+
+// TestRenderDshOverlay_AbsolutePathsAndQuoting проверяет два свойства рендера
+// оверлея, которые нельзя доверять «на глаз»: относительный -dir всё равно
+// даёт абсолютные пути в -config/command (у dsh относительный agentmemory.toml
+// не разрешается — рабочий каталог MCP-процесса это каталог харнесса), а
+// значения со служебными символами (пробел, кавычка, '#') экранируются
+// одинарными кавычками YAML.
+func TestRenderDshOverlay_AbsolutePathsAndQuoting(t *testing.T) {
+	overlay := renderDshOverlay("/opt/memo", ".", "myproj", initConfig{EmbedderProvider: "openai", ReasonerProvider: "noop", OpenAIKey: "sk"}, false)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if !strings.Contains(overlay, yamlQuoteSingle(filepath.Join(cwd, "agentmemory.toml"))) {
+		t.Errorf("при -dir=. конфиг не абсолютный:\n%s", overlay)
+	}
+	if !strings.Contains(overlay, "OPENAI_API_KEY: !!js process.env.OPENAI_API_KEY ?? ''") {
+		t.Errorf("оверлей не содержит плейсхолдера выбранного провайдера:\n%s", overlay)
+	}
+
+	quoted := yamlQuoteSingle("/tmp/про'ект #1/agentmemory.toml")
+	if quoted != `'/tmp/про''ект #1/agentmemory.toml'` {
+		t.Errorf("yamlQuoteSingle(%q) = %q, хочу одинарные кавычки с удвоением внутренней", "/tmp/про'ект #1/agentmemory.toml", quoted)
+	}
+}
+
+// TestRenderSkillMD_QuotesDescription защищает от регресса, из-за которого скил
+// выпадал из каталога харнесса: description с двоеточием («dshproj: изучи …»)
+// в незакавыченном виде делает YAML-фронтматтер невалидным («mapping values are
+// not allowed here»), и парсер молча выбрасывает скил целиком — проверено на
+// живом dsh: в каталоге сессии был только `memo`, без `memo-bootstrap`.
+func TestRenderSkillMD_QuotesDescription(t *testing.T) {
+	// Триггер бага на месте: если текст bootstrap-скила перестанет содержать
+	// ": ", тест надо пересмотреть — он держится именно на таком описании.
+	if !strings.Contains(bootstrapSkillDescription("p"), ": ") {
+		t.Errorf("bootstrapSkillDescription больше не содержит \": \" — тест потерял триггер, проверь кавычки осознанно")
+	}
+
+	for name, md := range map[string]string{
+		"memo":           renderSkillMD("myproj"),
+		"memo-bootstrap": renderBootstrapSkillMD("myproj"),
+	} {
+		lines := strings.SplitN(md, "\n", 4)
+		description := lines[2]
+		if !strings.HasPrefix(description, "description: '") || !strings.HasSuffix(description, "'") {
+			t.Errorf("%s: description не в одинарных кавычках: %q", name, description)
+		}
 	}
 }
 
@@ -1201,7 +1500,7 @@ func TestDoInit_HooksOpencodeNotesUnsupported(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".claude", "settings.json")); !os.IsNotExist(err) {
 		t.Errorf("settings.json создан для opencode: err=%v", err)
 	}
-	if !strings.Contains(out.String(), "только Claude Code") {
+	if !strings.Contains(out.String(), "у opencode недоступен") {
 		t.Errorf("вывод не сообщает об отсутствии ambient-режима у opencode: %s", out.String())
 	}
 }

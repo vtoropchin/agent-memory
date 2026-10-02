@@ -5,7 +5,10 @@
 // раздела «Память проекта» из .claude/skills/dev/SKILL.md.
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // memorySkillBody — тело инструкции, не зависящее от того, какое агентское
 // приложение его раскладывает (frontmatter и путь файла — специфика
@@ -112,7 +115,7 @@ func memorySkillBody(project string) string {
 // skillDescription — текст поля description фронтматтера SKILL.md: по нему
 // агент решает, когда скил релевантен. Не зависит от конкретного агентского
 // приложения — формат фронтматтера (YAML name/description) один и тот же у
-// Claude Code и opencode.
+// Claude Code, opencode и dsh.
 func skillDescription(project string) string {
 	return fmt.Sprintf(
 		"Протокол работы с долговременной памятью проекта %[1]s через MCP-сервер memo (memory_recall/memory_save/memory_update/memory_forget). Используй в начале задачи для recall и по ходу/в конце задачи для сохранения новых фактов и решений в проекте %[1]s.",
@@ -120,11 +123,27 @@ func skillDescription(project string) string {
 	)
 }
 
+// yamlQuoteSingle оборачивает значение в одинарные кавычки YAML — способ
+// записать скаляр, который может содержать пробелы и служебные символы (путь с
+// пробелом, `:`, `#`, ведущие `-`/`@`) буквально: внутри одинарных кавычек YAML
+// не интерпретирует ничего, кроме удвоенной кавычки. Своя функция, а не общий
+// хелпер с escapeTOMLString: у TOML другое экранирование (обратные слэши,
+// \u-последовательности), общий код был бы ложным обобщением. Живёт здесь, а не
+// в dsh.go, потому что основной потребитель — фронтматтер SKILL.md (общий для
+// всех харнессов); им же кавычит пути оверлей dsh.
+func yamlQuoteSingle(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 // renderSkillMD оборачивает memorySkillBody в SKILL.md — валидный YAML-
 // фронтматтер (name/description) поверх общего тела. Общий рендерер для всех
 // записей agentRegistry: фронтматтер и тело скила не зависят от конкретного
 // агентского приложения, различается только путь файла (agentTarget.skillsDir + skillSpec.dirName).
+// description кавычится (yamlQuoteSingle): в тексте могут встретиться символы,
+// ломающие незакавыченный YAML-скаляр (двоеточие с пробелом — «mapping values
+// are not allowed here»), а харнесс в этом случае молча выбрасывает скил из
+// каталога — проверено на dsh (см. bootstrapSkillDescription).
 func renderSkillMD(project string) string {
-	frontMatter := fmt.Sprintf("---\nname: memo\ndescription: %s\n---\n\n", skillDescription(project))
+	frontMatter := fmt.Sprintf("---\nname: memo\ndescription: %s\n---\n\n", yamlQuoteSingle(skillDescription(project)))
 	return frontMatter + memorySkillBody(project)
 }

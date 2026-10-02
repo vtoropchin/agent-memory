@@ -167,12 +167,14 @@ func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConf
 		clearPostgresFields(&cfg)
 	}
 
-	// Ambient-режим через хуки харнесса — только для Claude Code (задача 7.2);
-	// у opencode аналога хуков нет, doInit сам честно сообщит об этом в выводе.
-	if cfg.Agent == "claude" && cfg.Hooks == "" {
+	// Ambient-режим через хуки харнесса (задача 7.2) — спрашиваем только у
+	// харнессов, которые их умеют (agentTarget.hooksLabel: Claude Code и dsh —
+	// второй через мост dsh-hooks-claude-code); у opencode хуков нет, его
+	// scaffold сам честно сообщит об этом в выводе.
+	if target, ok := agentRegistry[cfg.Agent]; ok && target.hooksLabel != "" && cfg.Hooks == "" {
 		hooks := hooksSessionStart
 		if err := huh.NewSelect[string]().
-			Title("Подключить автоматический recall через хуки Claude Code (ambient-режим)").
+			Title(fmt.Sprintf("Подключить автоматический recall через %s (ambient-режим)", target.hooksLabel)).
 			Options(
 				huh.NewOption(hooksSessionStart, hooksSessionStart),
 				huh.NewOption(hooksBoth, hooksBoth),
