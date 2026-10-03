@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -580,6 +581,7 @@ func TestDoInit_OpencodeTarget(t *testing.T) {
 // оверлея (проектного MCP-конфига у dsh нет). Файлов чужих харнессов init в
 // этом режиме не создаёт.
 func TestDoInit_DshTarget(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
 	dir := t.TempDir()
 	var out strings.Builder
 
@@ -599,8 +601,7 @@ func TestDoInit_DshTarget(t *testing.T) {
 		"name: '@deepseek-ai/dsh-mcp-client'",
 		"serverName: memo",
 		"transport: stdio",
-		"- '-config'",
-		yamlQuoteSingle(filepath.Join(dir, "agentmemory.toml")),
+		"- '-config'\n          - " + yamlQuoteSingle(dir) + "\n",
 		"DEEPSEEK_API_KEY: !!js process.env.DEEPSEEK_API_KEY ?? ''",
 	} {
 		if !strings.Contains(overlay, want) {
@@ -659,6 +660,7 @@ func TestDoInit_DshTarget(t *testing.T) {
 // dsh-hooks-claude-code) с выбранными событиями и абсолютным -config, и строку
 // моста в оверлее со ссылкой на этот файл.
 func TestDoInit_DshHooks(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
 	dir := t.TempDir()
 	var out strings.Builder
 
@@ -689,7 +691,7 @@ func TestDoInit_DshHooks(t *testing.T) {
 		// Абсолютный -config: мост подставляет ${CLAUDE_PROJECT_DIR} каталогом
 		// сессии (он может быть подкаталогом проекта), поэтому якорь Claude Code
 		// здесь не годится.
-		if !strings.Contains(command, filepath.Join(dir, "agentmemory.toml")) {
+		if !strings.Contains(command, fmt.Sprintf("-config %q ", dir)) {
 			t.Errorf("команда хука %s = %q, хочу абсолютный -config в %s", event, command, dir)
 		}
 	}
@@ -708,6 +710,7 @@ func TestDoInit_DshHooks(t *testing.T) {
 // значение, как в -no-input) не создаёт конфиг хуков и не добавляет строку
 // моста в оверлей.
 func TestDoInit_DshHooksNoneDoesNotWriteHooks(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
 	for _, hooks := range []string{hooksNone, ""} {
 		dir := t.TempDir()
 		var out strings.Builder
@@ -727,10 +730,134 @@ func TestDoInit_DshHooksNoneDoesNotWriteHooks(t *testing.T) {
 	}
 }
 
+// TestDoInit_DshHooksNoneRemovesStaleHooks проверяет, что повторный init с
+// -hooks none удаляет конфиг хуков прошлого прогона: строка моста могла уйти в
+// patch-слой профиля (постоянное подключение), и тогда хуки выключает только
+// отсутствие файла — мост без конфига не регистрирует ни одного хука.
+func TestDoInit_DshHooksNoneRemovesStaleHooks(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
+	dir := t.TempDir()
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksBoth}, &strings.Builder{}); err != nil {
+		t.Fatalf("doInit (хуки): %v", err)
+	}
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksNone}, &strings.Builder{}); err != nil {
+		t.Fatalf("doInit (без хуков): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".dsh", "memo-hooks.json")); !os.IsNotExist(err) {
+		t.Errorf("memo-hooks.json прошлого прогона не удалён при -hooks none: err=%v", err)
+	}
+}
+
+// TestDoInit_DshSyncsProfileCopy проверяет постоянное подключение оверлея:
+// блок между маркерами, вставленный пользователем в patch-слой профиля,
+// повторный init обновляет сам (иначе смена провайдеров или -hooks молча не
+// доезжала бы до харнесса), не трогая остальные строки слоя и его права, а
+// слои без блока этого проекта не трогает вовсе.
+func TestDoInit_DshSyncsProfileCopy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DSH_HOME", home)
+	dir := t.TempDir()
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksBoth}, &strings.Builder{}); err != nil {
+		t.Fatalf("doInit (хуки): %v", err)
+	}
+	overlay, err := os.ReadFile(dshOverlayPath(dir))
+	if err != nil {
+		t.Fatalf("чтение оверлея: %v", err)
+	}
+	start := strings.Index(string(overlay), dshBlockStart(dir))
+	if start < 0 {
+		t.Fatalf("оверлей без маркера начала блока:\n%s", overlay)
+	}
+	oldBlock := string(overlay[start:])
+	if !strings.HasSuffix(oldBlock, dshBlockEnd(dir)+"\n") {
+		t.Fatalf("оверлей не заканчивается маркером конца блока:\n%s", overlay)
+	}
+
+	profilePatch := filepath.Join(home, "profiles", "desktop", "cordis.patch.yml")
+	if err := os.MkdirAll(filepath.Dir(profilePatch), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before, after := "- id: other\n  disabled: true\n", "- id: tail\n  disabled: false\n"
+	if err := os.WriteFile(profilePatch, []byte(before+oldBlock+after), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	homePatch := filepath.Join(home, "cordis.patch.yml")
+	if err := os.WriteFile(homePatch, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksNone}, &out); err != nil {
+		t.Fatalf("doInit (без хуков): %v", err)
+	}
+	overlay, err = os.ReadFile(dshOverlayPath(dir))
+	if err != nil {
+		t.Fatalf("чтение оверлея: %v", err)
+	}
+	newBlock := string(overlay[strings.Index(string(overlay), dshBlockStart(dir)):])
+	got, err := os.ReadFile(profilePatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := before + newBlock + after; string(got) != want {
+		t.Errorf("слой профиля после повторного init:\n%s\nхочу:\n%s", got, want)
+	}
+	if strings.Contains(string(got), "memo-hooks") {
+		t.Errorf("в слое профиля осталась строка моста хуков после -hooks none:\n%s", got)
+	}
+	if info, err := os.Stat(profilePatch); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("права слоя профиля = %v (err=%v), хочу 0600", info.Mode().Perm(), err)
+	}
+	if !strings.Contains(out.String(), "обновлён блок memo в "+profilePatch) {
+		t.Errorf("вывод не сообщает об обновлении слоя профиля: %s", out.String())
+	}
+	if got, _ := os.ReadFile(homePatch); string(got) != before {
+		t.Errorf("слой без блока проекта изменён:\n%s", got)
+	}
+}
+
+// TestReplaceDshBlock проверяет замену блока оверлея в слое профиля: блок
+// другого проекта не трогается, незакрытый маркер — ошибка без замены (иначе
+// init мог бы «доесть» строки пользователя до конца файла).
+func TestReplaceDshBlock(t *testing.T) {
+	block := dshBlockStart("/p") + "\n- insert: []\n" + dshBlockEnd("/p") + "\n"
+	other := dshBlockStart("/other") + "\n- insert: [x]\n" + dshBlockEnd("/other") + "\n"
+
+	got, found, err := replaceDshBlock(other+dshBlockStart("/p")+"\nold\n"+dshBlockEnd("/p")+"\n", "/p", block)
+	if err != nil || !found || got != other+block {
+		t.Errorf("замена: found=%v err=%v\n%s", found, err, got)
+	}
+	if _, found, err := replaceDshBlock(other, "/p", block); err != nil || found {
+		t.Errorf("слой без блока проекта: found=%v err=%v", found, err)
+	}
+	if _, _, err := replaceDshBlock(dshBlockStart("/p")+"\n- id: user\n", "/p", block); err == nil {
+		t.Errorf("незакрытый маркер не дал ошибки")
+	}
+}
+
+// TestDoInit_HarnessHintAfterSummary проверяет, что подсказка о шагах,
+// специфичных для харнесса (ручное подключение оверлея у dsh, одобрение
+// сервера у Claude Code), печатается в конце вывода, после сводки, а не
+// теряется среди строк «записано: …».
+func TestDoInit_HarnessHintAfterSummary(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir())
+	for agent, hint := range map[string]string{"dsh": "dsh web --patch", "claude": "одобри проектный MCP-сервер"} {
+		var out strings.Builder
+		if err := doInit(initConfig{Project: "myproj", Dir: t.TempDir(), Agent: agent}, &out); err != nil {
+			t.Fatalf("doInit (%s): %v", agent, err)
+		}
+		summary, at := strings.Index(out.String(), "хранилище:"), strings.Index(out.String(), hint)
+		if summary < 0 || at < summary {
+			t.Errorf("%s: подсказка %q не после сводки:\n%s", agent, hint, out.String())
+		}
+	}
+}
+
 // TestDoInit_DshRerunIdempotent проверяет повторный прогон dsh: оверлей
 // перегенерируется целиком (не дублирует строки), скилы без -force не
 // перетираются, а конфиг хуков перегенерируется без задвоения команд.
 func TestDoInit_DshRerunIdempotent(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
 	dir := t.TempDir()
 	var first strings.Builder
 	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksSessionStart}, &first); err != nil {
@@ -815,6 +942,52 @@ func TestWriteDshHooks_RegeneratesFile(t *testing.T) {
 	}
 }
 
+// TestDoInit_DshRelativeStorePath проверяет, что относительный store.path
+// (-store ./mem.db) у dsh разрешается от каталога проекта, а не от рабочего
+// каталога процесса: MCP-процесс dsh стартует с cwd харнесса («/» у
+// Desktop-приложения), хук — с cwd сессии (может быть подкаталогом проекта).
+// config.Load разрешает относительный путь от проекта только при -config,
+// указывающем на КАТАЛОГ, поэтому и оверлей, и команда хука обязаны передавать
+// каталог, а не путь к agentmemory.toml.
+func TestDoInit_DshRelativeStorePath(t *testing.T) {
+	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
+	dir := t.TempDir()
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksSessionStart, StorePath: "./mem.db"}, &strings.Builder{}); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+
+	overlayRaw, err := os.ReadFile(filepath.Join(dir, ".dsh", "memo.cordis.yml"))
+	if err != nil {
+		t.Fatalf("чтение оверлея: %v", err)
+	}
+	if !strings.Contains(string(overlayRaw), "- '-config'\n          - "+yamlQuoteSingle(dir)+"\n") {
+		t.Errorf("оверлей передаёт -config не каталогом проекта %s:\n%s", dir, overlayRaw)
+	}
+
+	hooksRaw, err := os.ReadFile(filepath.Join(dir, ".dsh", "memo-hooks.json"))
+	if err != nil {
+		t.Fatalf("чтение memo-hooks.json: %v", err)
+	}
+	var hooks struct {
+		Hooks map[string][]hookMatcherEntry `json:"hooks"`
+	}
+	if err := json.Unmarshal(hooksRaw, &hooks); err != nil {
+		t.Fatalf("memo-hooks.json невалиден: %v", err)
+	}
+	command, _ := hooks.Hooks["SessionStart"][0].Hooks[0]["command"].(string)
+	if !strings.Contains(command, fmt.Sprintf("-config %q ", dir)) {
+		t.Errorf("команда хука = %q, хочу -config каталогом проекта %s", command, dir)
+	}
+
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("config.Load(%s): %v", dir, err)
+	}
+	if want := filepath.Join(dir, "mem.db"); cfg.Store.Path != want {
+		t.Errorf("store.path = %q, хочу %q", cfg.Store.Path, want)
+	}
+}
+
 // TestRenderDshOverlay_AbsolutePathsAndQuoting проверяет два свойства рендера
 // оверлея, которые нельзя доверять «на глаз»: относительный -dir всё равно
 // даёт абсолютные пути в -config/command (у dsh относительный agentmemory.toml
@@ -822,13 +995,13 @@ func TestWriteDshHooks_RegeneratesFile(t *testing.T) {
 // значения со служебными символами (пробел, кавычка, '#') экранируются
 // одинарными кавычками YAML.
 func TestRenderDshOverlay_AbsolutePathsAndQuoting(t *testing.T) {
-	overlay := renderDshOverlay("/opt/memo", ".", "myproj", initConfig{EmbedderProvider: "openai", ReasonerProvider: "noop", OpenAIKey: "sk"}, false)
+	overlay := renderDshBlock("/opt/memo", ".", initConfig{EmbedderProvider: "openai", ReasonerProvider: "noop", OpenAIKey: "sk"}, false)
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	if !strings.Contains(overlay, yamlQuoteSingle(filepath.Join(cwd, "agentmemory.toml"))) {
+	if !strings.Contains(overlay, "- "+yamlQuoteSingle(cwd)+"\n") {
 		t.Errorf("при -dir=. конфиг не абсолютный:\n%s", overlay)
 	}
 	if !strings.Contains(overlay, "OPENAI_API_KEY: !!js process.env.OPENAI_API_KEY ?? ''") {

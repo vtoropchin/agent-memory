@@ -454,8 +454,11 @@ type agentTarget struct {
 	// существующий файл (mergeMCPConfig), у dsh — генерация проектного
 	// YAML-оверлея Cordis целиком (scaffoldDsh): шов один, потому что у dsh
 	// запись сервера и строка моста хуков живут в одном файле, а у Claude Code
-	// хуки — вообще другой файл (setupClaudeHooks).
-	scaffold func(dir, project, command string, cfg initConfig, out io.Writer) error
+	// хуки — вообще другой файл (setupClaudeHooks). Возвращает подсказку о
+	// шагах, которые пользователь делает сам (одобрение сервера, подключение
+	// оверлея): doInit печатает её в конце вывода, после сводки, чтобы она не
+	// терялась среди строк «записано: …».
+	scaffold func(dir, project, command string, cfg initConfig, out io.Writer) (string, error)
 
 	// hooksLabel — как называть механику хуков в вопросе визарда об
 	// ambient-режиме; пусто — хуков у харнесса нет: промпт не показывается, а
@@ -1190,7 +1193,8 @@ func doInit(cfg initConfig, out io.Writer) error {
 	// Cordis целиком, вместе со строкой моста хуков. Всё, что различается по
 	// харнессам, закрыто agentTarget.scaffold; -force на запись сервера не
 	// влияет нигде (источник истины — параметры текущего прогона init).
-	if err := target.scaffold(cfg.Dir, project, command, cfg, out); err != nil {
+	harnessHint, err := target.scaffold(cfg.Dir, project, command, cfg, out)
+	if err != nil {
 		return err
 	}
 
@@ -1285,10 +1289,11 @@ func doInit(cfg initConfig, out io.Writer) error {
 		// аутентификации — проверено живым прогоном.
 		fmt.Fprintf(out, "  (запусти её из %s — пароль команда возьмёт сама из переменной окружения %s или из лежащего там .env)\n", cfg.Dir, memoPostgresPasswordEnv)
 	}
-	// Финальная подсказка — общая для всех харнессов; специфичное для
+	// Финальная подсказка — общая для всех харнессов, за ней — специфичное для
 	// конкретного харнесса (одобрение сервера у Claude Code, ручное подключение
-	// оверлея у dsh) печатает его scaffold.
+	// оверлея у dsh), которое вернул его scaffold.
 	fmt.Fprintln(out, "дальше: убедись, что memo доступен — `go install` кладёт его на PATH (см. `make install`), и перезапусти агентское приложение в этом каталоге.")
+	fmt.Fprint(out, harnessHint)
 	return nil
 }
 
@@ -1445,22 +1450,22 @@ type mcpConfigMerge struct {
 // <dir>/.mcp.json (mergeMCPConfig — чужие серверы и top-level ключи файла
 // сохраняются) и, если в этом прогоне выбраны хуки, команды `memo hook` в
 // <dir>/.claude/settings.json (setupClaudeHooks).
-func scaffoldClaude(dir, _ string, command string, cfg initConfig, out io.Writer) error {
+func scaffoldClaude(dir, _ string, command string, cfg initConfig, out io.Writer) (string, error) {
 	if err := mergeMCPConfig(filepath.Join(dir, ".mcp.json"), command, cfg, mcpConfigMerge{
 		sectionKey: "mcpServers",
 		buildEntry: buildMCPServerEntry,
 	}, out); err != nil {
-		return err
+		return "", err
+	}
+	if mappings, ok := hookEventsByChoice[cfg.Hooks]; ok {
+		if err := setupClaudeHooks(dir, command, mappings, out); err != nil {
+			return "", err
+		}
 	}
 	// Одобрение проектного MCP-сервера — специфика именно Claude Code (у
 	// opencode сервер включается полем enabled, у dsh одобрения нет вовсе),
 	// поэтому подсказка живёт здесь, а не в общем финальном выводе doInit.
-	fmt.Fprintf(out, "дальше: при первом запуске Claude Code одобри проектный MCP-сервер `memo`\n")
-	mappings, ok := hookEventsByChoice[cfg.Hooks]
-	if !ok {
-		return nil
-	}
-	return setupClaudeHooks(dir, command, mappings, out)
+	return "при первом запуске Claude Code одобри проектный MCP-сервер `memo`\n", nil
 }
 
 // scaffoldOpencode раскладывает артефакты opencode: MCP-запись сервера memo в
@@ -1468,16 +1473,16 @@ func scaffoldClaude(dir, _ string, command string, cfg initConfig, out io.Writer
 // top-level "$schema"). Хуков у opencode нет, поэтому ambient-режим здесь
 // недоступен в принципе — scaffold честно сообщает об этом в выводе, а не
 // молчит (задача 7.2).
-func scaffoldOpencode(dir, _ string, command string, cfg initConfig, out io.Writer) error {
+func scaffoldOpencode(dir, _ string, command string, cfg initConfig, out io.Writer) (string, error) {
 	if err := mergeMCPConfig(filepath.Join(dir, "opencode.json"), command, cfg, mcpConfigMerge{
 		sectionKey:     "mcp",
 		buildEntry:     buildOpencodeServerEntry,
 		ensureTopLevel: ensureOpencodeSchema,
 	}, out); err != nil {
-		return err
+		return "", err
 	}
 	fmt.Fprintf(out, "ambient-режим (авто-recall через хуки) у opencode недоступен — хуков, как у Claude Code, у него нет\n")
-	return nil
+	return "", nil
 }
 
 // mergeMCPConfig мержит запись сервера "memo" в MCP-конфиг по path
