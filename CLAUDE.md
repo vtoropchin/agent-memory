@@ -32,7 +32,7 @@
   `store` не импортирует — единственный пакет вариантов использования с нулём нарушений).
 - Порты объявлены в `store`, `embed`, `reason`; там же лежат реализации — см. «Известное нарушение».
 - Адаптеры: `store/sqlite.go`, `store/postgres*.go`, `embed/ollama.go`, `embed/openai.go`,
-  `reason/deepseek.go`, `internal/mcp` (регистрация tools и JSON-схемы), `cmd/memo/web.go`.
+  `reason/openai.go` (OpenAI-совместимый chat: DeepSeek, CLIProxyAPI), `internal/mcp` (регистрация tools и JSON-схемы), `cmd/memo/web.go`.
 - Загрузка конфига: `internal/config` (TOML/env).
 - Composition root: `cmd/memo`; cobra и huh — зависимости CLI-инсталлятора, в ядро не попадают.
 - Циклы между пакетами запрещает компилятор Go — отдельная проверка ADP не нужна.
@@ -56,7 +56,7 @@
 - Тесты ядра идут без сети и внешних сервисов (SQLite во временных файлах); прогон
   `./internal/memory/...` — около 2,5 с, это и есть целевое время.
 - Что метрика **не** считает: сторонние модули считаются, стандартная библиотека — нет. Адаптеры
-  на stdlib (`embed/ollama.go`, `embed/openai.go`, `reason/deepseek.go` — `net/http`) в число не
+  на stdlib (`embed/ollama.go`, `embed/openai.go`, `reason/openai.go` — `net/http`) в число не
   попадают, хотя лежат рядом с портами. Ноль по метрике здесь не означает «границы чисты»;
   условие пересмотра — первый SDK в `embed` или `reason`.
 
@@ -77,7 +77,7 @@
 **Отложенные решения**
 
 Обязаны оставаться заменяемыми без правки ядра: хранилище (SQLite ↔ PostgreSQL), провайдер
-эмбеддингов (noop / ollama / openai), провайдер reasoner (DeepSeek), транспорт (MCP stdio, CLI,
+эмбеддингов (noop / ollama / openai), провайдер reasoner (DeepSeek / CLIProxyAPI), транспорт (MCP stdio, CLI,
 web-морда). Недоступность вектора или LLM — деградация, а не падение (`DESIGN.md` §15).
 Конкретные отложенные решения, компромиссы и проведённые границы хранятся в памяти проекта
 (`memo`, scope `project:AgentMemory`), а не в этом файле: recall в начале задачи, запись по ходу.
@@ -88,7 +88,7 @@ web-морда). Недоступность вектора или LLM — дег
 - Ошибки оборачивать с контекстом: `fmt.Errorf("...: %w", err)`; `context.Context` — первым аргументом;
   паник в библиотечном коде нет.
 - Валидация только на границах (вход MCP, внешние API), не в каждом слое.
-- Секреты (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `MEMO_POSTGRES_PASSWORD`) — только из env/`.env`;
+- Секреты (`DEEPSEEK_API_KEY`, `CLIPROXY_API_KEY`, `OPENAI_API_KEY`, `MEMO_POSTGRES_PASSWORD`) — только из env/`.env`;
   в код, логи и память не попадают.
 - Не выходить за рамки задачи: без «заодно отрефакторю», абстракций на будущее и feature-флагов.
 

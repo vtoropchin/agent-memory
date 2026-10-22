@@ -178,6 +178,30 @@ func TestEmbedderLivenessSection_Noop(t *testing.T) {
 	}
 }
 
+// TestReasonerSection_CLIProxy — проба reasoner=cliproxy идёт с ключом
+// CLIPROXY_API_KEY на reasoner.base_url + /chat/completions; без ключа — warn
+// (деградация до Noop), а не fail.
+func TestReasonerSection_CLIProxy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer cp-test" {
+			t.Errorf("запрос %s, Authorization=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ок"}}]}`))
+	}))
+	defer srv.Close()
+	cfg := config.ReasonerConfig{Provider: "cliproxy", BaseURL: srv.URL + "/v1", Model: "gemini-3-flash"}
+
+	t.Setenv(cliproxyAPIKeyEnv, "")
+	if sec := reasonerSection(context.Background(), cfg, true); sec.Status != statusWarn {
+		t.Errorf("без ключа: Status = %s, хочу warn; detail=%q", sec.Status, sec.Detail)
+	}
+
+	t.Setenv(cliproxyAPIKeyEnv, "cp-test")
+	if sec := reasonerSection(context.Background(), cfg, true); sec.Status != statusOK {
+		t.Errorf("с ключом: Status = %s, хочу ok; detail=%q", sec.Status, sec.Detail)
+	}
+}
+
 func TestBuildDoctorReport_OllamaDownIsBroken(t *testing.T) {
 	dbPath, st := newDoctorTestStore(t)
 	putDoctorMemory(t, st, nil)

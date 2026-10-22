@@ -106,7 +106,8 @@ func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConf
 		cfg.ReasonerProvider = provider
 	}
 
-	if cfg.ReasonerProvider == "deepseek" {
+	switch cfg.ReasonerProvider {
+	case "deepseek":
 		if cfg.DeepseekKey == "" {
 			key := ""
 			if err := huh.NewInput().
@@ -117,7 +118,30 @@ func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConf
 			}
 			cfg.DeepseekKey = key
 		}
-		if err := promptDeepSeekReasoner(ctx, out, &cfg); err != nil {
+		if err := promptReasonerModel(ctx, out, &cfg, cmp.Or(cfg.ReasonerBaseURL, defaultDeepSeekBaseURL), cfg.DeepseekKey, defaultDeepSeekModel, "DeepSeek"); err != nil {
+			return cfg, err
+		}
+	case "cliproxy":
+		if cfg.ReasonerBaseURL == "" {
+			url := defaultCLIProxyBaseURL
+			if err := huh.NewInput().
+				Title("base URL CLIProxyAPI (Enter — " + defaultCLIProxyBaseURL + ")").
+				Value(&url).Run(); err != nil {
+				return cfg, err
+			}
+			cfg.ReasonerBaseURL = cmp.Or(strings.TrimSpace(url), defaultCLIProxyBaseURL)
+		}
+		if cfg.CLIProxyKey == "" {
+			key := ""
+			if err := huh.NewInput().
+				Title("ключ CLIProxyAPI — один из api-keys его конфига (Enter — пропустить, указать позже в .env)").
+				Password(true).
+				Value(&key).Run(); err != nil {
+				return cfg, err
+			}
+			cfg.CLIProxyKey = key
+		}
+		if err := promptReasonerModel(ctx, out, &cfg, cfg.ReasonerBaseURL, cfg.CLIProxyKey, "", "CLIProxyAPI"); err != nil {
 			return cfg, err
 		}
 	}
@@ -506,40 +530,40 @@ func promptOpenAIEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) e
 	return nil
 }
 
-// promptDeepSeekReasoner спрашивает модель reasoner DeepSeek — по образцу
-// promptOpenAIEmbedder, но отвечает ТОЛЬКО за выбор модели: ключ (и, в отличие
-// от OpenAI-эмбеддера, base URL) запрашивать не нужно — ключ уже взят в
-// promptInitTUI, а base URL у reasoner не настраивается (см. defaultDeepSeekBaseURL
-// в init.go). Логика выбора: если модель уже задана (флагом) — не переспрашивает;
-// если ключ не введён (пропущен) — сеть не дёргаем, сразу ручной ввод с
-// дефолтом defaultDeepSeekModel; иначе запрашивает список через
-// fetchDeepSeekModels (таймаут fetchModelsTimeout) — ошибка запроса или
-// пустой список тоже откатываются на ручной ввод с тем же дефолтом, успех —
-// select из полученных моделей (первая преселекчена).
-func promptDeepSeekReasoner(ctx context.Context, out io.Writer, cfg *initConfig) error {
+// promptReasonerModel спрашивает модель OpenAI-совместимого reasoner'а
+// (DeepSeek, CLIProxyAPI) — по образцу promptOpenAIEmbedder, но отвечает ТОЛЬКО
+// за выбор модели: ключ и base URL уже взяты в promptInitTUI. Логика выбора: если
+// модель уже задана (флагом) — не переспрашивает; если ключ не введён (пропущен)
+// — сеть не дёргаем, сразу ручной ввод с дефолтом def; иначе запрашивает список
+// через fetchChatModels (таймаут fetchModelsTimeout) — ошибка запроса или пустой
+// список тоже откатываются на ручной ввод с тем же дефолтом, успех — select из
+// полученных моделей (первая преселекчена). Пустой def (у CLIProxyAPI модели
+// зависят от подключённых аккаунтов) делает ручной ввод обязательным.
+func promptReasonerModel(ctx context.Context, out io.Writer, cfg *initConfig, baseURL, key, def, label string) error {
 	if cfg.ReasonerModel != "" {
 		return nil
 	}
-	if cfg.DeepseekKey == "" {
+	title := "модель reasoner (" + label + ")"
+	if key == "" {
 		fmt.Fprintln(out, "ключ не введён — список моделей запросить нечем, введи имя модели вручную")
-		return promptModelManual(&cfg.ReasonerModel, defaultDeepSeekModel, "модель reasoner (DeepSeek)")
+		return promptModelManual(&cfg.ReasonerModel, def, title)
 	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, fetchModelsTimeout)
-	models, err := fetchDeepSeekModels(fetchCtx, defaultDeepSeekBaseURL, cfg.DeepseekKey)
+	models, err := fetchChatModels(fetchCtx, baseURL, key)
 	cancel()
 	if err != nil {
-		fmt.Fprintf(out, "не удалось получить список моделей DeepSeek (%v) — введи имя модели вручную\n", err)
-		return promptModelManual(&cfg.ReasonerModel, defaultDeepSeekModel, "модель reasoner (DeepSeek)")
+		fmt.Fprintf(out, "не удалось получить список моделей %s (%v) — введи имя модели вручную\n", label, err)
+		return promptModelManual(&cfg.ReasonerModel, def, title)
 	}
 	if len(models) == 0 {
-		fmt.Fprintln(out, "DeepSeek не вернул ни одной модели — введи имя модели вручную")
-		return promptModelManual(&cfg.ReasonerModel, defaultDeepSeekModel, "модель reasoner (DeepSeek)")
+		fmt.Fprintf(out, "%s не вернул ни одной модели — введи имя модели вручную\n", label)
+		return promptModelManual(&cfg.ReasonerModel, def, title)
 	}
 
 	model := models[0]
 	if err := huh.NewSelect[string]().
-		Title("модель reasoner DeepSeek").
+		Title(title).
 		Options(toModelOptions(models)...).
 		Value(&model).Run(); err != nil {
 		return err

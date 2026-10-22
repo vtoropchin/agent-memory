@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,7 +61,8 @@ func TestNewReasoner(t *testing.T) {
 	tests := []struct {
 		name    string
 		cfg     config.ReasonerConfig
-		apiKey  string
+		apiKey  string // DEEPSEEK_API_KEY
+		cpKey   string // CLIPROXY_API_KEY
 		wantT   string // "%T" ожидаемого типа Reasoner
 		wantErr bool
 	}{
@@ -78,13 +81,37 @@ func TestNewReasoner(t *testing.T) {
 			name:   "deepseek с ключом",
 			cfg:    config.ReasonerConfig{Provider: "deepseek", Model: "deepseek-chat"},
 			apiKey: "sk-test",
-			wantT:  "*reason.DeepSeek",
+			wantT:  "*reason.OpenAI",
 		},
 		{
-			name:   "deepseek с ключом, но пустой model деградирует до noop",
+			name:   "deepseek с ключом и пустой model берёт дефолт реестра",
 			cfg:    config.ReasonerConfig{Provider: "deepseek", Model: ""},
 			apiKey: "sk-test",
+			wantT:  "*reason.OpenAI",
+		},
+		{
+			name:  "cliproxy с ключом, но пустой model деградирует до noop",
+			cfg:   config.ReasonerConfig{Provider: "cliproxy", Model: ""},
+			cpKey: "cp-test",
+			wantT: "*reason.Noop",
+		},
+		{
+			name:   "cliproxy без своего ключа деградирует до noop (ключ DeepSeek не подходит)",
+			cfg:    config.ReasonerConfig{Provider: "cliproxy", Model: "gemini-3-flash"},
+			apiKey: "sk-test",
 			wantT:  "*reason.Noop",
+		},
+		{
+			name:  "cliproxy с ключом",
+			cfg:   config.ReasonerConfig{Provider: "cliproxy", Model: "gemini-3-flash"},
+			cpKey: "cp-test",
+			wantT: "*reason.OpenAI",
+		},
+		{
+			name:  "cliproxy с ключом и своим base_url",
+			cfg:   config.ReasonerConfig{Provider: "cliproxy", BaseURL: "http://127.0.0.1:9999/v1", Model: "gemini-3-flash"},
+			cpKey: "cp-test",
+			wantT: "*reason.OpenAI",
 		},
 		{
 			name:    "неизвестный provider — ошибка",
@@ -96,6 +123,7 @@ func TestNewReasoner(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(deepseekAPIKeyEnv, tt.apiKey)
+			t.Setenv(cliproxyAPIKeyEnv, tt.cpKey)
 
 			got, err := newReasoner(tt.cfg)
 			if tt.wantErr {
@@ -111,6 +139,37 @@ func TestNewReasoner(t *testing.T) {
 				t.Fatalf("newReasoner(%+v) вернул тип %s, хотим %s", tt.cfg, gotT, tt.wantT)
 			}
 			var _ reason.Reasoner = got
+		})
+	}
+}
+
+// TestNewReasoner_ModelDefaultsFromRegistry — модель по умолчанию берётся из
+// реестра провайдера, а не из config.Default(): deepseek без model получает
+// deepseek-chat, cliproxy без model (дефолта нет) деградирует до Noop, а не
+// ходит в прокси с чужой моделью. Конфиг проходит через config.Load, как в рантайме.
+func TestNewReasoner_ModelDefaultsFromRegistry(t *testing.T) {
+	for _, tt := range []struct{ provider, wantT string }{
+		{"deepseek", "*reason.OpenAI"},
+		{"cliproxy", "*reason.Noop"},
+	} {
+		t.Run(tt.provider, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "agentmemory.toml")
+			if err := os.WriteFile(path, []byte("[reasoner]\nprovider = \""+tt.provider+"\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("config.Load: %v", err)
+			}
+			t.Setenv(deepseekAPIKeyEnv, "sk-test")
+			t.Setenv(cliproxyAPIKeyEnv, "cp-test")
+			got, err := newReasoner(cfg.Reasoner)
+			if err != nil {
+				t.Fatalf("newReasoner: %v", err)
+			}
+			if gotT := fmt.Sprintf("%T", got); gotT != tt.wantT {
+				t.Errorf("newReasoner(%s без model) = %s, хочу %s", tt.provider, gotT, tt.wantT)
+			}
 		})
 	}
 }

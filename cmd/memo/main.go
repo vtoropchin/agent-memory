@@ -7,6 +7,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"flag"
 	"fmt"
@@ -31,6 +32,10 @@ import (
 // deepseekAPIKeyEnv — переменная окружения с ключом DeepSeek (DESIGN.md §10). Ключ
 // никогда не читается из конфиг-файла и не логируется.
 const deepseekAPIKeyEnv = "DEEPSEEK_API_KEY"
+
+// cliproxyAPIKeyEnv — переменная окружения с ключом локального CLIProxyAPI (один из
+// api-keys его конфига; DESIGN.md §10, то же правило, что для DEEPSEEK_API_KEY).
+const cliproxyAPIKeyEnv = "CLIPROXY_API_KEY"
 
 // openaiAPIKeyEnv — переменная окружения с ключом OpenAI-совместимого эмбеддера
 // (DESIGN.md §13, то же правило, что для DEEPSEEK_API_KEY). Ключ никогда не
@@ -255,29 +260,43 @@ func openStore(cfg config.StoreConfig) (store.Store, error) {
 }
 
 // newReasoner создаёт Reasoner по конфигу. "" и "noop" отключают LLM-слой.
-// "deepseek" без ключа в env или с пустой model деградирует до Noop (сервер
-// должен стартовать — DESIGN.md §15): оба случая означают «LLM-слой не готов»,
-// а не ошибку конфигурации. С ключом и model — создаёт DeepSeek-клиент.
+// Остальные провайдеры (deepseek, cliproxy) — OpenAI-совместимый chat с
+// провайдер-специфичными env-ключом, base URL и моделью из реестра
+// reasonerProviders (init.go); reasoner.base_url/model в конфиге перекрывают дефолт. Без ключа в env или
+// с пустой model — деградация до Noop (сервер должен стартовать — DESIGN.md §15):
+// оба случая означают «LLM-слой не готов», а не ошибку конфигурации.
 // Неизвестный provider — ошибка при старте, это опечатка в конфиге, а не
 // runtime-деградация.
 func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
-	switch cfg.Provider {
-	case "", "noop":
+	if cfg.Provider == "" || cfg.Provider == "noop" {
 		return reason.NewNoop(), nil
-	case "deepseek":
-		key := os.Getenv(deepseekAPIKeyEnv)
-		if key == "" {
-			log.Printf("memo: reasoner.provider=deepseek, но %s пуст — суммаризация отключена", deepseekAPIKeyEnv)
-			return reason.NewNoop(), nil
-		}
-		if cfg.Model == "" {
-			log.Printf("memo: reasoner.provider=deepseek, но reasoner.model пуст — суммаризация отключена")
-			return reason.NewNoop(), nil
-		}
-		return reason.NewDeepSeek(key, cfg.Model)
-	default:
+	}
+	p, ok := providerByKey(reasonerProviders, cfg.Provider)
+	if !ok {
 		return nil, fmt.Errorf("неизвестный reasoner.provider %q", cfg.Provider)
 	}
+	key := os.Getenv(p.envKey)
+	if key == "" {
+		log.Printf("memo: reasoner.provider=%s, но %s пуст — суммаризация отключена", p.key, p.envKey)
+		return reason.NewNoop(), nil
+	}
+	model := reasonerModel(cfg, p)
+	if model == "" {
+		log.Printf("memo: reasoner.provider=%s, но reasoner.model пуст — суммаризация отключена", p.key)
+		return reason.NewNoop(), nil
+	}
+	return reason.NewOpenAI(reasonerBaseURL(cfg, p), model, key)
+}
+
+// reasonerBaseURL/reasonerModel — base URL и модель reasoner'а: значение из
+// конфига, а если оно пусто — дефолт провайдера из реестра (у cliproxy дефолтной
+// модели нет — пусто остаётся пустым). Общие для newReasoner и пробы doctor'а.
+func reasonerBaseURL(cfg config.ReasonerConfig, p providerSpec) string {
+	return cmp.Or(cfg.BaseURL, p.baseURL)
+}
+
+func reasonerModel(cfg config.ReasonerConfig, p providerSpec) string {
+	return cmp.Or(cfg.Model, p.defaultModel)
 }
 
 // reasonerAvailable отвечает, включён ли LLM-слой у экземпляра, собранного
@@ -293,7 +312,7 @@ func reasonerAvailable(r reason.Reasoner) bool {
 // providerAndModel нормализует пару provider/model из конфига для показа в
 // `memo web`: пустой provider — это noop (та же трактовка, что у newEmbedder/
 // newReasoner), а у noop нет модели, даже если config.Load подставил дефолт
-// (bge-m3/deepseek-chat) — иначе панель показала бы «noop, bge-m3». Живёт
+// (bge-m3) — иначе панель показала бы «noop, bge-m3». Живёт
 // рядом с фабриками, чтобы смена их дефолта не разошлась с панелью.
 func providerAndModel(provider, model string) (string, string) {
 	if provider == "" || provider == "noop" {

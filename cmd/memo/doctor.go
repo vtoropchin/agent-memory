@@ -130,7 +130,7 @@ func runDoctor(args []string, out io.Writer) (exitCode int, err error) {
 	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально; если задан — обязан существовать)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	jsonOut := fs.Bool("json", false, "печатать машиночитаемый JSON вместо человекочитаемого списка секций")
-	live := fs.Bool("live", false, "выполнить пробный запрос к Reasoner (DeepSeek) — стоит денег, по умолчанию выключено")
+	live := fs.Bool("live", false, "выполнить пробный запрос к Reasoner (DeepSeek/CLIProxyAPI) — у облачного провайдера стоит денег, по умолчанию выключено")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
 
 	cfg, err := config.Load(*configPath)
@@ -599,40 +599,43 @@ func embedderLivenessSection(ctx context.Context, cfg config.EmbedderConfig) sec
 }
 
 // reasonerSection — секция 6: ключ в env/.env найден? provider известен?
-// Живой запрос к DeepSeek НЕ выполняется по умолчанию (стоит денег) — только
-// под -live, минимальным пробным запросом с таймаутом probeTimeout. Пустой
-// ключ/модель — предупреждение (Reasoner=Noop — полноценно поддерживаемая
-// деградация, DESIGN.md §15), а не поломка.
+// Живой запрос к LLM НЕ выполняется по умолчанию (у облачных провайдеров стоит
+// денег) — только под -live, минимальным пробным запросом с таймаутом
+// probeTimeout. Пустой ключ/модель — предупреждение (Reasoner=Noop — полноценно
+// поддерживаемая деградация, DESIGN.md §15), а не поломка. Провайдер, env-ключ и
+// base URL — из того же реестра reasonerProviders, что у newReasoner.
 func reasonerSection(ctx context.Context, cfg config.ReasonerConfig, live bool) section {
 	const name = "Reasoner"
-	switch cfg.Provider {
-	case "", "noop":
+	if cfg.Provider == "" || cfg.Provider == "noop" {
 		return section{Name: name, Status: statusOK, Detail: "LLM-слой выключен конфигом (суммаризация/консолидация недоступны)"}
-	case "deepseek":
-		key := os.Getenv(deepseekAPIKeyEnv)
-		if key == "" {
-			return section{Name: name, Status: statusWarn, Detail: fmt.Sprintf("%s не найден (env/.env) — суммаризация/консолидация деградируют до Noop", deepseekAPIKeyEnv)}
-		}
-		if cfg.Model == "" {
-			return section{Name: name, Status: statusWarn, Detail: "reasoner.model пуст — суммаризация/консолидация деградируют до Noop"}
-		}
-		if !live {
-			return section{Name: name, Status: statusOK, Detail: fmt.Sprintf("provider=deepseek, ключ найден, model=%s (живой запрос не выполнялся — используйте -live)", cfg.Model)}
-		}
-
-		r, err := reason.NewDeepSeek(key, cfg.Model)
-		if err != nil {
-			return section{Name: name, Status: statusFail, Detail: fmt.Sprintf("создание клиента: %v", err)}
-		}
-		probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-		defer cancel()
-		if _, err := r.Complete(probeCtx, "Ответь одним словом: ок."); err != nil {
-			return section{Name: name, Status: statusFail, Detail: fmt.Sprintf("живой запрос к DeepSeek не удался: %v — суммаризация/консолидация деградируют до Noop", err)}
-		}
-		return section{Name: name, Status: statusOK, Detail: fmt.Sprintf("provider=deepseek, живой запрос успешен, model=%s", cfg.Model)}
-	default:
+	}
+	p, ok := providerByKey(reasonerProviders, cfg.Provider)
+	if !ok {
 		return section{Name: name, Status: statusFail, Detail: fmt.Sprintf("неизвестный reasoner.provider %q", cfg.Provider)}
 	}
+	key := os.Getenv(p.envKey)
+	if key == "" {
+		return section{Name: name, Status: statusWarn, Detail: fmt.Sprintf("%s не найден (env/.env) — суммаризация/консолидация деградируют до Noop", p.envKey)}
+	}
+	model := reasonerModel(cfg, p)
+	if model == "" {
+		return section{Name: name, Status: statusWarn, Detail: "reasoner.model пуст — суммаризация/консолидация деградируют до Noop"}
+	}
+	baseURL := reasonerBaseURL(cfg, p)
+	if !live {
+		return section{Name: name, Status: statusOK, Detail: fmt.Sprintf("provider=%s, ключ найден, model=%s, %s (живой запрос не выполнялся — используйте -live)", p.key, model, baseURL)}
+	}
+
+	r, err := reason.NewOpenAI(baseURL, model, key)
+	if err != nil {
+		return section{Name: name, Status: statusFail, Detail: fmt.Sprintf("создание клиента: %v", err)}
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	if _, err := r.Complete(probeCtx, "Ответь одним словом: ок."); err != nil {
+		return section{Name: name, Status: statusFail, Detail: fmt.Sprintf("живой запрос к %s не удался: %v — суммаризация/консолидация деградируют до Noop", p.key, err)}
+	}
+	return section{Name: name, Status: statusOK, Detail: fmt.Sprintf("provider=%s, живой запрос успешен, model=%s", p.key, model)}
 }
 
 // expandHomeLocal раскрывает ведущий "~" в путь до домашней директории

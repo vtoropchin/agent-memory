@@ -72,6 +72,11 @@ model    = "bge-m3"                        # любая ollama-модель; dim
 #            старте (DESIGN.md §13; раскладывается `memo init`, задача 5.4).
 #            Если ключ всё равно пуст, memo стартует с предупреждением и
 #            работает как noop (деградация, DESIGN §15).
+# cliproxy — локальный CLIProxyAPI (OpenAI-совместимый прокси к Gemini/Claude/
+#            Codex по подписке). Ключ — один из api-keys его конфига — в env
+#            CLIPROXY_API_KEY (или .env), модель обязательна: список —
+#            GET <base_url>/models. base_url по умолчанию http://127.0.0.1:8317/v1.
+# base_url — опционально у любого провайдера; пусто = дефолт провайдера.
 provider = "deepseek"
 model    = "deepseek-chat"
 #
@@ -79,6 +84,12 @@ model    = "deepseek-chat"
 # при отсутствии этой секции):
 # [reasoner]
 # provider = "noop"
+#
+# Альтернатива — CLIProxyAPI:
+# [reasoner]
+# provider = "cliproxy"
+# base_url = "http://127.0.0.1:8317/v1"
+# model    = "gemini-3-flash"
 
 [recall]
 default_token_budget = 800

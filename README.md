@@ -190,7 +190,8 @@ Bootstrap закрывает этот разрыв: запусти его **од
 Если `-config` — каталог, относительный `store.path` из конфига разрешается от этого
 каталога, а `.env` ищется в нём же (`.env` опционален).
 
-Ключ DeepSeek берётся из `DEEPSEEK_API_KEY` в окружении или из `.env` рядом с конфигом.
+Ключ DeepSeek берётся из `DEEPSEEK_API_KEY` в окружении или из `.env` рядом с конфигом,
+ключ CLIProxyAPI — так же из `CLIPROXY_API_KEY` (см. [Reasoner через CLIProxyAPI](#reasoner-через-cliproxyapi)).
 
 Флаги `memo init`:
 
@@ -203,7 +204,11 @@ Bootstrap закрывает этот разрыв: запусти его **од
 | `-ollama-url` | base URL ollama (дефолт `http://localhost:11434`) |
 | `-ollama-model` | модель эмбеддингов ollama (дефолт `bge-m3`) |
 | `-store` | путь к файлу SQLite (дефолт `~/.agentmemory/memory.db`) |
+| `-reasoner-provider` | `deepseek` (дефолт), `cliproxy` или `noop` |
+| `-reasoner-url` | base URL reasoner'а (для `cliproxy`, дефолт `http://127.0.0.1:8317/v1`) |
+| `-reasoner-model` | модель reasoner'а (для `deepseek` дефолт `deepseek-chat`; для `cliproxy` обязательна под `-no-input`) |
 | `-deepseek-key` | ключ DeepSeek — пишется в `<dir>/.env` (попадёт в историю shell, если задан флагом) |
+| `-cliproxy-key` | ключ CLIProxyAPI — пишется в `<dir>/.env` как `CLIPROXY_API_KEY` |
 | `-no-input` | не спрашивать интерактивно — только флаги и дефолты |
 
 Флаги `memo web`:
@@ -221,7 +226,7 @@ Bootstrap закрывает этот разрыв: запусти его **од
 | `-config` | путь к TOML-конфигу или каталогу проекта с `agentmemory.toml` (опционально) |
 | `-db` | путь к SQLite-файлу, переопределяет `store.path` из конфига |
 | `-json` | машиночитаемый JSON вместо человекочитаемого списка секций |
-| `-live` | выполнить пробный запрос к DeepSeek (стоит денег; по умолчанию выключено) |
+| `-live` | выполнить пробный запрос к Reasoner'у (у DeepSeek стоит денег; по умолчанию выключено) |
 
 `memo doctor` отвечает на вопрос «в каком режиме реально работает память и всё ли
 с ней хорошо» одной командой, строго read-only (не пишет в БД, не чинит): 7 секций
@@ -442,7 +447,7 @@ MVP: только SQLite+FTS5, без вектора и без LLM).
   пароль PostgreSQL — **не в этом файле**, а в `MEMO_POSTGRES_PASSWORD`.
 - `[embedder]` — `noop | ollama | openai`; при `ollama` `dim` определяется автоматически
   пробным эмбеддингом при старте, руками не задаётся.
-- `[reasoner]` — `noop | deepseek`; ключ **не в этом файле**.
+- `[reasoner]` — `noop | deepseek | cliproxy`, `model`, опционально `base_url`; ключ **не в этом файле**.
 - `[recall]` — дефолтный токен-бюджет брифа и веса ранжирования (relevance/importance/recency/access).
 - `[maint]` — интервалы фоновых джобов (decay, consolidation).
 - `[scope]` — имя текущего проекта (мультипроектность через общий файл БД + scope) и
@@ -450,8 +455,28 @@ MVP: только SQLite+FTS5, без вектора и без LLM).
 
 Секреты — только в окружении или в `.env` рядом с конфигом (`KEY=VALUE`, поддерживает
 `#`-комментарии и кавычки); shell-env приоритетнее `.env`, в TOML они не пишутся
-никогда. Это `DEEPSEEK_API_KEY` (Reasoner), `OPENAI_API_KEY` (embedder `openai`) и
+никогда. Это `DEEPSEEK_API_KEY`/`CLIPROXY_API_KEY` (Reasoner), `OPENAI_API_KEY` (embedder `openai`) и
 `MEMO_POSTGRES_PASSWORD` (хранилище `postgres`).
+
+### Reasoner через CLIProxyAPI
+
+Вместо DeepSeek суммаризацию и консолидацию может делать любая модель, доступная через
+локальный [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) (Gemini, Claude,
+Codex по подписке). Прокси говорит по OpenAI-совместимому API, memo ходит к нему тем же
+клиентом, что и к DeepSeek.
+
+```toml
+[reasoner]
+provider = "cliproxy"
+base_url = "http://127.0.0.1:8317/v1"   # дефолт; host/port — из config.yaml прокси
+model    = "gemini-3-flash"             # любая из GET /v1/models прокси
+```
+
+Ключ — один из `api-keys` конфига прокси — кладётся в `CLIPROXY_API_KEY` (env или `.env`
+рядом с конфигом). То же делает `memo init -reasoner-provider cliproxy` (в мастере —
+пункт `cliproxy`, модели подтягиваются из прокси). Проверить связку:
+`memo doctor -live`. Прокси не поднят или ключ пуст — memo работает без суммаризации
+(деградация, а не падение).
 
 ## Как это устроено
 

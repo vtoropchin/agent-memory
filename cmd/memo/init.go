@@ -62,13 +62,14 @@ const (
 	defaultOpenAIBaseURL    = "https://api.openai.com"
 	defaultOpenAIModel      = "text-embedding-3-small"
 	defaultReasonerProvider = "deepseek"
-	// defaultDeepSeekBaseURL используется ТОЛЬКО для интерактивного запроса
-	// списка моделей reasoner (wizard.go/providers.go) — рантайм-клиент
-	// reason.DeepSeek base URL из конфига не читает, он хардкодит свой
-	// дефолт внутри пакета reason; секция [reasoner] в TOML полем base_url
-	// намеренно не расширяется (renderReasonerTomlBlock).
+	// Дефолтные base URL OpenAI-совместимых reasoner'ов — по тому же правилу
+	// «одна константа на init и рантайм», что у эмбеддера: на них ссылается
+	// реестр reasonerProviders, из которого берут адрес и newReasoner, и проба
+	// doctor'а, и запрос списка моделей в мастере. У DeepSeek API нет префикса
+	// /v1, у CLIProxyAPI он есть (порт 8317 — дефолт его config.yaml).
 	defaultDeepSeekBaseURL = "https://api.deepseek.com"
 	defaultDeepSeekModel   = "deepseek-chat"
+	defaultCLIProxyBaseURL = "http://127.0.0.1:8317/v1"
 	defaultStorePath       = "~/.agentmemory/memory.db"
 
 	// Дефолты полей подключения к PostgreSQL (DESIGN.md §13, §14 Этап 12).
@@ -124,6 +125,11 @@ type providerSpec struct {
 	key    string
 	label  string
 	envKey string
+	// baseURL/defaultModel — дефолтные корень API и модель провайдера reasoner
+	// (пусто у noop; у cliproxy нет дефолтной модели — набор зависит от аккаунтов
+	// прокси). У эмбеддеров дефолты пока живут в switch'ах applyInitDefaults/newEmbedder.
+	baseURL      string
+	defaultModel string
 }
 
 // embedderProviders/reasonerProviders — реестры провайдеров в порядке показа
@@ -135,7 +141,8 @@ var embedderProviders = []providerSpec{
 }
 
 var reasonerProviders = []providerSpec{
-	{key: "deepseek", label: "deepseek", envKey: deepseekAPIKeyEnv},
+	{key: "deepseek", label: "deepseek", envKey: deepseekAPIKeyEnv, baseURL: defaultDeepSeekBaseURL, defaultModel: defaultDeepSeekModel},
+	{key: "cliproxy", label: "cliproxy (локальный CLIProxyAPI: Gemini, Claude, Codex по подписке)", envKey: cliproxyAPIKeyEnv, baseURL: defaultCLIProxyBaseURL},
 	{key: "noop", label: "noop (без LLM)"},
 }
 
@@ -205,13 +212,16 @@ func providerByKey(providers []providerSpec, key string) (providerSpec, bool) {
 }
 
 // keyField возвращает указатель на поле initConfig, хранящее API-ключ этого
-// провайдера (DeepseekKey для DEEPSEEK_API_KEY, OpenAIKey для OPENAI_API_KEY),
+// провайдера (DeepseekKey для DEEPSEEK_API_KEY, CLIProxyKey для CLIPROXY_API_KEY,
+// OpenAIKey для OPENAI_API_KEY),
 // либо nil, если провайдер (envKey=="") ключа не требует. Единственное место,
 // связывающее провайдера с полем initConfig, хранящим его секрет.
 func (p providerSpec) keyField(cfg *initConfig) *string {
 	switch p.envKey {
 	case deepseekAPIKeyEnv:
 		return &cfg.DeepseekKey
+	case cliproxyAPIKeyEnv:
+		return &cfg.CLIProxyKey
 	case openaiAPIKeyEnv:
 		return &cfg.OpenAIKey
 	default:
@@ -391,15 +401,33 @@ func renderReasonerTomlBlock(cfg initConfig) string {
 	switch cfg.ReasonerProvider {
 	case "noop":
 		return "# Без LLM-суммаризации/консолидации (DESIGN.md §15).\nprovider = \"noop\"\n"
-	default: // "deepseek"
+	case "cliproxy":
+		return fmt.Sprintf(`# Локальный CLIProxyAPI (OpenAI-совместимый прокси к Gemini/Claude/Codex по
+# подписке). Ключ — один из api-keys его конфига — берётся из env CLIPROXY_API_KEY
+# (или .env рядом с этим конфигом), в TOML не пишется (DESIGN.md §13). Пустой
+# ключ или неподнятый прокси — деградация до noop (§15), память работает.
+provider = "cliproxy"
+base_url = "%s"
+model    = "%s"
+`, escapeTOMLString(cfg.ReasonerBaseURL), escapeTOMLString(cfg.ReasonerModel))
+	case "deepseek":
+		var baseURL string
+		if cfg.ReasonerBaseURL != "" {
+			baseURL = fmt.Sprintf("base_url = \"%s\"\n", escapeTOMLString(cfg.ReasonerBaseURL))
+		}
 		return fmt.Sprintf(`# DeepSeek chat: ключ берётся из env DEEPSEEK_API_KEY. Если в shell-env его нет,
 # memo сам подхватывает его из .env рядом с этим конфигом при старте (см.
 # loadDotEnv в main.go) — .env раскладывается этим же "memo init". Пустой
 # ключ — деградация до noop (§15): recall без суммаризации, консолидация
 # недоступна, но память работает.
 provider = "deepseek"
-model    = "%s"
-`, escapeTOMLString(cfg.ReasonerModel))
+%smodel    = "%s"
+`, baseURL, escapeTOMLString(cfg.ReasonerModel))
+	default:
+		// Недостижимо: doInit пропускает только ключи reasonerProviders, а
+		// TestRenderReasonerTomlBlock_CoversRegistry ловит провайдера, добавленного
+		// в реестр без своей ветки здесь (иначе init молча записал бы чужой provider).
+		panic(fmt.Sprintf("renderReasonerTomlBlock: провайдер %q не описан", cfg.ReasonerProvider))
 	}
 }
 
@@ -530,8 +558,9 @@ type initConfig struct {
 	EmbedderProvider string // ollama | openai | noop
 	EmbedderBaseURL  string // ollama/openai: base URL; noop — не используется
 	EmbedderModel    string // ollama/openai: модель эмбеддинга; noop — не используется
-	ReasonerProvider string // deepseek | noop
-	ReasonerModel    string // deepseek: модель reasoner; noop — не используется
+	ReasonerProvider string // deepseek | cliproxy | noop
+	ReasonerBaseURL  string // cliproxy: base URL; deepseek — дефолт провайдера, в TOML не пишется; noop — не используется
+	ReasonerModel    string // deepseek/cliproxy: модель reasoner; noop — не используется
 	StoreDriver      string // "" (== sqlite) | sqlite | postgres
 	StorePath        string // только если StoreDriver sqlite: путь к файлу БД
 	PostgresHost     string // только если StoreDriver == "postgres"
@@ -542,6 +571,7 @@ type initConfig struct {
 	PostgresPassword string // только если StoreDriver == "postgres"; в TOML не попадает никогда — только в .env
 	OpenAIKey        string // только если EmbedderProvider == "openai"
 	DeepseekKey      string // только если ReasonerProvider == "deepseek"
+	CLIProxyKey      string // только если ReasonerProvider == "cliproxy"
 	Hooks            string // "" | session-start | session-start+prompt-submit | none (см. hooksOptions)
 	Force            bool
 }
@@ -870,7 +900,8 @@ func runInit(args []string, out io.Writer) error {
 	ollamaURL := fs.String("ollama-url", "", "алиас -embedder-url (для embedder-provider=ollama, дефолт "+defaultOllamaBaseURL+")")
 	ollamaModel := fs.String("ollama-model", "", "алиас -embedder-model (для embedder-provider=ollama, дефолт "+defaultOllamaModel+")")
 	reasonerProvider := fs.String("reasoner-provider", "", fmt.Sprintf("провайдер reasoner (%s); дефолт %s", strings.Join(reasonerProviderOptions, ", "), defaultReasonerProvider))
-	reasonerModel := fs.String("reasoner-model", "", "модель reasoner (для reasoner-provider=deepseek, дефолт "+defaultDeepSeekModel+")")
+	reasonerURL := fs.String("reasoner-url", "", "base URL reasoner (для reasoner-provider=cliproxy, дефолт "+defaultCLIProxyBaseURL+")")
+	reasonerModel := fs.String("reasoner-model", "", "модель reasoner (для deepseek дефолт "+defaultDeepSeekModel+"; для cliproxy обязательна без интерактивного ввода — список: GET <base URL>/models)")
 	storeDriver := fs.String("store-driver", "", fmt.Sprintf("бэкенд хранилища (%s); дефолт %s", strings.Join(storeDriverOptions, ", "), storeDriverSQLite))
 	storePath := fs.String("store", "", "путь к файлу SQLite — только при -store-driver="+storeDriverSQLite+" (дефолт "+defaultStorePath+")")
 	postgresHost := fs.String("postgres-host", "", "адрес сервера PostgreSQL (обязателен при -store-driver="+storeDriverPostgres+")")
@@ -879,6 +910,7 @@ func runInit(args []string, out io.Writer) error {
 	postgresDBName := fs.String("postgres-dbname", "", "имя базы PostgreSQL (для -store-driver="+storeDriverPostgres+", дефолт "+defaultPostgresDBName+")")
 	postgresSSLMode := fs.String("postgres-sslmode", "", "режим TLS PostgreSQL (для -store-driver="+storeDriverPostgres+", дефолт "+defaultPostgresSSLMode+")")
 	postgresPassword := fs.String("postgres-password", "", "пароль PostgreSQL — пишется в <dir>/.env как "+memoPostgresPasswordEnv+", в TOML не попадает никогда; пустой пароль допустим (trust-аутентификация). Осторожно: попадёт в историю shell и будет виден в `ps` на время работы команды — надёжнее заранее положить строку "+memoPostgresPasswordEnv+"=... в <dir>/.env")
+	cliproxyKey := fs.String("cliproxy-key", "", "ключ CLIProxyAPI (один из api-keys его конфига) — пишется в <dir>/.env как "+cliproxyAPIKeyEnv+", только если reasoner-provider=cliproxy (осторожно: попадёт в историю shell)")
 	deepseekKey := fs.String("deepseek-key", "", "ключ DeepSeek API — пишется в <dir>/.env, только если reasoner-provider=deepseek (осторожно: попадёт в историю shell)")
 	openaiKey := fs.String("openai-key", "", "ключ OpenAI API (или env OPENAI_API_KEY) — пишется в <dir>/.env, только если embedder-provider=openai")
 	hooks := fs.String("hooks", "", fmt.Sprintf("хуки харнесса для ambient-режима (%s); поддерживают Claude Code и dsh (второй — через мост dsh-hooks-claude-code), у opencode хуков нет. Дефолт %s в интерактивном режиме, %s без него", strings.Join(hooksOptions, ", "), hooksSessionStart, hooksNone))
@@ -909,6 +941,7 @@ func runInit(args []string, out io.Writer) error {
 		EmbedderBaseURL:  cmp.Or(*embedderURL, *ollamaURL),
 		EmbedderModel:    cmp.Or(*embedderModel, *ollamaModel),
 		ReasonerProvider: *reasonerProvider,
+		ReasonerBaseURL:  *reasonerURL,
 		ReasonerModel:    *reasonerModel,
 		StoreDriver:      *storeDriver,
 		StorePath:        *storePath,
@@ -919,6 +952,7 @@ func runInit(args []string, out io.Writer) error {
 		PostgresSSLMode:  *postgresSSLMode,
 		PostgresPassword: *postgresPassword,
 		DeepseekKey:      *deepseekKey,
+		CLIProxyKey:      *cliproxyKey,
 		OpenAIKey:        openaiKeyVal,
 		Hooks:            *hooks,
 	}
@@ -1010,10 +1044,20 @@ func applyInitDefaults(cfg initConfig) initConfig {
 	}
 	switch cfg.ReasonerProvider {
 	case "deepseek":
+		// base_url DeepSeek пишется в TOML, только если задан явно (-reasoner-url):
+		// иначе рантайм берёт дефолт реестра, а дефолтный конфиг остаётся
+		// побайтово прежним.
 		if cfg.ReasonerModel == "" {
 			cfg.ReasonerModel = defaultDeepSeekModel
 		}
-	default: // "noop" — model reasoner'у не нужен
+	case "cliproxy":
+		// Дефолтной модели нет: набор зависит от аккаунтов, подключённых к
+		// прокси, — пустую модель отвергает doInit.
+		if cfg.ReasonerBaseURL == "" {
+			cfg.ReasonerBaseURL = defaultCLIProxyBaseURL
+		}
+	default: // "noop" — base_url/model reasoner'у не нужны
+		cfg.ReasonerBaseURL = ""
 		cfg.ReasonerModel = ""
 	}
 	clearUnselectedProviderKeys(&cfg, embedderProviders, cfg.EmbedderProvider)
@@ -1092,6 +1136,9 @@ func doInit(cfg initConfig, out io.Writer) error {
 	}
 
 	cfg = applyInitDefaults(cfg)
+	if cfg.ReasonerProvider == "cliproxy" && cfg.ReasonerModel == "" {
+		return fmt.Errorf("для reasoner-provider=cliproxy задай -reasoner-model — список моделей прокси: GET %s/models", cfg.ReasonerBaseURL)
+	}
 
 	// Валидация хранилища — ПОСЛЕ applyInitDefaults, в отличие от провайдеров
 	// выше: правила берутся у config.StoreConfig.Validate (та же проверка, что

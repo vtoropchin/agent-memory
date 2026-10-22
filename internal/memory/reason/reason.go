@@ -1,11 +1,10 @@
 // Package reason определяет интерфейс Reasoner — LLM-слой для суммаризации и
-// консолидации памяти (DESIGN.md §6, §10) и заглушку Noop для Этапа 1, до подключения
-// DeepSeek на Этапе 2.
+// консолидации памяти (DESIGN.md §6, §10), заглушку Noop и OpenAI-совместимый клиент.
 package reason
 
 import "context"
 
-// Reasoner — текстовый процессор памяти поверх chat-модели (DeepSeek).
+// Reasoner — текстовый процессор памяти поверх chat-модели (DeepSeek, CLIProxyAPI).
 type Reasoner interface {
 	Complete(ctx context.Context, prompt string) (string, error)
 }

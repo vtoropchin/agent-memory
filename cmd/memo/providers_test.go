@@ -169,7 +169,7 @@ func TestFetchOpenAIEmbeddingModels(t *testing.T) {
 	})
 }
 
-func TestFetchDeepSeekModels(t *testing.T) {
+func TestFetchChatModels(t *testing.T) {
 	t.Run("успех", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/models" {
@@ -186,13 +186,13 @@ func TestFetchDeepSeekModels(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		got, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-test")
+		got, err := fetchChatModels(context.Background(), srv.URL, "sk-test")
 		if err != nil {
-			t.Fatalf("fetchDeepSeekModels: %v", err)
+			t.Fatalf("fetchChatModels: %v", err)
 		}
 		want := []string{"deepseek-chat", "deepseek-reasoner"}
 		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-			t.Errorf("fetchDeepSeekModels = %v, хочу %v", got, want)
+			t.Errorf("fetchChatModels = %v, хочу %v", got, want)
 		}
 	})
 
@@ -203,12 +203,12 @@ func TestFetchDeepSeekModels(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		got, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-test")
+		got, err := fetchChatModels(context.Background(), srv.URL, "sk-test")
 		if err != nil {
-			t.Fatalf("fetchDeepSeekModels: %v", err)
+			t.Fatalf("fetchChatModels: %v", err)
 		}
 		if len(got) != 0 {
-			t.Errorf("fetchDeepSeekModels(пустой data) = %v, хочу пустой слайс", got)
+			t.Errorf("fetchChatModels(пустой data) = %v, хочу пустой слайс", got)
 		}
 	})
 
@@ -219,9 +219,9 @@ func TestFetchDeepSeekModels(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		_, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-bogus")
+		_, err := fetchChatModels(context.Background(), srv.URL, "sk-bogus")
 		if err == nil {
-			t.Fatalf("fetchDeepSeekModels(неверный ключ) = nil error, хочу ошибку")
+			t.Fatalf("fetchChatModels(неверный ключ) = nil error, хочу ошибку")
 		}
 		if !strings.Contains(err.Error(), "401") {
 			t.Errorf("ошибка не содержит статус-код 401: %v", err)
@@ -232,8 +232,8 @@ func TestFetchDeepSeekModels(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		srv.Close()
 
-		if _, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-test"); err == nil {
-			t.Fatalf("fetchDeepSeekModels(недоступный сервер) = nil error, хочу ошибку")
+		if _, err := fetchChatModels(context.Background(), srv.URL, "sk-test"); err == nil {
+			t.Fatalf("fetchChatModels(недоступный сервер) = nil error, хочу ошибку")
 		}
 	})
 
@@ -244,8 +244,8 @@ func TestFetchDeepSeekModels(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		if _, err := fetchDeepSeekModels(context.Background(), srv.URL, "sk-test"); err == nil {
-			t.Fatalf("fetchDeepSeekModels(битый JSON) = nil error, хочу ошибку")
+		if _, err := fetchChatModels(context.Background(), srv.URL, "sk-test"); err == nil {
+			t.Fatalf("fetchChatModels(битый JSON) = nil error, хочу ошибку")
 		}
 	})
 }

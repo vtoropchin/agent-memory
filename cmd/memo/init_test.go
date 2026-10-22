@@ -1402,6 +1402,110 @@ func TestRunInit_ReasonerModelFlag(t *testing.T) {
 	}
 }
 
+// TestRunInit_CLIProxyReasoner проверяет reasoner=cliproxy без интерактивного
+// ввода: в agentmemory.toml — provider/base_url (дефолт прокси)/model, ключ — только
+// в .env как CLIPROXY_API_KEY, в .mcp.json — плейсхолдер именно этого ключа, а
+// не DEEPSEEK_API_KEY.
+func TestRunInit_CLIProxyReasoner(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := runInit([]string{
+		"-no-input",
+		"-project", "myproj",
+		"-dir", dir,
+		"-embedder-provider", "noop",
+		"-reasoner-provider", "cliproxy",
+		"-reasoner-model", "gemini-3-flash",
+		"-cliproxy-key", "cp-secret",
+	}, &out)
+	if err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Reasoner.Provider != "cliproxy" || cfg.Reasoner.BaseURL != defaultCLIProxyBaseURL || cfg.Reasoner.Model != "gemini-3-flash" {
+		t.Errorf("Reasoner = %+v, хочу cliproxy/%s/gemini-3-flash", cfg.Reasoner, defaultCLIProxyBaseURL)
+	}
+	tomlRaw, err := os.ReadFile(filepath.Join(dir, "agentmemory.toml"))
+	if err != nil {
+		t.Fatalf("чтение agentmemory.toml: %v", err)
+	}
+	if strings.Contains(string(tomlRaw), "cp-secret") {
+		t.Errorf("ключ CLIProxyAPI попал в agentmemory.toml")
+	}
+
+	envRaw, err := os.ReadFile(filepath.Join(dir, ".env"))
+	if err != nil {
+		t.Fatalf("чтение .env: %v", err)
+	}
+	if strings.TrimSpace(string(envRaw)) != cliproxyAPIKeyEnv+"=cp-secret" {
+		t.Errorf(".env = %q, хочу одну строку %s=cp-secret", envRaw, cliproxyAPIKeyEnv)
+	}
+
+	mcpRaw, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
+	if err != nil {
+		t.Fatalf("чтение .mcp.json: %v", err)
+	}
+	var mcpCfg mcpConfigFile
+	if err := json.Unmarshal(mcpRaw, &mcpCfg); err != nil {
+		t.Fatalf(".mcp.json невалиден: %v", err)
+	}
+	env := mcpCfg.MCPServers["memo"].Env
+	if env[cliproxyAPIKeyEnv] != "${"+cliproxyAPIKeyEnv+":-}" {
+		t.Errorf(".mcp.json env %s = %q", cliproxyAPIKeyEnv, env[cliproxyAPIKeyEnv])
+	}
+	if _, ok := env[deepseekAPIKeyEnv]; ok {
+		t.Errorf(".mcp.json env содержит %s при reasoner=cliproxy: %v", deepseekAPIKeyEnv, env)
+	}
+}
+
+// TestDoInit_CLIProxyWithoutModelIsError — у CLIProxyAPI нет дефолтной модели
+// (набор зависит от подключённых аккаунтов): без -reasoner-model init падает с
+// подсказкой, а не пишет конфиг с пустой моделью (тихая деградация до noop).
+func TestDoInit_CLIProxyWithoutModelIsError(t *testing.T) {
+	dir := t.TempDir()
+	var out strings.Builder
+	err := doInit(initConfig{Project: "myproj", Dir: dir, EmbedderProvider: "noop", ReasonerProvider: "cliproxy"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "-reasoner-model") {
+		t.Fatalf("doInit(cliproxy без модели) = %v, хочу ошибку с подсказкой про -reasoner-model", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "agentmemory.toml")); statErr == nil {
+		t.Errorf("agentmemory.toml записан, хотя init завершился ошибкой")
+	}
+}
+
+// TestRenderReasonerTomlBlock_CoversRegistry — у каждого провайдера реестра своя
+// ветка рендера (provider в TOML совпадает с ключом), а у каждого, кроме noop,
+// есть дефолтный base URL: иначе reason.NewOpenAI отказал бы и memo не стартовал.
+func TestRenderReasonerTomlBlock_CoversRegistry(t *testing.T) {
+	for _, p := range reasonerProviders {
+		block := renderReasonerTomlBlock(applyInitDefaults(initConfig{ReasonerProvider: p.key, ReasonerModel: "m"}))
+		if !strings.Contains(block, `provider = "`+p.key+`"`) {
+			t.Errorf("блок [reasoner] для %q не содержит provider = %q:\n%s", p.key, p.key, block)
+		}
+		if p.key != "noop" && p.baseURL == "" {
+			t.Errorf("reasonerProviders[%q].baseURL пуст", p.key)
+		}
+	}
+}
+
+// TestRenderReasonerTomlBlock_DeepSeekBaseURL — явный -reasoner-url у deepseek
+// доходит до TOML (рантайм его уважает), а без него base_url не пишется вовсе и
+// дефолтный конфиг остаётся прежним.
+func TestRenderReasonerTomlBlock_DeepSeekBaseURL(t *testing.T) {
+	block := renderReasonerTomlBlock(applyInitDefaults(initConfig{ReasonerProvider: "deepseek"}))
+	if strings.Contains(block, "base_url") {
+		t.Errorf("дефолтный блок deepseek содержит base_url:\n%s", block)
+	}
+	block = renderReasonerTomlBlock(applyInitDefaults(initConfig{ReasonerProvider: "deepseek", ReasonerBaseURL: "https://example.test"}))
+	if !strings.Contains(block, `base_url = "https://example.test"`) {
+		t.Errorf("блок deepseek не содержит заданный base_url:\n%s", block)
+	}
+}
+
 // TestRenderReasonerTomlBlock_UsesConfiguredModel проверяет, что
 // renderReasonerTomlBlock пишет cfg.ReasonerModel в TOML, а не хардкоженное
 // имя модели (регрессия задачи: раньше model была захардкожена как
@@ -1792,7 +1896,7 @@ func TestProviderRegistries_OptionsAndEnvKeysMatchExpected(t *testing.T) {
 	if strings.Join(embedderProviderOptions, ",") != strings.Join(wantEmbedderOptions, ",") {
 		t.Errorf("embedderProviderOptions = %v, хочу %v", embedderProviderOptions, wantEmbedderOptions)
 	}
-	wantReasonerOptions := []string{"deepseek", "noop"}
+	wantReasonerOptions := []string{"deepseek", "cliproxy", "noop"}
 	if strings.Join(reasonerProviderOptions, ",") != strings.Join(wantReasonerOptions, ",") {
 		t.Errorf("reasonerProviderOptions = %v, хочу %v", reasonerProviderOptions, wantReasonerOptions)
 	}
@@ -1814,6 +1918,7 @@ func TestProviderRegistries_OptionsAndEnvKeysMatchExpected(t *testing.T) {
 
 	wantReasonerEnvKeys := map[string]string{
 		"deepseek": deepseekAPIKeyEnv,
+		"cliproxy": cliproxyAPIKeyEnv,
 		"noop":     "",
 	}
 	for key, wantEnv := range wantReasonerEnvKeys {

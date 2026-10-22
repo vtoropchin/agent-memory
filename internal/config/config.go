@@ -93,8 +93,11 @@ type EmbedderConfig struct {
 
 // ReasonerConfig — настройки Reasoner. Ключ провайдера читается из env, не отсюда.
 type ReasonerConfig struct {
-	Provider string `toml:"provider"` // noop | deepseek
-	Model    string `toml:"model"`
+	Provider string `toml:"provider"` // noop | deepseek | cliproxy
+	// BaseURL — корень OpenAI-совместимого API; пусто — дефолт провайдера
+	// (выбирает cmd/memo, по образцу EmbedderConfig.BaseURL).
+	BaseURL string `toml:"base_url"`
+	Model   string `toml:"model"`
 }
 
 // RecallWeights — веса бизнес-сигналов финального ранжирования (DESIGN.md §8).
@@ -237,7 +240,7 @@ func Default() Config {
 		},
 		Reasoner: ReasonerConfig{
 			Provider: "noop", // Этап 1: без Reasoner
-			Model:    "deepseek-chat",
+			Model:    "",     // дефолт модели провайдер-специфичен (у cliproxy его нет) — подставляется в cmd/memo.newReasoner, не здесь
 		},
 		Recall: RecallConfig{
 			DefaultTokenBudget: 800,

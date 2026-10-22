@@ -201,9 +201,9 @@ func TestReasonerAvailable(t *testing.T) {
 	if reasonerAvailable(reason.NewNoop()) {
 		t.Error("Noop должен считаться недоступным")
 	}
-	ds, err := reason.NewDeepSeek("key", "model")
+	ds, err := reason.NewOpenAI("http://localhost", "model", "key")
 	if err != nil {
-		t.Fatalf("NewDeepSeek: %v", err)
+		t.Fatalf("NewOpenAI: %v", err)
 	}
 	if !reasonerAvailable(ds) {
 		t.Error("DeepSeek должен считаться доступным")

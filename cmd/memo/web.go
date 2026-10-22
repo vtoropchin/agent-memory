@@ -180,7 +180,7 @@ type webInstance struct {
 	StoreTarget       string // путь к файлу или postgres://host:port/db — без пароля (config.StoreConfig.Target)
 	EmbedderProvider  string // noop | ollama | openai
 	EmbedderModel     string
-	ReasonerProvider  string // noop | deepseek
+	ReasonerProvider  string // noop | deepseek | cliproxy
 	ReasonerModel     string
 	ReasonerAvailable bool
 }

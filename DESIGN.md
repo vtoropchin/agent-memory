@@ -107,7 +107,7 @@
 └──────────────────────────────────────┘
         ▲                     ▲
         │ Embedder            │ Reasoner
-   (ollama/bge-m3, opt.)  (DeepSeek chat)
+   (ollama/bge-m3, opt.)  (DeepSeek | CLIProxyAPI)
 ```
 
 - **Writer** — приём и структурирование записи: дедуп, классификация, связывание.
@@ -118,7 +118,8 @@
   `sqlite-vec`) и PostgreSQL (общая база команды: метаданные + `tsvector`/GIN + вектор
   pgvector/HNSW). Подробности различий — §4.
 - **Embedder** — опциональный семантический вектор (локальный ollama). Деградирует до FTS5.
-- **Reasoner** — DeepSeek chat для суммаризации выдачи и консолидации (LLM-операции).
+- **Reasoner** — OpenAI-совместимый chat (DeepSeek или локальный CLIProxyAPI) для
+  суммаризации выдачи и консолидации (LLM-операции).
 
 ---
 
@@ -275,7 +276,7 @@ PostgreSQL делает сервер: поведение с отбрасыван
     store/              — интерфейс Store + реализации: SQLite (FTS5 + sqlite-vec, дефолт)
                           и PostgreSQL (tsvector/GIN + pgvector/HNSW, общая база команды)
     embed/              — интерфейс Embedder (noop | ollama | openai)
-    reason/             — интерфейс Reasoner (DeepSeek)
+    reason/             — интерфейс Reasoner + OpenAI-совместимый chat (DeepSeek, CLIProxyAPI)
     write/              — ingest: дедуп, классификация, связывание
     recall/             — гибридный поиск (RRF) + ранжирование + сборка брифа
     maint/              — джобы: decay, consolidation, reindex, dedup-sweep
@@ -326,7 +327,7 @@ type Embedder interface {
 }
 
 type Reasoner interface {
-    Complete(ctx context.Context, prompt string) (string, error) // DeepSeek chat
+    Complete(ctx context.Context, prompt string) (string, error) // OpenAI-совместимый chat
 }
 ```
 
@@ -446,14 +447,26 @@ _Свёрнуто ещё 12 менее релевантных записей. У
 
 ---
 
-## 10. Reasoner — DeepSeek
+## 10. Reasoner — OpenAI-совместимый chat
 
-DeepSeek chat (OpenAI-совместимый) в роли текстового процессора памяти:
+Chat-модель в роли текстового процессора памяти:
 - суммаризация recall-выдачи в абзац + факты (опционально);
 - консолидация кластеров `episodic` в обобщённые `semantic`;
 - дедуп-суждения в спорных случаях.
 
-Ключ — `DEEPSEEK_API_KEY` (env). Для эмбеддингов DeepSeek **не используется**.
+Адаптер один — `reason.OpenAI` (`POST {base_url}/chat/completions`, Bearer-ключ);
+провайдеры различаются только base URL, env-ключом и моделью, которые выбирает
+composition root по реестру `reasonerProviders` (`cmd/memo/init.go`):
+
+| `provider` | Дефолтный `base_url` | Ключ (env) | Модель |
+|---|---|---|---|
+| `deepseek` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` | дефолт `deepseek-chat` |
+| `cliproxy` | `http://127.0.0.1:8317/v1` | `CLIPROXY_API_KEY` | обязательна: набор зависит от аккаунтов прокси (`GET {base_url}/models`) |
+
+`cliproxy` — локальный [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI):
+OpenAI-совместимый прокси к Gemini/Claude/Codex по подписке; ключ — один из `api-keys`
+его конфига. `reasoner.base_url` в TOML перекрывает дефолт провайдера. Без ключа или
+модели — деградация до Noop (§15). Для эмбеддингов reasoner **не используется**.
 
 ---
 
@@ -844,8 +857,8 @@ base_url = "http://localhost:11434"
 model    = "bge-m3"                        # любая ollama-модель; dim определяется автоматически
 
 [reasoner]
-provider = "deepseek"                      # ключ в env DEEPSEEK_API_KEY
-model    = "deepseek-chat"
+provider = "deepseek"                      # noop | deepseek | cliproxy (§10); ключ в env DEEPSEEK_API_KEY
+model    = "deepseek-chat"                 # base_url — опционально, пусто = дефолт провайдера
 
 [recall]
 default_token_budget = 800
@@ -861,7 +874,7 @@ project = "myproject"                      # → "project:myproject"; пусто
 shared  = ["user:*"]                       # пространства, всегда добавляемые к recall по умолчанию
 ```
 
-**`.env`.** Ключи `DEEPSEEK_API_KEY` (reasoner), `OPENAI_API_KEY` (embedder, §9) и
+**`.env`.** Ключи `DEEPSEEK_API_KEY`/`CLIPROXY_API_KEY` (reasoner), `OPENAI_API_KEY` (embedder, §9) и
 `MEMO_POSTGRES_PASSWORD` (`[store] driver = "postgres"`) — секреты, в TOML-конфиг никогда
 не пишутся; для PostgreSQL в TOML остаются только несекретные параметры подключения
 (host/port/user/dbname/sslmode), пароль читается исключительно из env — то же правило,
@@ -873,7 +886,7 @@ shell-env (shell-env приоритетнее). Отсутствие `.env` — 
 (`0600`, права только для владельца) и добавляется в `.gitignore` командой `memo init`
 (§14 Этап 5, задача 5.4; выбор провайдеров — задача 11.1), но **только с ключами
 провайдеров, реально выбранных в этом прогоне init** — `DEEPSEEK_API_KEY`, если
-`reasoner=deepseek` и ключ введён; `OPENAI_API_KEY`, если `embedder=openai` и ключ введён.
+`reasoner=deepseek` и ключ введён (`CLIPROXY_API_KEY` — при `reasoner=cliproxy`); `OPENAI_API_KEY`, если `embedder=openai` и ключ введён.
 Аналогично `.mcp.json`/opencode-конфиг получают в `env` плейсхолдер только выбранного
 провайдера, не оба сразу — и оверлей dsh в том же правиле, но своим синтаксисом
 (см. ниже).
@@ -913,7 +926,7 @@ MCP-серверу полностью унаследованное окруже�
 **`memo init` — выбор провайдеров (задача 11.1).** Интерактивный (TTY) прогон — select
 стрелками: embedder `ollama` (дефолт, база + реально установленные модели через
 `GET /api/tags`) / `openai` (токен → `GET /v1/models`, фильтр по `embedding` в id) / `noop`;
-reasoner `deepseek` (дефолт) / `noop`. Для `ollama` визард диагностирует окружение и
+reasoner `deepseek` (дефолт) / `cliproxy` (base URL → ключ → `GET {base_url}/models`) / `noop`. Для `ollama` визард диагностирует окружение и
 различает 4 состояния: happy (сервер отвечает, есть распознанная embedding-модель) → select
 только из embedding-моделей; no-models / not-running / not-installed → печатает причину,
 рекомендации моделей с обоснованием и ОС-специфичные инструкции установки/запуска, затем меню

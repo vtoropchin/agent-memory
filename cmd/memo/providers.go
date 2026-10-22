@@ -83,8 +83,8 @@ func fetchOpenAIEmbeddingModels(ctx context.Context, baseURL, key string) ([]str
 
 // fetchModelIDs запрашивает у OpenAI-совместимого сервера список моделей
 // (`GET <url>`, `Authorization: Bearer <key>`) и возвращает все непустые
-// `.data[].id` в порядке ответа. Общий транспорт OpenAI- и DeepSeek-вариантов
-// (fetchOpenAIEmbeddingModels/fetchDeepSeekModels) — они различаются только
+// `.data[].id` в порядке ответа. Общий транспорт эмбеддинг- и chat-вариантов
+// (fetchOpenAIEmbeddingModels/fetchChatModels) — они различаются только
 // путём эндпоинта и пост-фильтром, а не HTTP-обвязкой/разбором. Неверный ключ/
 // недоступный сервер — non-2xx статус, возвращается как ошибка; пустой список
 // без ошибки — валидный результат (вызывающий сам решает, что показать). Ollama
@@ -126,13 +126,11 @@ func fetchModelIDs(ctx context.Context, url, key string) ([]string, error) {
 	return ids, nil
 }
 
-// fetchDeepSeekModels запрашивает у DeepSeek API (`GET {baseURL}/models`) список
-// доступных моделей через fetchModelIDs и возвращает их без фильтрации (в отличие
-// от fetchOpenAIEmbeddingModels: у DeepSeek это chat/reasoner-модели, а не
-// эмбеддинги, фильтровать по имени нечего). Путь намеренно "/models", а не
-// "/v1/models" — DeepSeek API не использует префикс /v1 (см. официальную
-// документацию: base_url = https://api.deepseek.com, эндпоинты /chat/completions
-// и /models).
-func fetchDeepSeekModels(ctx context.Context, baseURL, key string) ([]string, error) {
+// fetchChatModels запрашивает у OpenAI-совместимого chat-API (`GET {baseURL}/models`)
+// список доступных моделей через fetchModelIDs и возвращает их без фильтрации (в
+// отличие от fetchOpenAIEmbeddingModels: это chat-модели reasoner'а, фильтровать по
+// имени нечего). baseURL — тот же корень, что у reason.OpenAI: у DeepSeek без /v1
+// (https://api.deepseek.com → /models), у CLIProxyAPI с ним (…:8317/v1 → /v1/models).
+func fetchChatModels(ctx context.Context, baseURL, key string) ([]string, error) {
 	return fetchModelIDs(ctx, strings.TrimRight(baseURL, "/")+"/models", key)
 }
