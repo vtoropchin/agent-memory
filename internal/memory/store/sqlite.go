@@ -568,12 +568,31 @@ func OpenSQLite(path string) (*sqliteStore, error) {
 		return nil, fmt.Errorf("миграция схемы: %w", err)
 	}
 
-	if _, err := db.Exec(ftsTriggers); err != nil {
+	if err := applyFTSTriggers(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("применение триггеров fts: %w", err)
 	}
 
 	return store, nil
+}
+
+// applyFTSTriggers пересоздаёт ftsTriggers одной транзакцией. Каждая сессия
+// агентского приложения держит свой процесс memo на общем файле БД, и все они
+// делают это на старте: в автокоммите другой процесс успевал вклиниться между
+// DROP и CREATE («trigger ... already exists» — memo не стартовал), а его
+// запись в memories в этом окне проходила мимо FTS-индекса. Первый оператор
+// транзакции (DROP) — запись, поэтому блокировку записи она берёт сразу и
+// ждёт конкурента по busy_timeout, а не падает.
+func applyFTSTriggers(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("начало транзакции: %w", err)
+	}
+	if _, err := tx.Exec(ftsTriggers); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func expandHome(path string) (string, error) {

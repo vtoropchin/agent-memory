@@ -196,3 +196,35 @@ func TestOpenSQLite_EdgeCasePaths(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenSQLite_ConcurrentOpenSameFile — регрессия: каждая сессия агентского
+// приложения поднимает свой процесс memo на общий файл БД, и при одновременном
+// старте Open падал на «trigger memories_ai already exists»: DROP TRIGGER IF
+// EXISTS и CREATE TRIGGER из ftsTriggers шли отдельными автокоммитами, и
+// другой процесс успевал пересоздать триггер между ними. Отдельный sql.DB на
+// каждую горутину — то же, что отдельный процесс: общего пула соединений нет.
+func TestOpenSQLite_ConcurrentOpenSameFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	first, err := OpenSQLite(path) // схема уже есть — как у второй и следующих сессий
+	if err != nil {
+		t.Fatalf("OpenSQLite(%q): %v", path, err)
+	}
+	defer first.Close()
+
+	const opens = 16
+	errs := make(chan error, opens)
+	for range opens {
+		go func() {
+			s, err := OpenSQLite(path)
+			if err == nil {
+				err = s.Close()
+			}
+			errs <- err
+		}()
+	}
+	for range opens {
+		if err := <-errs; err != nil {
+			t.Errorf("конкурентный OpenSQLite: %v", err)
+		}
+	}
+}
