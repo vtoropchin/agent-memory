@@ -137,7 +137,7 @@ func runWeb(args []string, stdout io.Writer) error {
 
 	// Writer с реальным Embedder: правка content из панели записи (Этап 16)
 	// переэмбеддит запись, как memory_update; при Noop — вектор досчитает reindex.
-	w := write.New(s, embedder)
+	w := write.New(s, embedder, write.WithAuthor(authorName(ctx, s)))
 	rc := recall.New(s, cfg.Recall, reason.NewNoop(), embedder)
 
 	srv := &http.Server{

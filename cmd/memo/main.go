@@ -196,10 +196,7 @@ func run(args []string) error {
 		return fmt.Errorf("создание embedder: %w", err)
 	}
 
-	// Имя автора правок (write.WithAuthor, Этап 19) пока не передаётся — записи
-	// остаются без author/updated_by; источник имени (профиль синхронизации,
-	// git config) подключается вместе с локальным состоянием синхронизации.
-	w := write.New(s, embedder)
+	w := write.New(s, embedder, write.WithAuthor(authorName(ctx, s)))
 	r := recall.New(s, cfg.Recall, reasoner, embedder)
 	srv := mcp.NewServer(w, r, s, cfg.Scope)
 

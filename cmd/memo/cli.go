@@ -217,7 +217,7 @@ func runSave(args []string, stdin io.Reader, out io.Writer) error {
 		scope = cfg.Scope.SaveScope()
 	}
 
-	w := write.New(s, embedder)
+	w := write.New(s, embedder, write.WithAuthor(authorName(ctx, s)))
 	id, merged, err := w.Save(ctx, write.SaveInput{
 		Kind:       memory.Kind(*kindFlag),
 		Scope:      scope,

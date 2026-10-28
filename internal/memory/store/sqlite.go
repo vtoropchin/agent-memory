@@ -96,6 +96,50 @@ CREATE TABLE IF NOT EXISTS maint_meta (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
     last_run_at INTEGER NOT NULL
 );
+
+-- Локальное состояние синхронизации с общей базой (Этап 19, DESIGN.md §4, §4.1):
+-- в базовой схеме, как maint_meta, — data-шагов нет. Только SQLite: при
+-- driver = "postgres" хранилище уже общее. Пароль сюда не пишется никогда (§13).
+CREATE TABLE IF NOT EXISTS sync_profile (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    author_name TEXT,
+    interval_s  INTEGER NOT NULL DEFAULT 300
+);
+CREATE TABLE IF NOT EXISTS sync_targets (
+    project      TEXT PRIMARY KEY,
+    host         TEXT NOT NULL,
+    port         INTEGER NOT NULL DEFAULT 5432,
+    user         TEXT NOT NULL,
+    dbname       TEXT NOT NULL,
+    sslmode      TEXT NOT NULL DEFAULT 'prefer',
+    password_env TEXT NOT NULL UNIQUE,
+    push         INTEGER NOT NULL DEFAULT 0,
+    pull         INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sync_state (
+    project         TEXT PRIMARY KEY,
+    base_id         TEXT,
+    pull_xid        TEXT,
+    pull_id         TEXT,
+    push_marked     INTEGER NOT NULL DEFAULT 0,
+    last_run_at     INTEGER,
+    last_ok_at      INTEGER,
+    last_error      TEXT,
+    last_pushed     INTEGER NOT NULL DEFAULT 0,
+    last_pulled     INTEGER NOT NULL DEFAULT 0,
+    last_conflicts  INTEGER NOT NULL DEFAULT 0,
+    conflicts_total INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sync_dirty (
+    seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id TEXT NOT NULL UNIQUE,
+    edited    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_lease (
+    project    TEXT PRIMARY KEY,
+    holder     TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
 `
 
 // ftsTriggers синхронизирует memories_fts с memories/tags. Выполняется КАЖДЫЙ Open,
@@ -157,15 +201,23 @@ CREATE TRIGGER tags_ad AFTER DELETE ON tags BEGIN
 END;
 `
 
-// dropFTSTriggers снимает все триггеры ftsTriggers — выполняется в migrate()
-// перед шагами миграции (см. комментарий там); ftsTriggers затем создаёт их
-// заново. Перечень имён обязан совпадать с ftsTriggers.
+// dropFTSTriggers снимает все триггеры ftsTriggers и syncTriggers — выполняется
+// в migrate() перед шагами миграции (см. комментарий там); Open затем создаёт их
+// заново. Перечень имён обязан совпадать с ftsTriggers и syncTriggers: тела
+// триггеров синхронизации ссылаются на колонки memories, которые шаг миграции
+// может менять, — то же основание, что у FTS-триггеров.
 const dropFTSTriggers = `
 DROP TRIGGER IF EXISTS memories_ai;
 DROP TRIGGER IF EXISTS memories_au;
 DROP TRIGGER IF EXISTS memories_ad;
 DROP TRIGGER IF EXISTS tags_ai;
 DROP TRIGGER IF EXISTS tags_ad;
+DROP TRIGGER IF EXISTS sync_memories_ai;
+DROP TRIGGER IF EXISTS sync_memories_au;
+DROP TRIGGER IF EXISTS sync_tags_ai;
+DROP TRIGGER IF EXISTS sync_tags_ad;
+DROP TRIGGER IF EXISTS sync_links_ai;
+DROP TRIGGER IF EXISTS sync_links_ad;
 `
 
 // createMemoriesFTS — целевая (текущая) форма memories_fts: задача 8.3 добавляет
@@ -597,29 +649,33 @@ func OpenSQLite(path string) (*sqliteStore, error) {
 		return nil, fmt.Errorf("миграция схемы: %w", err)
 	}
 
-	if err := applyFTSTriggers(db); err != nil {
+	if err := applyTriggers(db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("применение триггеров fts: %w", err)
+		return nil, fmt.Errorf("применение триггеров: %w", err)
 	}
 
 	return store, nil
 }
 
-// applyFTSTriggers пересоздаёт ftsTriggers одной транзакцией. Каждая сессия
+// applyTriggers пересоздаёт ftsTriggers и syncTriggers одной транзакцией. Каждая сессия
 // агентского приложения держит свой процесс memo на общем файле БД, и все они
 // делают это на старте: в автокоммите другой процесс успевал вклиниться между
 // DROP и CREATE («trigger ... already exists» — memo не стартовал), а его
 // запись в memories в этом окне проходила мимо FTS-индекса. Первый оператор
 // транзакции (DROP) — запись, поэтому блокировку записи она берёт сразу и
 // ждёт конкурента по busy_timeout, а не падает.
-func applyFTSTriggers(db *sql.DB) error {
+func applyTriggers(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("начало транзакции: %w", err)
 	}
 	if _, err := tx.Exec(ftsTriggers); err != nil {
 		tx.Rollback()
-		return err
+		return fmt.Errorf("fts: %w", err)
+	}
+	if _, err := tx.Exec(syncTriggers); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("синхронизация: %w", err)
 	}
 	return tx.Commit()
 }
