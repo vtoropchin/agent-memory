@@ -19,7 +19,7 @@
 | Структура через границу | `struct` из `internal/memory`: `Memory`, `Query`, `Brief`, `Candidate` |
 | Composition root (`Main`) | `cmd/memo/main.go` — `main()` и фабрики `newEmbedder`, `newReasoner`; сборка графа и деградация до `noop` живут только здесь |
 | Ограничение видимости | `internal/`, регистр имени; экспортируется минимум |
-| Подмена в тестах | своя реализация интерфейса, переданная полем/аргументом (`fakeEmbedder` в `write_test.go`, `recall_test.go`, `consolidate_test.go`); моки-библиотеки не используются |
+| Подмена в тестах | своя реализация интерфейса, переданная полем/аргументом (`fakeEmbedder` в `write_test.go`, `recall_test.go`, `consolidate_test.go`; `fakeLocal`/`fakeHub` в `sync/fake_test.go`); моки-библиотеки не используются |
 | Изоляция времени и случайности | порт времени есть в `write` и `recall`: поле `now func() int64` + опция `WithNow` (по умолчанию `time.Now().Unix()`). В `maint` (`decay.go`, `expire.go`, `consolidate.go`) `time.Now()` зовётся напрямую — так делать в новом коде не надо, время передавать полем (образец — `scheduler.go`: поле `now func() int64`). Идентификаторы — `oklog/ulid` |
 
 **Структура**
@@ -29,7 +29,9 @@
   (гибридный поиск RRF + ранжирование + сборка брифа), `internal/memory/maint`
   (decay, consolidate, reindex, dedup-sweep, планировщик), `internal/memory/board`
   (kanban-доска: `Build`, карточка задачи `Describe`; свои порты `Source`/`DetailSource`,
-  `store` не импортирует — единственный пакет вариантов использования с нулём нарушений).
+  `store` не импортирует), `internal/memory/sync` (синхронизация проекта с общей базой: push/pull,
+  LWW; свои порты `Local`/`Shared`/`Dialer`, `store` не импортирует — адаптеры в `store` импортируют
+  его под псевдонимом `memsync`). У `board` и `sync` ноль нарушений правила зависимостей.
 - Порты объявлены в `store`, `embed`, `reason`; там же лежат реализации — см. «Известное нарушение».
 - Адаптеры: `store/sqlite.go`, `store/postgres*.go`, `embed/ollama.go`, `embed/openai.go`,
   `reason/openai.go` (OpenAI-совместимый chat: DeepSeek, CLIProxyAPI), `internal/mcp` (регистрация tools и JSON-схемы), `cmd/memo/web.go`.
@@ -51,7 +53,7 @@
   форматирование — `gofmt`.
 - Правило зависимостей: `CGO_ENABLED=1 go test -tags sqlite_fts5 -run TestDependencyRule ./internal/memory/`
   (`internal/memory/arch_test.go`, входит в обычный `make test`). Базовая линия нарушений: **5** для каждого
-  из `write`, `recall`, `maint`; **0** для `internal/memory` и `internal/memory/board`. Тест падает и при росте, и при снижении —
+  из `write`, `recall`, `maint`; **0** для `internal/memory`, `internal/memory/board` и `internal/memory/sync`. Тест падает и при росте, и при снижении —
   снижение требует опустить линию в `baseline`.
 - Тесты ядра идут без сети и внешних сервисов (SQLite во временных файлах); прогон
   `./internal/memory/...` — около 2,5 с, это и есть целевое время.

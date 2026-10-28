@@ -43,6 +43,9 @@ var baseline = map[string]int{
 	// board объявляет свой порт Source и не импортирует store — 0, а не линия 5
 	// с драйверами БД; тест обязан упасть, если board когда-нибудь импортирует store.
 	"agentmemory/internal/memory/board": 0,
+	// sync (Этап 19) — так же: свои порты Local/Shared/Dialer, store не
+	// импортирует; адаптеры в store импортируют sync, а не наоборот.
+	"agentmemory/internal/memory/sync": 0,
 	// sqlite-vec, pgx, snowball, go-sqlite3 — через store; toml — через config,
 	// причём recall импортирует config напрямую (config.RecallConfig в подписи New).
 	"agentmemory/internal/memory/write":  5,
