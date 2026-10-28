@@ -191,6 +191,7 @@ func buildDoctorReport(ctx context.Context, cfg config.Config, configPath string
 	sections = append(sections, vectorLayerSection(ctx, st, cfg.Embedder))
 	sections = append(sections, embedderLivenessSection(ctx, cfg.Embedder))
 	sections = append(sections, reasonerSection(ctx, cfg.Reasoner, live))
+	sections = append(sections, syncSections(ctx, st, cfg.Store)...)
 
 	verdict, exitCode, warnings := summarize(sections)
 	sections = append(sections, section{

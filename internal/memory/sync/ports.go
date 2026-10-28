@@ -14,6 +14,7 @@ package sync
 
 import (
 	"context"
+	"slices"
 
 	"agentmemory/internal/memory"
 )
@@ -22,6 +23,10 @@ import (
 // консолидируются на каждой машине своим Consolidator, общие эпизоды дали бы
 // дубли фактов (DESIGN.md §2.1).
 var syncKinds = []memory.Kind{memory.KindSemantic, memory.KindProcedural, memory.KindDebt, memory.KindTask}
+
+// Kinds — виды памяти набора синхронизации (копия): статусу и doctor, чтобы
+// считать неотправленное по тому же составу, что и прогон.
+func Kinds() []memory.Kind { return slices.Clone(syncKinds) }
 
 // Scope — scope набора синхронизации проекта. Прочие scope (user:*, другие
 // проекты) не синхронизируются.

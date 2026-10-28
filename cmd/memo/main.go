@@ -405,6 +405,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  memo export [флаги]\tэкспорт памяти в переносимый JSONL-бэкап (без векторов)")
 	fmt.Fprintln(tw, "  memo import [флаги] file.jsonl\tимпорт JSONL-бэкапа с сохранением id и таймстампов")
 	fmt.Fprintln(tw, "  memo migrate [флаги] <источник> <приёмник>\tперенос памяти между бэкендами (sqlite <-> postgres)")
+	fmt.Fprintln(tw, "  memo sync [флаги]\tсинхронизация проектов с общей базой команды (разовый прогон, статус, схема)")
 	tw.Flush()
 	fmt.Fprintln(w)
 
@@ -429,6 +430,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(tw, "  export\tбэкап/перенос памяти: вся БД или -scopes в переносимый JSONL (векторы не экспортируются)")
 	fmt.Fprintln(tw, "  import\tвосстановление из JSONL: сохраняет id/таймстампы; -dry-run/-overwrite/-rescope")
 	fmt.Fprintln(tw, "  migrate\tперенос между бэкендами: sqlite:<путь> <-> postgres://user@host:port/dbname; -dry-run/-overwrite/-scopes")
+	fmt.Fprintln(tw, "  sync\tразовый прогон целей синхронизации; -project/-status/-apply-schema/-rotate-base/-yes")
 	tw.Flush()
-	fmt.Fprintln(w, "  memo init -h, memo web -h, memo recall -h, memo save -h, memo hook -h, memo doctor -h, memo export -h, memo import -h, memo migrate -h — подробности по флагам каждой.")
+	fmt.Fprintln(w, "  memo init -h, memo web -h, memo recall -h, memo save -h, memo hook -h, memo doctor -h, memo export -h, memo import -h, memo migrate -h, memo sync -h — подробности по флагам каждой.")
 }
