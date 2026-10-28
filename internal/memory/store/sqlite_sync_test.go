@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"agentmemory/internal/memory"
+	memsync "agentmemory/internal/memory/sync"
 )
 
 // newSyncTestStore открывает чистую SQLite-БД во временном каталоге.
@@ -36,7 +38,7 @@ func putSyncMem(t *testing.T, s *sqliteStore, scope string, kind memory.Kind, co
 // dirtyIDs — id помеченных записей scope (любых видов) в порядке пометки.
 func dirtyIDs(t *testing.T, l *SyncLocal, scope string) []string {
 	t.Helper()
-	ps, err := l.Dirty(context.Background(), scope, nil, 0)
+	ps, err := l.Dirty(context.Background(), scope, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Dirty: %v", err)
 	}
@@ -158,11 +160,11 @@ func TestSyncState(t *testing.T) {
 	ctx := context.Background()
 	_, l := newSyncTestStore(t)
 
-	if _, err := l.State(ctx, "alpha"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("State до прогонов: %v, хочу ErrNotFound", err)
+	if st, err := l.State(ctx, "alpha"); err != nil || st != (memsync.State{}) {
+		t.Fatalf("State до прогонов = %+v, %v; хочу нулевое", st, err)
 	}
 
-	st := SyncState{BaseID: "b-1", PullXID: 1<<63 + 5, PullID: "01ABC", PushMarked: true, LastRunAt: 2000, LastOkAt: 1900,
+	st := memsync.State{BaseID: "b-1", Cursor: memsync.Cursor{XID: 1<<63 + 5, ID: "01ABC"}, PushMarked: true, LastRunAt: 2000, LastOKAt: 1900,
 		LastError: "сервер недоступен", LastPushed: 3, LastPulled: 4, LastConflicts: 1, ConflictsTotal: 7}
 	if err := l.SaveState(ctx, "alpha", st); err != nil {
 		t.Fatalf("SaveState: %v", err)
@@ -171,7 +173,7 @@ func TestSyncState(t *testing.T) {
 		t.Errorf("State = %+v, %v; хочу %+v", got, err, st)
 	}
 
-	st = SyncState{BaseID: "b-2", LastRunAt: 3000, LastOkAt: 3000}
+	st = memsync.State{BaseID: "b-2", LastRunAt: 3000, LastOKAt: 3000}
 	if err := l.SaveState(ctx, "alpha", st); err != nil {
 		t.Fatalf("SaveState (перезапись): %v", err)
 	}
@@ -186,8 +188,8 @@ func TestSyncState(t *testing.T) {
 	if err := l.DeleteTarget(ctx, "alpha"); err != nil {
 		t.Fatalf("DeleteTarget: %v", err)
 	}
-	if _, err := l.State(ctx, "alpha"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("State после удаления цели: %v, хочу ErrNotFound", err)
+	if st, err := l.State(ctx, "alpha"); err != nil || st != (memsync.State{}) {
+		t.Errorf("State после удаления цели = %+v, %v; хочу нулевое", st, err)
 	}
 }
 
@@ -265,7 +267,7 @@ func TestSyncDirty_Triggers(t *testing.T) {
 
 	other := putSyncMem(t, s, "project:beta", memory.KindSemantic, "чужой проект")
 	created := putSyncMem(t, s, scope, memory.KindSemantic, "новая запись")
-	ps, err := l.Dirty(ctx, scope, nil, 0)
+	ps, err := l.Dirty(ctx, scope, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("Dirty: %v", err)
 	}
@@ -293,7 +295,7 @@ func TestSyncDirty_Triggers(t *testing.T) {
 	}
 
 	// Пометка снимается по seq и возвращается после новой правки тегов и связей.
-	ps, _ = l.Dirty(ctx, scope, nil, 0)
+	ps, _ = l.Dirty(ctx, scope, nil, 0, 0)
 	if err := l.MarkPushed(ctx, ps); err != nil {
 		t.Fatalf("MarkPushed: %v", err)
 	}
@@ -306,11 +308,11 @@ func TestSyncDirty_Triggers(t *testing.T) {
 	if _, err := s.db.Exec(`INSERT INTO links (src, dst, rel) VALUES (?, ?, 'related')`, before.Id, created.Id); err != nil {
 		t.Fatal(err)
 	}
-	ps, _ = l.Dirty(ctx, scope, nil, 0)
+	ps, _ = l.Dirty(ctx, scope, nil, 0, 0)
 	if len(ps) != 2 {
 		t.Fatalf("теги/связи не пометили владельцев: %+v", ps)
 	}
-	byID := map[string]SyncPending{}
+	byID := map[string]memsync.Pending{}
 	for _, p := range ps {
 		byID[p.Memory.Id] = p
 	}
@@ -340,7 +342,7 @@ func TestSyncDirty_UpdateWithoutChangesNotMarked(t *testing.T) {
 		t.Fatalf("PutTarget: %v", err)
 	}
 	m := putSyncMem(t, s, "project:alpha", memory.KindSemantic, "факт")
-	ps, _ := l.Dirty(ctx, "project:alpha", nil, 0)
+	ps, _ := l.Dirty(ctx, "project:alpha", nil, 0, 0)
 	if err := l.MarkPushed(ctx, ps); err != nil {
 		t.Fatalf("MarkPushed: %v", err)
 	}
@@ -361,7 +363,7 @@ func TestSyncDirty_SeqGuard(t *testing.T) {
 		t.Fatalf("PutTarget: %v", err)
 	}
 	m := putSyncMem(t, s, "project:alpha", memory.KindSemantic, "версия 1")
-	read, _ := l.Dirty(ctx, "project:alpha", nil, 0)
+	read, _ := l.Dirty(ctx, "project:alpha", nil, 0, 0)
 
 	m.Content, m.UpdatedAt = "версия 2", 1001
 	if err := s.Put(ctx, m); err != nil {
@@ -370,7 +372,7 @@ func TestSyncDirty_SeqGuard(t *testing.T) {
 	if err := l.MarkPushed(ctx, read); err != nil {
 		t.Fatalf("MarkPushed: %v", err)
 	}
-	ps, _ := l.Dirty(ctx, "project:alpha", nil, 0)
+	ps, _ := l.Dirty(ctx, "project:alpha", nil, 0, 0)
 	if len(ps) != 1 || ps[0].Memory.Content != "версия 2" || ps[0].Seq <= read[0].Seq {
 		t.Errorf("правка после чтения потеряна: %+v (прочитан seq %d)", ps, read[0].Seq)
 	}
@@ -400,19 +402,29 @@ func TestSyncDirty_MarkAndKinds(t *testing.T) {
 	if err := l.Mark(ctx, scope, set, []string{task.Id, episode.Id}); err != nil {
 		t.Fatalf("Mark(ids): %v", err)
 	}
-	if ids := dirtyIDs(t, l, scope); len(ids) != 1 || ids[0] != task.Id {
-		t.Fatalf("Mark(ids) = %v, хочу только задачу набора", ids)
+	first, _ := l.Dirty(ctx, scope, set, 0, 0)
+	if len(first) != 1 || first[0].Memory.Id != task.Id {
+		t.Fatalf("Mark(ids) = %+v, хочу только задачу набора", first)
 	}
 
+	// Повторная разметка даёт уже помеченной записи новый seq.
 	if err := l.Mark(ctx, scope, set, nil); err != nil {
 		t.Fatalf("Mark(весь набор): %v", err)
 	}
-	ps, err := l.Dirty(ctx, scope, set, 0)
+	ps, err := l.Dirty(ctx, scope, set, 0, 0)
 	if err != nil {
 		t.Fatalf("Dirty: %v", err)
 	}
-	if len(ps) != 2 || ps[0].Memory.Id != task.Id || ps[1].Memory.Id != fact.Id || ps[0].Edited || ps[1].Edited {
+	if len(ps) != 2 || ps[0].Edited || ps[1].Edited {
 		t.Fatalf("Dirty после разметки = %+v, хочу задачу и факт с edited=false", ps)
+	}
+	for _, p := range ps {
+		if p.Memory.Id == task.Id && p.Seq <= first[0].Seq {
+			t.Errorf("повторная разметка не сменила seq: %d -> %d", first[0].Seq, p.Seq)
+		}
+	}
+	if after, _ := l.Dirty(ctx, scope, set, ps[0].Seq, 0); len(after) != 1 || after[0].Memory.Id != ps[1].Memory.Id {
+		t.Errorf("Dirty(after = %d) = %+v, хочу только %s", ps[0].Seq, after, ps[1].Memory.Id)
 	}
 
 	// Правка поверх разметки — edited = 1; повторная разметка её не затирает.
@@ -427,13 +439,14 @@ func TestSyncDirty_MarkAndKinds(t *testing.T) {
 	if err := l.Mark(ctx, scope, set, nil); err != nil {
 		t.Fatalf("Mark: %v", err)
 	}
-	ps, _ = l.Dirty(ctx, scope, set, 1)
-	if len(ps) != 1 || ps[0].Memory.Id != task.Id {
-		t.Fatalf("Dirty(limit 1) = %+v, хочу первую по порядку пометки задачу", ps)
+	all, _ := l.Dirty(ctx, scope, set, 0, 0)
+	if ps, _ = l.Dirty(ctx, scope, set, 0, 1); len(ps) != 1 || len(all) != 2 || ps[0].Memory.Id != all[0].Memory.Id {
+		t.Fatalf("Dirty(limit 1) = %+v, хочу первую по порядку пометки из %+v", ps, all)
 	}
-	ps, _ = l.Dirty(ctx, scope, set, 0)
-	if len(ps) != 2 || ps[1].Memory.Id != fact.Id || !ps[1].Edited {
-		t.Errorf("правка поверх разметки потеряла edited: %+v", ps)
+	for _, p := range all {
+		if p.Memory.Id == fact.Id && !p.Edited {
+			t.Errorf("правка поверх разметки потеряла edited: %+v", p)
+		}
 	}
 	if ids := dirtyIDs(t, l, scope); len(ids) != 2 {
 		t.Errorf("пометки видов вне набора не сняты: %v", ids)
@@ -488,5 +501,210 @@ func TestSyncTables_ExistingDBMigrates(t *testing.T) {
 	}
 	if ids := dirtyIDs(t, l, "project:alpha"); len(ids) != 1 || ids[0] != m.Id {
 		t.Errorf("разметка существующей записи после миграции: %v", ids)
+	}
+}
+
+// putTarget заводит цель alpha (push и pull) — с ней триггеры помечают записи
+// scope project:alpha.
+func putTarget(t *testing.T, l *SyncLocal) {
+	t.Helper()
+	if _, err := l.PutTarget(context.Background(), SyncTarget{Project: "alpha", Host: "h", User: "u", DBName: "d", Push: true, Pull: true}); err != nil {
+		t.Fatalf("PutTarget: %v", err)
+	}
+}
+
+// TestSyncLocal_Versions: записи с тегами, связями и пометкой; тумстоун тоже;
+// отсутствующие пропущены, у записи без пометки Seq = 0.
+func TestSyncLocal_Versions(t *testing.T) {
+	ctx := context.Background()
+	s, l := newSyncTestStore(t)
+	putTarget(t, l)
+	dst := putSyncMem(t, s, "project:alpha", memory.KindSemantic, "адресат")
+	src := memory.Memory{Id: ulid.Make().String(), Kind: memory.KindTask, Scope: "project:alpha", Content: "задача",
+		Importance: 3, CreatedAt: 1000, UpdatedAt: 1000, Tags: []string{"a"}, Links: []memory.Link{{Dst: dst.Id, Rel: memory.RelRelated}}}
+	if err := s.Put(ctx, src); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := l.MarkPushed(ctx, []memsync.Pending{mustVersion(t, l, dst.Id)}); err != nil {
+		t.Fatalf("MarkPushed: %v", err)
+	}
+	if err := s.Supersede(ctx, dst.Id, "", ""); err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+
+	got, err := l.Versions(ctx, []string{src.Id, dst.Id, ulid.Make().String()})
+	if err != nil {
+		t.Fatalf("Versions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Versions = %d записей, хочу 2 (отсутствующая пропущена)", len(got))
+	}
+	p := got[src.Id]
+	if p.Seq == 0 || !p.Edited || len(p.Memory.Tags) != 1 || len(p.Memory.Links) != 1 || p.Memory.Links[0].Dst != dst.Id {
+		t.Errorf("версия задачи = %+v, хочу пометку правки, тег и связь", p)
+	}
+	if d := got[dst.Id]; d.Memory.SupersededBy == nil || d.Seq == 0 {
+		t.Errorf("тумстоун = %+v, хочу superseded_by и пометку правки", d)
+	}
+	if empty, err := l.Versions(ctx, nil); err != nil || len(empty) != 0 {
+		t.Errorf("Versions(nil) = %v, %v", empty, err)
+	}
+}
+
+func mustVersion(t *testing.T, l *SyncLocal, id string) memsync.Pending {
+	t.Helper()
+	v, err := l.Versions(context.Background(), []string{id})
+	if err != nil || len(v) != 1 {
+		t.Fatalf("Versions(%s) = %v, %v", id, v, err)
+	}
+	return v[id]
+}
+
+// TestSyncLocal_StampAuthor: пустые author/updated_by заполняются, заданные —
+// нет; updated_at и пометки (seq, edited) прежние, без пометки — без пометки.
+func TestSyncLocal_StampAuthor(t *testing.T) {
+	ctx := context.Background()
+	s, l := newSyncTestStore(t)
+	putTarget(t, l)
+	marked := putSyncMem(t, s, "project:alpha", memory.KindSemantic, "помечена правкой")
+	clean := putSyncMem(t, s, "project:alpha", memory.KindSemantic, "без пометки")
+	half := memory.Memory{Id: ulid.Make().String(), Kind: memory.KindSemantic, Scope: "project:alpha", Content: "автор есть",
+		Importance: 3, CreatedAt: 1000, UpdatedAt: 1000, Author: "bob"}
+	if err := s.Put(ctx, half); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := l.MarkPushed(ctx, []memsync.Pending{mustVersion(t, l, clean.Id)}); err != nil {
+		t.Fatalf("MarkPushed: %v", err)
+	}
+	before := mustVersion(t, l, marked.Id)
+
+	if err := l.StampAuthor(ctx, []string{marked.Id, clean.Id, half.Id}, "ivan"); err != nil {
+		t.Fatalf("StampAuthor: %v", err)
+	}
+	after := mustVersion(t, l, marked.Id)
+	if after.Memory.Author != "ivan" || after.Memory.UpdatedBy != "ivan" || after.Memory.UpdatedAt != 1000 {
+		t.Errorf("помеченная = %+v, хочу автора ivan и прежний updated_at", after.Memory)
+	}
+	if after.Seq != before.Seq || after.Edited != before.Edited {
+		t.Errorf("пометка изменилась: было seq=%d edited=%v, стало seq=%d edited=%v", before.Seq, before.Edited, after.Seq, after.Edited)
+	}
+	if c := mustVersion(t, l, clean.Id); c.Seq != 0 || c.Memory.Author != "ivan" {
+		t.Errorf("непомеченная = %+v (seq %d), хочу автора ivan без пометки", c.Memory, c.Seq)
+	}
+	if h := mustVersion(t, l, half.Id); h.Memory.Author != "bob" || h.Memory.UpdatedBy != "ivan" {
+		t.Errorf("с автором = %q/%q, хочу bob/ivan", h.Memory.Author, h.Memory.UpdatedBy)
+	}
+}
+
+// TestSyncLocal_Apply: версия источника применяется целиком (id, created_at,
+// updated_at, авторы), локальные accessed_at/access_count сохраняются; связь на
+// запись той же пачки проходит FK; пометки применённых сняты, вектор сброшен при
+// смене текста; CAS по updated_at и seq отсекает изменившиеся.
+func TestSyncLocal_Apply(t *testing.T) {
+	ctx := context.Background()
+	s, l := newSyncTestStore(t)
+	putTarget(t, l)
+	old := putSyncMem(t, s, "project:alpha", memory.KindSemantic, "старый текст")
+	for range 3 {
+		if err := s.Touch(ctx, old.Id); err != nil {
+			t.Fatalf("Touch: %v", err)
+		}
+	}
+	if err := s.ResetVectorIndex(ctx, "test", 2); err != nil {
+		t.Fatalf("ResetVectorIndex: %v", err)
+	}
+	if err := s.PutVector(ctx, old.Id, []float32{1, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+	other := putSyncMem(t, s, "project:alpha", memory.KindSemantic, "чужая правка")
+	local := mustVersion(t, l, old.Id)
+	touched := local.Memory
+
+	summary := "сводка"
+	newID := ulid.Make().String()
+	upd := memory.Memory{Id: old.Id, Kind: memory.KindSemantic, Scope: "project:alpha", Content: "новый текст", Summary: &summary,
+		Importance: 4, CreatedAt: 900, UpdatedAt: 2000, Author: "bob", UpdatedBy: "eve", AccessCount: 99, Tags: []string{"x"},
+		Links: []memory.Link{{Dst: newID, Rel: memory.RelPartOf}}}
+	fresh := memory.Memory{Id: newID, Kind: memory.KindTask, Scope: "project:alpha", Content: "новая", Importance: 3,
+		CreatedAt: 1500, UpdatedAt: 1500, Author: "bob", UpdatedBy: "bob", AccessCount: 5}
+	otherV := mustVersion(t, l, other.Id)
+	recs := []memsync.Guarded{
+		{Memory: upd, ExpectAt: local.Memory.UpdatedAt, ExpectSeq: local.Seq},
+		{Memory: fresh},
+		{Memory: other, ExpectAt: otherV.Memory.UpdatedAt, ExpectSeq: otherV.Seq + 1},                                        // seq сменился — stale
+		{Memory: memory.Memory{Id: other.Id, Kind: memory.KindSemantic, Scope: "project:alpha", Content: "x", UpdatedAt: 5}}, // ждали отсутствия — stale
+	}
+	applied, stale, err := l.Apply(ctx, recs)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(applied) != 2 || applied[0] != old.Id || applied[1] != newID || len(stale) != 2 {
+		t.Fatalf("Apply = applied %v, stale %v; хочу две применённые и две stale", applied, stale)
+	}
+
+	got := mustVersion(t, l, old.Id)
+	m := got.Memory
+	if m.Content != "новый текст" || m.CreatedAt != 900 || m.UpdatedAt != 2000 || m.Author != "bob" || m.UpdatedBy != "eve" ||
+		m.Importance != 4 || len(m.Tags) != 1 || len(m.Links) != 1 || m.Links[0].Dst != newID {
+		t.Errorf("применённая версия = %+v", m)
+	}
+	if m.AccessCount != touched.AccessCount || m.AccessedAt == nil || *m.AccessedAt != *touched.AccessedAt {
+		t.Errorf("локальные сигналы: access_count %d, accessed_at %v; хочу %d, %v", m.AccessCount, m.AccessedAt, touched.AccessCount, *touched.AccessedAt)
+	}
+	if got.Seq != 0 {
+		t.Errorf("пометка применённой не снята: seq %d", got.Seq)
+	}
+	if f := mustVersion(t, l, newID); f.Seq != 0 || f.Memory.AccessCount != 0 || f.Memory.AccessedAt != nil || f.Memory.UpdatedAt != 1500 {
+		t.Errorf("новая запись = %+v (seq %d), хочу без пометки и без чужих сигналов", f.Memory, f.Seq)
+	}
+	if o := mustVersion(t, l, other.Id); o.Memory.Content != "чужая правка" || o.Seq != otherV.Seq {
+		t.Errorf("stale-запись тронута: %+v (seq %d)", o.Memory, o.Seq)
+	}
+	if vs, err := s.VectorStatus(ctx, old.Id); err != nil || vs.Embedded {
+		t.Errorf("вектор после смены текста: %+v, %v; хочу сброшенным", vs, err)
+	}
+
+	// Та же версия ещё раз (заглушка без смены текста) вектор не трогает.
+	if err := s.PutVector(ctx, old.Id, []float32{1, 0}); err != nil {
+		t.Fatalf("PutVector: %v", err)
+	}
+	upd.Importance = 5
+	if _, _, err := l.Apply(ctx, []memsync.Guarded{{Memory: upd, ExpectAt: 2000}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if vs, _ := s.VectorStatus(ctx, old.Id); !vs.Embedded {
+		t.Errorf("вектор сброшен без смены текста")
+	}
+}
+
+// TestBeginWriteTx_TakesWriteLock: транзакция beginWriteTx держит блокировку
+// записи с первого оператора — второй писатель без ожидания получает отказ, а не
+// проходит между чтением и записью первой.
+func TestBeginWriteTx_TakesWriteLock(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "memory.db")
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	defer s.Close()
+	other, err := sql.Open("sqlite3", sqliteDSN(path, "_journal_mode=WAL&_busy_timeout=0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+
+	tx, err := beginWriteTx(ctx, s.db)
+	if err != nil {
+		t.Fatalf("beginWriteTx: %v", err)
+	}
+	if _, err := other.ExecContext(ctx, `INSERT INTO sync_profile (id) VALUES (1)`); err == nil {
+		t.Fatalf("второй писатель прошёл при открытой beginWriteTx — блокировка записи не взята")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.ExecContext(ctx, `INSERT INTO sync_profile (id) VALUES (1)`); err != nil {
+		t.Fatalf("после отката второй писатель: %v", err)
 	}
 }

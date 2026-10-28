@@ -3,8 +3,9 @@
 // база), итог прогонов и курсор pull, пометки неотправленного, lease прогона.
 // Только SQLite: при driver = "postgres" хранилище уже общее, и SyncLocalOf
 // возвращает ok = false. Порт Store эти методы не получает — синхронизация
-// отдельный вариант использования со своим контрактом (§6); адаптер его
-// портов (задача 19.5) строится поверх SyncLocal.
+// отдельный вариант использования со своим контрактом (§6): SyncLocal —
+// адаптер порта memsync.Local (задача 19.5), а профиль, цели и lease — для
+// планировщика прогонов и морды.
 package store
 
 import (
@@ -16,6 +17,7 @@ import (
 	"strings"
 
 	"agentmemory/internal/memory"
+	memsync "agentmemory/internal/memory/sync"
 )
 
 // syncDefaultIntervalSec — период фоновой синхронизации по умолчанию (5 мин),
@@ -103,33 +105,13 @@ type SyncTarget struct {
 	Pull        bool   // тумблер «Загружать»
 }
 
-// SyncState — итог прогонов и курсор pull цели (пишет только интерактор).
-type SyncState struct {
-	BaseID         string // sync_meta.base_id общей базы, к которой относится курсор
-	PullXID        uint64 // курсор pull (§4.1); 0 — с начала
-	PullID         string // id внутри PullXID ("" — с начала xid)
-	PushMarked     bool   // набор размечен для текущего включения «Отправлять»
-	LastRunAt      int64
-	LastOkAt       int64
-	LastError      string // "" — последний прогон успешен
-	LastPushed     int
-	LastPulled     int
-	LastConflicts  int
-	ConflictsTotal int
-}
-
-// SyncPending — неотправленная запись набора: запись с Tags/Links и её пометка.
-type SyncPending struct {
-	Memory memory.Memory
-	Seq    int64 // номер пометки; снятие пометки сверяет его (MarkPushed)
-	Edited bool  // true — правка (триггер), false — первичная разметка (Mark)
-}
-
 // SyncLocal — доступ к локальному состоянию синхронизации SQLite-хранилища.
 // Время — из поля now хранилища (подменяется в тестах).
 type SyncLocal struct {
 	s *sqliteStore
 }
+
+var _ memsync.Local = (*SyncLocal)(nil)
 
 // SyncLocal возвращает доступ к локальному состоянию синхронизации.
 func (s *sqliteStore) SyncLocal() *SyncLocal {
@@ -312,10 +294,10 @@ func (l *SyncLocal) DeleteTarget(ctx context.Context, project string) error {
 	return nil
 }
 
-// State читает итог прогонов цели; прогонов ещё не было — ErrNotFound.
-func (l *SyncLocal) State(ctx context.Context, project string) (SyncState, error) {
+// State читает итог прогонов цели; прогонов ещё не было — нулевое значение.
+func (l *SyncLocal) State(ctx context.Context, project string) (memsync.State, error) {
 	var (
-		st                      SyncState
+		st                      memsync.State
 		baseID, pullXID, pullID sql.NullString
 		lastRun, lastOk         sql.NullInt64
 		lastError               sql.NullString
@@ -327,34 +309,34 @@ func (l *SyncLocal) State(ctx context.Context, project string) (SyncState, error
 	`, project).Scan(&baseID, &pullXID, &pullID, &st.PushMarked, &lastRun, &lastOk, &lastError,
 		&st.LastPushed, &st.LastPulled, &st.LastConflicts, &st.ConflictsTotal)
 	if errors.Is(err, sql.ErrNoRows) {
-		return SyncState{}, fmt.Errorf("состояние синхронизации %q: %w", project, ErrNotFound)
+		return memsync.State{}, nil
 	}
 	if err != nil {
-		return SyncState{}, fmt.Errorf("чтение sync_state %q: %w", project, err)
+		return memsync.State{}, fmt.Errorf("чтение sync_state %q: %w", project, err)
 	}
 	if pullXID.Valid && pullXID.String != "" {
-		if st.PullXID, err = strconv.ParseUint(pullXID.String, 10, 64); err != nil {
-			return SyncState{}, fmt.Errorf("курсор pull %q: %w", project, err)
+		if st.Cursor.XID, err = strconv.ParseUint(pullXID.String, 10, 64); err != nil {
+			return memsync.State{}, fmt.Errorf("курсор pull %q: %w", project, err)
 		}
 	}
-	st.BaseID, st.PullID, st.LastError = baseID.String, pullID.String, lastError.String
-	st.LastRunAt, st.LastOkAt = lastRun.Int64, lastOk.Int64
+	st.BaseID, st.Cursor.ID, st.LastError = baseID.String, pullID.String, lastError.String
+	st.LastRunAt, st.LastOKAt = lastRun.Int64, lastOk.Int64
 	return st, nil
 }
 
 // SaveState перезаписывает итог прогонов цели. Курсор хранится десятичной
 // строкой: xid8 беззнаковый 64-битный, INTEGER SQLite — знаковый.
-func (l *SyncLocal) SaveState(ctx context.Context, project string, st SyncState) error {
+func (l *SyncLocal) SaveState(ctx context.Context, project string, st memsync.State) error {
 	var pullXID any
-	if st.PullXID != 0 {
-		pullXID = strconv.FormatUint(st.PullXID, 10)
+	if st.Cursor.XID != 0 {
+		pullXID = strconv.FormatUint(st.Cursor.XID, 10)
 	}
 	var lastRun, lastOk any
 	if st.LastRunAt != 0 {
 		lastRun = st.LastRunAt
 	}
-	if st.LastOkAt != 0 {
-		lastOk = st.LastOkAt
+	if st.LastOKAt != 0 {
+		lastOk = st.LastOKAt
 	}
 	_, err := l.s.db.ExecContext(ctx, `
 		INSERT INTO sync_state (project, base_id, pull_xid, pull_id, push_marked, last_run_at, last_ok_at,
@@ -365,7 +347,7 @@ func (l *SyncLocal) SaveState(ctx context.Context, project string, st SyncState)
 			last_ok_at = excluded.last_ok_at, last_error = excluded.last_error, last_pushed = excluded.last_pushed,
 			last_pulled = excluded.last_pulled, last_conflicts = excluded.last_conflicts,
 			conflicts_total = excluded.conflicts_total
-	`, project, nullIfEmpty(st.BaseID), pullXID, nullIfEmpty(st.PullID), st.PushMarked, lastRun, lastOk,
+	`, project, nullIfEmpty(st.BaseID), pullXID, nullIfEmpty(st.Cursor.ID), st.PushMarked, lastRun, lastOk,
 		nullIfEmpty(st.LastError), st.LastPushed, st.LastPulled, st.LastConflicts, st.ConflictsTotal)
 	if err != nil {
 		return fmt.Errorf("запись sync_state %q: %w", project, err)
@@ -421,10 +403,12 @@ func kindStrings(kinds []memory.Kind) []string {
 	return out
 }
 
-// Mark помечает неотправленными записи scope видов kinds (пусто — любых) как
-// первичную разметку (edited = 0): ids == nil — весь набор, иначе только
-// перечисленные из него. Уже помеченные не трогаются — правка (edited = 1)
-// разметкой не затирается.
+// Mark помечает неотправленными записи scope видов kinds (пусто — любых) с
+// новым seq: ids == nil — весь набор, иначе только перечисленные из него. Новая
+// пометка — первичная разметка (edited = 0), уже стоящая сохраняет edited —
+// правка разметкой не затирается. INSERT OR REPLACE удаляет прежнюю строку и
+// вставляет новую, поэтому seq выдаёт AUTOINCREMENT; SELECT по sync_dirty SQLite
+// вычисляет целиком до вставки, так что edited читается из прежней строки.
 func (l *SyncLocal) Mark(ctx context.Context, scope string, kinds []memory.Kind, ids []string) error {
 	if ids != nil && len(ids) == 0 {
 		return nil
@@ -436,23 +420,24 @@ func (l *SyncLocal) Mark(ctx context.Context, scope string, kinds []memory.Kind,
 		args = append(args, kargs...)
 	}
 	if ids != nil {
-		conds = append(conds, "m.id IN ("+strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+")")
-		for _, id := range ids {
-			args = append(args, id)
-		}
+		in, idArgs := inPlaceholders(ids)
+		conds = append(conds, "m.id IN ("+in+")")
+		args = append(args, idArgs...)
 	}
 	if _, err := l.s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO sync_dirty (memory_id, edited)
-		SELECT m.id, 0 FROM memories m WHERE `+strings.Join(conds, " AND "), args...); err != nil {
+		INSERT OR REPLACE INTO sync_dirty (memory_id, edited)
+		SELECT m.id, COALESCE(d.edited, 0) FROM memories m LEFT JOIN sync_dirty d ON d.memory_id = m.id
+		WHERE `+strings.Join(conds, " AND "), args...); err != nil {
 		return fmt.Errorf("разметка набора %q: %w", scope, err)
 	}
 	return nil
 }
 
 // Dirty возвращает до limit (<= 0 — все) помеченных записей scope видов kinds
-// (пусто — любых) в порядке пометки, с тегами и связями. Пометки записей scope
-// других видов снимаются: состав набора задаёт вызывающий (DESIGN.md §4.1).
-func (l *SyncLocal) Dirty(ctx context.Context, scope string, kinds []memory.Kind, limit int) ([]SyncPending, error) {
+// (пусто — любых) с seq > after в порядке пометки, с тегами и связями. Пометки
+// записей scope других видов снимаются: состав набора задаёт вызывающий
+// (DESIGN.md §4.1).
+func (l *SyncLocal) Dirty(ctx context.Context, scope string, kinds []memory.Kind, after int64, limit int) ([]memsync.Pending, error) {
 	tx, err := l.s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("начало транзакции: %w", err)
@@ -469,7 +454,7 @@ func (l *SyncLocal) Dirty(ctx context.Context, scope string, kinds []memory.Kind
 		}
 	}
 
-	where := "m.scope = ?"
+	where := "m.scope = ? AND d.seq > ?"
 	if kindClause != "" {
 		where += " AND " + kindClause
 	}
@@ -480,13 +465,13 @@ func (l *SyncLocal) Dirty(ctx context.Context, scope string, kinds []memory.Kind
 		SELECT `+memoryColumns+`, d.seq, d.edited
 		FROM sync_dirty d JOIN memories m ON m.id = d.memory_id
 		WHERE `+where+` ORDER BY d.seq LIMIT ?
-	`, append(append([]any{scope}, kindArgs...), limit)...)
+	`, append(append([]any{scope, after}, kindArgs...), limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("чтение неотправленного %q: %w", scope, err)
 	}
-	var out []SyncPending
+	var out []memsync.Pending
 	for rows.Next() {
-		var p SyncPending
+		var p memsync.Pending
 		p.Memory, err = scanMemory(rowWithExtra{row: rows, extra: []any{&p.Seq, &p.Edited}})
 		if err != nil {
 			rows.Close()
@@ -499,21 +484,8 @@ func (l *SyncLocal) Dirty(ctx context.Context, scope string, kinds []memory.Kind
 		return nil, fmt.Errorf("чтение неотправленного %q: %w", scope, err)
 	}
 
-	ids := make([]string, len(out))
-	for i, p := range out {
-		ids[i] = p.Memory.Id
-	}
-	tagsByID, err := l.s.loadTagsBatch(ctx, tx, ids)
-	if err != nil {
+	if err := l.attachTagsAndLinks(ctx, tx, out); err != nil {
 		return nil, err
-	}
-	linksByID, err := l.s.loadLinksBatch(ctx, tx, ids)
-	if err != nil {
-		return nil, err
-	}
-	for i := range out {
-		out[i].Memory.Tags = tagsByID[out[i].Memory.Id]
-		out[i].Memory.Links = linksByID[out[i].Memory.Id]
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit чтения неотправленного %q: %w", scope, err)
@@ -524,7 +496,7 @@ func (l *SyncLocal) Dirty(ctx context.Context, scope string, kinds []memory.Kind
 // MarkPushed снимает пометки отправленных записей, если их seq не изменился:
 // правка, сделанная после чтения Dirty, получила новый seq и останется
 // помеченной до следующего прогона.
-func (l *SyncLocal) MarkPushed(ctx context.Context, done []SyncPending) error {
+func (l *SyncLocal) MarkPushed(ctx context.Context, done []memsync.Pending) error {
 	if len(done) == 0 {
 		return nil
 	}
@@ -542,4 +514,244 @@ func (l *SyncLocal) MarkPushed(ctx context.Context, done []SyncPending) error {
 		return fmt.Errorf("commit снятия пометок: %w", err)
 	}
 	return nil
+}
+
+// attachTagsAndLinks дочитывает теги и исходящие связи записей ps в транзакции q.
+func (l *SyncLocal) attachTagsAndLinks(ctx context.Context, q dbQueryer, ps []memsync.Pending) error {
+	ids := make([]string, len(ps))
+	for i, p := range ps {
+		ids[i] = p.Memory.Id
+	}
+	tagsByID, err := l.s.loadTagsBatch(ctx, q, ids)
+	if err != nil {
+		return err
+	}
+	linksByID, err := l.s.loadLinksBatch(ctx, q, ids)
+	if err != nil {
+		return err
+	}
+	for i := range ps {
+		ps[i].Memory.Tags = tagsByID[ps[i].Memory.Id]
+		ps[i].Memory.Links = linksByID[ps[i].Memory.Id]
+	}
+	return nil
+}
+
+// inPlaceholders — "?,?,…" на n аргументов и сами аргументы ids.
+func inPlaceholders(ids []string) (string, []any) {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", len(ids)), ","), args
+}
+
+// Versions возвращает записи ids (с тегами и связями, тумстоуны тоже) и их
+// пометки неотправленного (Seq = 0 — пометки нет); отсутствующие пропущены.
+// Одна транзакция — согласованное чтение записей и пометок.
+func (l *SyncLocal) Versions(ctx context.Context, ids []string) (map[string]memsync.Pending, error) {
+	out := make(map[string]memsync.Pending, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	tx, err := l.s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("начало транзакции: %w", err)
+	}
+	defer tx.Rollback()
+
+	in, args := inPlaceholders(ids)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT `+memoryColumns+`, COALESCE(d.seq, 0), COALESCE(d.edited, 0)
+		FROM memories m LEFT JOIN sync_dirty d ON d.memory_id = m.id
+		WHERE m.id IN (`+in+`)
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("чтение локальных версий: %w", err)
+	}
+	var ps []memsync.Pending
+	for rows.Next() {
+		var p memsync.Pending
+		p.Memory, err = scanMemory(rowWithExtra{row: rows, extra: []any{&p.Seq, &p.Edited}})
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("сканирование локальной версии: %w", err)
+		}
+		ps = append(ps, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("чтение локальных версий: %w", err)
+	}
+	if err := l.attachTagsAndLinks(ctx, tx, ps); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit чтения локальных версий: %w", err)
+	}
+	for _, p := range ps {
+		out[p.Memory.Id] = p
+	}
+	return out, nil
+}
+
+// StampAuthor заполняет пустые author/updated_by записей ids именем name. Это
+// заполнение метаданных, а не правка (DESIGN.md §7.1): updated_at не меняется, а
+// пометки sync_dirty, которые переставил бы триггер, возвращаются как были — с
+// прежними seq и edited (иначе MarkPushed по прочитанному seq не снял бы
+// пометку, а запись стала бы правкой); записи без пометки её не получают.
+func (l *SyncLocal) StampAuthor(ctx context.Context, ids []string, name string) error {
+	if len(ids) == 0 || name == "" {
+		return nil
+	}
+	tx, err := beginWriteTx(ctx, l.s.db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	in, args := inPlaceholders(ids)
+	type mark struct {
+		id     string
+		seq    int64
+		edited bool
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT memory_id, seq, edited FROM sync_dirty WHERE memory_id IN (`+in+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("чтение пометок: %w", err)
+	}
+	var marks []mark
+	for rows.Next() {
+		var m mark
+		if err := rows.Scan(&m.id, &m.seq, &m.edited); err != nil {
+			rows.Close()
+			return fmt.Errorf("сканирование пометки: %w", err)
+		}
+		marks = append(marks, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("чтение пометок: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories SET author = COALESCE(NULLIF(author, ''), ?), updated_by = COALESCE(NULLIF(updated_by, ''), ?)
+		WHERE id IN (`+in+`) AND (COALESCE(author, '') = '' OR COALESCE(updated_by, '') = '')
+	`, append([]any{name, name}, args...)...); err != nil {
+		return fmt.Errorf("автор записей: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_dirty WHERE memory_id IN (`+in+`)`, args...); err != nil {
+		return fmt.Errorf("снятие пометок автора: %w", err)
+	}
+	for _, m := range marks {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sync_dirty (seq, memory_id, edited) VALUES (?, ?, ?)`, m.seq, m.id, m.edited); err != nil {
+			return fmt.Errorf("возврат пометки %q: %w", m.id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit автора записей: %w", err)
+	}
+	return nil
+}
+
+// Apply применяет версии общей базы одной транзакцией мимо write path
+// (DESIGN.md §7.1): id, created_at, updated_at, author, updated_by — как в
+// источнике, accessed_at/access_count — локальные (у новой записи — пустые).
+// CAS: локальные updated_at и seq пометки (0 — записи/пометки нет) должны
+// совпасть с ExpectAt/ExpectSeq, иначе запись — stale и не трогается. Сначала
+// все записи с тегами, затем связи (FK на links.dst внутри пачки), затем
+// снятие пометок применённых — их поставили триггеры этой же транзакции, и без
+// снятия полученное ушло бы обратно. Смена content (из него строится вектор)
+// удаляет строку вектора — запись встаёт в очередь ListMissingVectors.
+func (l *SyncLocal) Apply(ctx context.Context, recs []memsync.Guarded) (applied, stale []string, err error) {
+	if len(recs) == 0 {
+		return nil, nil, nil
+	}
+	for _, g := range recs {
+		if err := checkMemoryID(g.Memory.Id); err != nil {
+			return nil, nil, err
+		}
+	}
+	hasVec, err := l.s.hasVecTable(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("проверка memories_vec: %w", err)
+	}
+
+	tx, err := beginWriteTx(ctx, l.s.db)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	var ok []memory.Memory
+	for _, g := range recs {
+		m := g.Memory
+		var (
+			at, seq    int64
+			content    string
+			accessedAt sql.NullInt64
+			count      int
+		)
+		err := tx.QueryRowContext(ctx, `
+			SELECT m.updated_at, m.content, m.accessed_at, m.access_count, COALESCE(d.seq, 0)
+			FROM memories m LEFT JOIN sync_dirty d ON d.memory_id = m.id WHERE m.id = ?
+		`, m.Id).Scan(&at, &content, &accessedAt, &count, &seq)
+		have := err == nil
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, fmt.Errorf("чтение локальной версии %q: %w", m.Id, err)
+		}
+		if have != (g.ExpectAt != 0) || at != g.ExpectAt || seq != g.ExpectSeq {
+			stale = append(stale, m.Id)
+			continue
+		}
+		m.AccessedAt, m.AccessCount = nil, 0
+		if have {
+			if accessedAt.Valid {
+				m.AccessedAt = &accessedAt.Int64
+			}
+			m.AccessCount = count
+		}
+		if err := putRowSQLite(ctx, tx, m); err != nil {
+			return nil, nil, fmt.Errorf("применение %q: %w", m.Id, err)
+		}
+		if have && hasVec && content != m.Content {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM memories_vec WHERE memory_id = ?`, m.Id); err != nil {
+				return nil, nil, fmt.Errorf("сброс вектора %q: %w", m.Id, err)
+			}
+		}
+		ok = append(ok, m)
+	}
+	for _, m := range ok {
+		if err := putLinksSQLite(ctx, tx, m.Id, m.Links); err != nil {
+			return nil, nil, fmt.Errorf("связи %q: %w", m.Id, err)
+		}
+	}
+	for _, m := range ok {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sync_dirty WHERE memory_id = ?`, m.Id); err != nil {
+			return nil, nil, fmt.Errorf("снятие пометки %q: %w", m.Id, err)
+		}
+		applied = append(applied, m.Id)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("commit применения: %w", err)
+	}
+	return applied, stale, nil
+}
+
+// beginWriteTx начинает транзакцию с пишущего оператора. Apply и StampAuthor
+// сначала читают, затем пишут: в WAL отложенная транзакция, начатая чтением,
+// получает SQLITE_BUSY_SNAPSHOT сразу, без ожидания по busy_timeout, если
+// другой процесс memo успел записать между её чтением и первой записью (тот же
+// урок, что у applyTriggers). Пустой UPDATE берёт блокировку записи в начале —
+// конкурент ждётся по busy_timeout.
+func beginWriteTx(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("начало транзакции: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sync_dirty SET edited = edited WHERE 0`); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("блокировка записи: %w", err)
+	}
+	return tx, nil
 }

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/oklog/ulid/v2"
-
 	"agentmemory/internal/memory"
 )
 
@@ -17,11 +15,8 @@ import (
 // не входит в список колонок ни INSERT, ни ON CONFLICT DO UPDATE SET — его
 // пересчитывает триггер memories_search_vec_trg (postgres.go) до записи строки.
 func (s *pgStore) Put(ctx context.Context, m memory.Memory) error {
-	if m.Id == "" {
-		return fmt.Errorf("memory: Id обязателен")
-	}
-	if _, err := ulid.Parse(m.Id); err != nil {
-		return fmt.Errorf("memory: Id %q не является ULID: %w", m.Id, err)
+	if err := checkMemoryID(m.Id); err != nil {
+		return err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -30,6 +25,42 @@ func (s *pgStore) Put(ctx context.Context, m memory.Memory) error {
 	}
 	defer tx.Rollback()
 
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO memories (`+pgMemoryInsertColumns+`)
+		VALUES (`+pgMemoryInsertValues+`)
+		ON CONFLICT (id) DO UPDATE SET
+			kind=excluded.kind, scope=excluded.scope, content=excluded.content, summary=excluded.summary,
+			importance=excluded.importance, created_at=excluded.created_at, updated_at=excluded.updated_at,
+			accessed_at=excluded.accessed_at, access_count=excluded.access_count,
+			superseded_by=excluded.superseded_by, source=excluded.source, expires_at=excluded.expires_at,
+			status=excluded.status, task_type=excluded.task_type, branch=excluded.branch, workflow=excluded.workflow,
+			author=excluded.author, updated_by=excluded.updated_by
+	`, pgMemoryArgs(m)...)
+	if err != nil {
+		return fmt.Errorf("upsert memories: %w", err)
+	}
+	if err := putTagsPG(ctx, tx, m.Id, m.Tags); err != nil {
+		return err
+	}
+	if err := putLinksPG(ctx, tx, m.Id, m.Links); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// pgMemoryInsertColumns и pgMemoryInsertValues — колонки memories, которые пишет
+// Put (и Hub.Push), и плейсхолдеры к ним в порядке pgMemoryArgs.
+const (
+	pgMemoryInsertColumns = "id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow, author, updated_by"
+	pgMemoryInsertValues  = "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19"
+)
+
+// pgMemoryArgs — значения колонок pgMemoryInsertColumns записи m.
+func pgMemoryArgs(m memory.Memory) []any {
 	// expires_at: 0 (Memory.ExpiresAt "вечная") хранится как SQL NULL, не литеральный
 	// 0 — иначе metaFiltersPG (m.expires_at IS NULL OR m.expires_at > ?now) счёл бы
 	// такую запись просроченной ещё в 1970 году (тот же довод, что в sqliteStore.Put).
@@ -59,46 +90,35 @@ func (s *pgStore) Put(ctx context.Context, m memory.Memory) error {
 	status := nullIfEmpty(string(m.Status))
 	taskType, branch, workflow := nullIfEmpty(string(m.Type)), nullIfEmpty(m.Branch), nullIfEmpty(m.Workflow)
 	author, updatedBy := nullIfEmpty(m.Author), nullIfEmpty(m.UpdatedBy) // Этап 19, то же правило
+	return []any{m.Id, string(m.Kind), m.Scope, m.Content, summary, m.Importance, m.CreatedAt, m.UpdatedAt, accessedAt, m.AccessCount, superseded, source, expiresAt, status, taskType, branch, workflow, author, updatedBy}
+}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow, author, updated_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-		ON CONFLICT (id) DO UPDATE SET
-			kind=excluded.kind, scope=excluded.scope, content=excluded.content, summary=excluded.summary,
-			importance=excluded.importance, created_at=excluded.created_at, updated_at=excluded.updated_at,
-			accessed_at=excluded.accessed_at, access_count=excluded.access_count,
-			superseded_by=excluded.superseded_by, source=excluded.source, expires_at=excluded.expires_at,
-			status=excluded.status, task_type=excluded.task_type, branch=excluded.branch, workflow=excluded.workflow,
-			author=excluded.author, updated_by=excluded.updated_by
-	`, m.Id, string(m.Kind), m.Scope, m.Content, summary, m.Importance, m.CreatedAt, m.UpdatedAt, accessedAt, m.AccessCount, superseded, source, expiresAt, status, taskType, branch, workflow, author, updatedBy)
-	if err != nil {
-		return fmt.Errorf("upsert memories: %w", err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tags WHERE memory_id = $1`, m.Id); err != nil {
+// putTagsPG заменяет теги записи id целиком.
+func putTagsPG(ctx context.Context, tx *sql.Tx, id string, tags []string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tags WHERE memory_id = $1`, id); err != nil {
 		return fmt.Errorf("очистка tags: %w", err)
 	}
-	for _, tag := range m.Tags {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tags (memory_id, tag) VALUES ($1, $2)`, m.Id, tag); err != nil {
+	for _, tag := range tags {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tags (memory_id, tag) VALUES ($1, $2)`, id, tag); err != nil {
 			return fmt.Errorf("вставка tag %q: %w", tag, err)
 		}
 	}
+	return nil
+}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE src = $1`, m.Id); err != nil {
+// putLinksPG заменяет исходящие связи записи id целиком.
+func putLinksPG(ctx context.Context, tx *sql.Tx, id string, links []memory.Link) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE src = $1`, id); err != nil {
 		return fmt.Errorf("очистка links: %w", err)
 	}
-	for _, link := range m.Links {
+	for _, link := range links {
 		rel := link.Rel
 		if rel == "" {
 			rel = memory.RelRelated
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO links (src, dst, rel) VALUES ($1, $2, $3)`, m.Id, link.Dst, rel); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO links (src, dst, rel) VALUES ($1, $2, $3)`, id, link.Dst, rel); err != nil {
 			return fmt.Errorf("вставка link -> %q: %w", link.Dst, err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }

@@ -1658,6 +1658,27 @@ func mergeEnvFile(path string, vars map[string]string, out io.Writer) error {
 		return fmt.Errorf("чтение %q: %w", path, err)
 	}
 
+	content := mergeEnvContent(existing, vars)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("запись %q: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("установка прав 0600 %q: %w", path, err)
+	}
+
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Fprintf(out, "записано: %s (ключи: %s, права 0600)\n", path, strings.Join(keys, ", "))
+	return nil
+}
+
+// mergeEnvContent — содержимое .env existing с ключами vars: строка с тем же
+// ключом заменяется на месте, новые ключи дописываются в конец по алфавиту,
+// прочие строки (в т.ч. комментарии) не трогаются.
+func mergeEnvContent(existing []byte, vars map[string]string) string {
 	remaining := make(map[string]string, len(vars))
 	for k, v := range vars {
 		remaining[k] = v
@@ -1694,20 +1715,7 @@ func mergeEnvFile(path string, vars map[string]string, out io.Writer) error {
 	if content != "" {
 		content += "\n"
 	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("запись %q: %w", path, err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("установка прав 0600 %q: %w", path, err)
-	}
-
-	keys := make([]string, 0, len(vars))
-	for k := range vars {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	fmt.Fprintf(out, "записано: %s (ключи: %s, права 0600)\n", path, strings.Join(keys, ", "))
-	return nil
+	return content
 }
 
 // ensureGitignoreEntry дописывает entry отдельной строкой в конец path (создаёт

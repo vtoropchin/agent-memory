@@ -17,7 +17,7 @@
 | Компонент | Go-пакет; единица развёртывания — один бинарь `cmd/memo` |
 | Порт | `interface`: `store.Store`, `embed.Embedder`, `reason.Reasoner` |
 | Структура через границу | `struct` из `internal/memory`: `Memory`, `Query`, `Brief`, `Candidate` |
-| Composition root (`Main`) | `cmd/memo/main.go` — `main()` и фабрики `newEmbedder`, `newReasoner`; сборка графа и деградация до `noop` живут только здесь |
+| Composition root (`Main`) | `cmd/memo/main.go` — `main()` и фабрики `newEmbedder`, `newReasoner`; сборка прогона синхронизации — `cmd/memo/syncrun.go`; сборка графа и деградация до `noop` живут только здесь |
 | Ограничение видимости | `internal/`, регистр имени; экспортируется минимум |
 | Подмена в тестах | своя реализация интерфейса, переданная полем/аргументом (`fakeEmbedder` в `write_test.go`, `recall_test.go`, `consolidate_test.go`; `fakeLocal`/`fakeHub` в `sync/fake_test.go`); моки-библиотеки не используются |
 | Изоляция времени и случайности | порт времени есть в `write` и `recall`: поле `now func() int64` + опция `WithNow` (по умолчанию `time.Now().Unix()`). В `maint` (`decay.go`, `expire.go`, `consolidate.go`) `time.Now()` зовётся напрямую — так делать в новом коде не надо, время передавать полем (образец — `scheduler.go`: поле `now func() int64`). Идентификаторы — `oklog/ulid` |
@@ -33,7 +33,7 @@
   LWW; свои порты `Local`/`Shared`/`Dialer`, `store` не импортирует — адаптеры в `store` импортируют
   его под псевдонимом `memsync`). У `board` и `sync` ноль нарушений правила зависимостей.
 - Порты объявлены в `store`, `embed`, `reason`; там же лежат реализации — см. «Известное нарушение».
-- Адаптеры: `store/sqlite.go`, `store/postgres*.go`, `embed/ollama.go`, `embed/openai.go`,
+- Адаптеры: `store/sqlite.go`, `store/postgres*.go` (порты `sync`: `SyncLocal` в `sqlite_sync.go`, `Hub` в `postgres_hub.go`), `embed/ollama.go`, `embed/openai.go`,
   `reason/openai.go` (OpenAI-совместимый chat: DeepSeek, CLIProxyAPI), `internal/mcp` (регистрация tools и JSON-схемы), `cmd/memo/web.go`.
 - Загрузка конфига: `internal/config` (TOML/env).
 - Composition root: `cmd/memo`; cobra и huh — зависимости CLI-инсталлятора, в ядро не попадают.

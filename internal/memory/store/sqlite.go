@@ -13,7 +13,6 @@ import (
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/oklog/ulid/v2"
 
 	"agentmemory/internal/memory"
 )
@@ -699,11 +698,8 @@ func (s *sqliteStore) Close() error {
 // Put создаёт или полностью обновляет запись памяти (upsert по id) вместе с её
 // тегами и связями в одной транзакции.
 func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
-	if m.Id == "" {
-		return fmt.Errorf("memory: Id обязателен")
-	}
-	if _, err := ulid.Parse(m.Id); err != nil {
-		return fmt.Errorf("memory: Id %q не является ULID: %w", m.Id, err)
+	if err := checkMemoryID(m.Id); err != nil {
+		return err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -712,6 +708,23 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 	}
 	defer tx.Rollback()
 
+	if err := putRowSQLite(ctx, tx, m); err != nil {
+		return err
+	}
+	if err := putLinksSQLite(ctx, tx, m.Id, m.Links); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// putRowSQLite — upsert строки memories (с content_stemmed) и замена тегов
+// записи в транзакции tx; связи — putLinksSQLite. Разделены ради применения
+// пачки синхронизации (SyncLocal.Apply): сначала все записи, затем связи — FK
+// на links.dst внутри пачки.
+func putRowSQLite(ctx context.Context, tx *sql.Tx, m memory.Memory) error {
 	// expires_at: 0 (Memory.ExpiresAt "вечная") хранится как SQL NULL, не
 	// литеральный 0 — иначе фильтр metaFilters (m.expires_at IS NULL OR
 	// m.expires_at > ?now) счёл бы такую запись просроченной ещё в 1970 году.
@@ -732,7 +745,7 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 	taskType, branch, workflow := nullIfEmpty(string(m.Type)), nullIfEmpty(m.Branch), nullIfEmpty(m.Workflow)
 	author, updatedBy := nullIfEmpty(m.Author), nullIfEmpty(m.UpdatedBy) // Этап 19, то же правило
 
-	_, err = tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow, author, updated_by)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -775,21 +788,22 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE src = ?`, m.Id); err != nil {
+	return nil
+}
+
+// putLinksSQLite заменяет исходящие связи записи id целиком.
+func putLinksSQLite(ctx context.Context, tx *sql.Tx, id string, links []memory.Link) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE src = ?`, id); err != nil {
 		return fmt.Errorf("очистка links: %w", err)
 	}
-	for _, link := range m.Links {
+	for _, link := range links {
 		rel := link.Rel
 		if rel == "" {
 			rel = memory.RelRelated
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO links (src, dst, rel) VALUES (?, ?, ?)`, m.Id, link.Dst, rel); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO links (src, dst, rel) VALUES (?, ?, ?)`, id, link.Dst, rel); err != nil {
 			return fmt.Errorf("вставка link -> %q: %w", link.Dst, err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }

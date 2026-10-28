@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/oklog/ulid/v2"
+
 	"agentmemory/internal/memory"
 )
 
@@ -166,6 +168,18 @@ func liveMemoriesFromDB(ctx context.Context, db *sql.DB) ([]memory.Memory, error
 // (до Этапа 15 список был продублирован в каждом, и одна забытая копия молча
 // теряла бы поле на одном из путей чтения).
 const memoryColumns = "m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status, m.task_type, m.branch, m.workflow, m.author, m.updated_by"
+
+// checkMemoryID проверяет id записи на входе Put и применения версий из общей
+// базы синхронизации (внешний источник): обязателен и должен быть ULID.
+func checkMemoryID(id string) error {
+	if id == "" {
+		return fmt.Errorf("memory: Id обязателен")
+	}
+	if _, err := ulid.Parse(id); err != nil {
+		return fmt.Errorf("memory: Id %q не является ULID: %w", id, err)
+	}
+	return nil
+}
 
 // nullIfEmpty — пустая строка -> SQL NULL для nullable-строковых колонок
 // (status/task_type/branch/workflow/author/updated_by; см. довод про NULL в Put).
