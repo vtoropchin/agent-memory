@@ -483,14 +483,21 @@
   }
   .badge.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
   .badge.danger { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
-  .sync-projects { list-style: none; margin: 0 0 var(--s3); padding: 0; font-size: var(--fs-sm); }
-  .sync-projects li { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); padding: 6px 0; border-top: 1px solid var(--line); }
-  .sync-projects li:first-child { border-top: 0; }
-  .sync-projects button { border: 0; background: none; padding: 0; cursor: pointer; color: var(--ink); font: inherit; text-align: left; min-width: 0; overflow-wrap: anywhere; }
-  .sync-projects button:hover { color: var(--accent); text-decoration: underline; }
-  .sync-projects button[aria-current="true"] { font-weight: 600; color: var(--accent); }
-  .sync-add { display: flex; gap: var(--s2); }
-  .sync-add input { flex: 1; min-width: 0; height: 32px; }
+  /* панель «Проекты»: поле-combobox и всегда раскрытый listbox с прокруткой внутри
+     (~12 строк); подпись группы липнет к верху списка; подсветка — aria-selected,
+     видна только с фокусом в поле */
+  .sync-q { width: 100%; height: 32px; }
+  .sync-plist { max-height: 22rem; overflow-y: auto; margin-top: var(--s2); font-size: var(--fs-sm); }
+  .sync-plist ul { list-style: none; margin: 0; padding: 0; }
+  .sync-glabel { position: sticky; top: 0; z-index: 1; background: var(--surface); padding: 6px 8px 4px; font-size: var(--fs-xs); font-weight: 600; color: var(--ink-3); }
+  .sync-plist [role=option] { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); padding: 5px 8px; border-radius: var(--r); cursor: pointer; }
+  .sync-plist [role=option]:hover { background: var(--surface-3); }
+  .sync-q:focus ~ #sp-box [role=option][aria-selected="true"] { background: var(--accent-soft); }
+  .sync-plist .nm { min-width: 0; overflow-wrap: anywhere; }
+  .sync-plist [aria-current="true"] .nm { font-weight: 600; color: var(--accent); }
+  .sync-plist .add { color: var(--accent); }
+  .sync-none { margin: var(--s2) 0 0; }
+  .sync-more { margin-top: var(--s2); }
   .sync-conn { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 0 var(--s3); }
   .pw-set { display: flex; align-items: center; gap: var(--s2); min-height: 32px; }
   .pw-set input { flex: 1; min-width: 0; }

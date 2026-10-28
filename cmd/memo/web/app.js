@@ -1055,7 +1055,14 @@ const SYNC_DEFAULT_MIN = 5;   // интервал по умолчанию (inter
 // по проекту. В хэш не пишутся: это не адрес. confirm — открытое подтверждение
 // (schema | rotate | delete), replacePw — поле пароля открыто для замены, fail —
 // текст отказа операции над общей базой (длинный, для тоста не годится).
-const syncUI = { data: null, project: "", check: {}, run: {}, fail: {}, confirm: "", replacePw: false, warning: "", busy: false };
+// Панель «Проекты»: q — значение поля поиска (переживает перерисовку экрана),
+// freeOpen — группа «Без настройки» раскрыта вручную, shown/active — варианты
+// listbox и подсвеченный, focusQ — вернуть фокус в поле после перерисовки.
+const syncUI = { data: null, project: "", check: {}, run: {}, fail: {}, confirm: "", replacePw: false, warning: "", busy: false,
+  q: "", freeOpen: false, shown: [], active: 0, focusQ: false };
+
+// SYNC_NAME_RE — то же правило имени проекта, что validateSyncProject на сервере.
+const SYNC_NAME_RE = /^[\p{L}\p{N}._-]+$/u;
 
 // syncProject — выбранный проект: ?project= в хэше, иначе первая цель.
 function syncProject() {
@@ -1114,9 +1121,16 @@ function drawSync() {
   if (project !== syncUI.project) {
     syncUI.project = project; syncUI.confirm = ""; syncUI.replacePw = false; syncUI.warning = "";
   }
-  html += '<div class="sync">' + '<div class="stack">' + syncProfilePanel(d.profile) + syncProjectsPanel(d, project) + "</div>" +
+  html += '<div class="sync">' + '<div class="stack">' + syncProfilePanel(d.profile) + syncProjectsPanel() + "</div>" +
     '<div class="stack">' + (project ? syncTargetPanel(project, syncTarget(project)) : syncNoProject(d)) + "</div></div>";
   el.innerHTML = html;
+  drawSyncProjects();
+  if (syncUI.focusQ) {
+    syncUI.focusQ = false;
+    const q = $("#sa-name");
+    q.focus();
+    q.setSelectionRange(q.value.length, q.value.length);
+  }
   if (project) drawSyncAux();
 }
 
@@ -1131,23 +1145,117 @@ function syncProfilePanel(p) {
     '<button type="submit" class="btn">Сохранить профиль</button></form></section>';
 }
 
-// syncProjectsPanel — цели и проекты локальной БД одним списком (DESIGN.md §12)
-// плюс ручной ввод имени: новичок подключает проект, которого у него ещё нет.
-function syncProjectsPanel(d, project) {
+// syncProjectsPanel — цели и проекты локальной БД (DESIGN.md §12) с одним полем
+// поиска и подключения: новичок вводит имя проекта, которого у него ещё нет.
+// Поле — combobox по шаблону scopepick, но listbox раскрыт всегда; варианты
+// рисует drawSyncProjects, ввод перерисовывает только их.
+function syncProjectsPanel() {
+  return '<section class="panel" aria-labelledby="h-sync-projects"><header><h2 id="h-sync-projects">Проекты</h2><span class="muted" id="sp-sum"></span></header>' +
+    '<div class="body"><label class="sr-only" for="sa-name">Найти или подключить проект</label>' +
+    '<input type="text" id="sa-name" class="sync-q" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="sp-list" placeholder="Найти или подключить проект…" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="sa-err" value="' + esc(syncUI.q) + '">' +
+    '<span class="err" id="sa-err" role="alert"></span><div id="sp-box"></div></div></section>';
+}
+
+// syncRank — порядок в группе «Настроены»: ошибка, активные, выключенные (как syncBadge).
+function syncRank(t) {
+  if (!t.push && !t.pull) return 2;
+  return t.state && t.state.lastError ? 0 : 1;
+}
+
+// drawSyncProjects — группы «Настроены» и «Без настройки» по запросу syncUI.q
+// (подстрока без учёта регистра) и строка «Подключить проект», если точного
+// совпадения нет. «Без настройки» свёрнута, пока не раскрыта вручную; раскрыта
+// всегда при непустом запросе, без целей и когда выбран её проект.
+function drawSyncProjects() {
+  const box = $("#sp-box");
+  if (!box) return;
+  const d = syncUI.data, project = syncUI.project;
   const names = {};
-  (d.targets || []).forEach(function (t) { names[t.project] = 1; });
   (d.projects || []).forEach(function (p) { names[p] = 1; });
   if (project) names[project] = 1;
-  const list = Object.keys(names).sort(function (a, b) { return a.localeCompare(b, "ru"); });
-  return '<section class="panel" aria-labelledby="h-sync-projects"><header><h2 id="h-sync-projects">Проекты</h2><span class="muted">' + list.length + "</span></header>" +
-    '<div class="body">' + (list.length ? '<ul class="sync-projects">' + list.map(function (p) {
-      return '<li><button type="button" data-sync-project="' + esc(p) + '"' + (p === project ? ' aria-current="true"' : "") + ">" + esc(p) + "</button>" + syncBadge(syncTarget(p)) + "</li>";
-    }).join("") + "</ul>"
-      : '<p class="muted small">В локальной базе ещё нет проектов. Введите имя ниже — например, чтобы скачать проект команды, которого у вас пока нет.</p>') +
-    '<form id="sync-add" class="sync-add"><label class="sr-only" for="sa-name">Имя проекта</label>' +
-    '<input type="text" id="sa-name" placeholder="имя проекта" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="sa-err">' +
-    '<button type="submit" class="btn">Добавить проект</button></form><span class="err" id="sa-err" role="alert"></span></div></section>';
+  const targets = (d.targets || []).slice().sort(function (a, b) { return syncRank(a) - syncRank(b) || a.project.localeCompare(b.project, "ru"); });
+  targets.forEach(function (t) { delete names[t.project]; });
+  const free = Object.keys(names).sort(function (a, b) { return a.localeCompare(b, "ru"); });
+  const errs = targets.filter(function (t) { return syncRank(t) === 0; }).length;
+  $("#sp-sum").textContent = [targets.length ? "настроено: " + targets.length : "", errs ? "с ошибкой: " + errs : "",
+    free.length ? "без настройки: " + free.length : ""].filter(Boolean).join(" · ");
+
+  const raw = syncUI.q.trim(), q = raw.toLowerCase();
+  const hit = function (p) { return p.toLowerCase().indexOf(q) !== -1; };
+  const forced = q !== "" || !targets.length || free.indexOf(project) !== -1;
+  const on = targets.map(function (t) { return t.project; }).filter(hit);
+  const off = forced || syncUI.freeOpen ? free.filter(hit) : [];
+  // регистр не различаем и здесь: «agentmemory» рядом с «AgentMemory» — почти наверняка опечатка
+  const exact = q !== "" && on.concat(free).some(function (p) { return p.toLowerCase() === q; });
+  const bad = raw && !exact && !SYNC_NAME_RE.test(raw) ? "Допустимы буквы, цифры и символы - _ ." : "";
+  const add = raw && !exact && !bad ? raw : "";
+  syncUI.shown = on.concat(off).map(function (p) { return { project: p }; });
+  if (add) syncUI.shown.push({ add: add });
+
+  let i = 0;
+  const opt = function (p) {
+    return '<li role="option" id="sp-o' + (i++) + '" data-sync-project="' + esc(p) + '"' + (p === project ? ' aria-current="true"' : "") + '><span class="nm">' + esc(p) + "</span>" + syncBadge(syncTarget(p)) + "</li>";
+  };
+  const group = function (key, label, list) {
+    return list.length ? '<li role="presentation"><div class="sync-glabel" id="sp-g-' + key + '">' + label + '</div><ul role="group" aria-labelledby="sp-g-' + key + '">' + list.map(function (p) { return opt(p); }).join("") + "</ul></li>" : "";
+  };
+  let list = group("on", "Настроены", on) + group("free", "Без настройки", off);
+  if (add) list += '<li role="option" id="sp-o' + i + '" class="add" data-sync-add="' + esc(add) + '">Подключить проект «' + esc(add) + "»</li>";
+  const empty = syncUI.shown.length ? ""
+    : q ? '<p class="muted small sync-none">Ничего не найдено.</p>'
+    : '<p class="muted small sync-none">В локальной базе ещё нет проектов. Введите имя — например, чтобы скачать проект команды, которого у вас пока нет.</p>';
+  const more = !forced && free.length ? '<button type="button" class="btn quiet sm sync-more" data-sync-free>' +
+    (syncUI.freeOpen ? "Скрыть без настройки" : "Показать без настройки (" + free.length + ")") + "</button>" : "";
+  box.innerHTML = '<div class="sync-plist"><ul role="listbox" id="sp-list" aria-label="Проекты">' + list + "</ul>" + empty + "</div>" + more;
+  $("#sa-err").textContent = bad;
+  // подсветка — точное совпадение, иначе выбранный проект, иначе первый вариант
+  const at = function (f) { return syncUI.shown.findIndex(function (it) { return it.project && f(it.project); }); };
+  let a = q ? at(function (p) { return p.toLowerCase() === q; }) : -1;
+  if (a === -1) a = at(function (p) { return p === project; });
+  markSyncProject(a === -1 ? 0 : a);
 }
+
+// markSyncProject — подсветка варианта; прокручивается только список, не страница.
+function markSyncProject(i) {
+  const q = $("#sa-name"), opts = $$('#sp-list [role="option"]');
+  syncUI.active = i;
+  opts.forEach(function (o, k) { o.setAttribute("aria-selected", k === i ? "true" : "false"); });
+  const o = opts[i];
+  if (!o) { q.removeAttribute("aria-activedescendant"); return; }
+  q.setAttribute("aria-activedescendant", o.id);
+  const box = o.closest(".sync-plist"), lbl = o.closest("[role=presentation]");
+  const top = box.getBoundingClientRect().top + (lbl ? $(".sync-glabel", lbl).offsetHeight : 0);
+  const r = o.getBoundingClientRect(), bottom = box.getBoundingClientRect().bottom;
+  if (r.top < top) box.scrollTop -= top - r.top;
+  else if (r.bottom > bottom) box.scrollTop += r.bottom - bottom;
+}
+
+// chooseSyncProject — открыть проект варианта i; keep — вернуть фокус в поле
+// после перерисовки (выбор с клавиатуры).
+function chooseSyncProject(i, keep) {
+  const it = syncUI.shown[i];
+  if (!it) return;
+  syncUI.focusQ = keep;
+  navigate({ params: new URLSearchParams({ project: it.project || it.add }) });
+}
+
+// syncProjectKey — клавиатура поля проектов; true — клавиша обработана. Esc
+// очищает непустое поле, при пустом уходит дальше (снять подтверждение).
+function syncProjectKey(e) {
+  const n = syncUI.shown.length;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    if (n) markSyncProject(Math.min(n - 1, Math.max(0, syncUI.active + (e.key === "ArrowDown" ? 1 : -1))));
+    return true;
+  }
+  if (e.key === "Enter") { e.preventDefault(); chooseSyncProject(syncUI.active, true); return true; }
+  if (e.key === "Escape" && syncUI.q) { e.preventDefault(); syncUI.q = e.target.value = ""; drawSyncProjects(); return true; }
+  return false;
+}
+
+document.addEventListener("input", function (e) {
+  if (e.target instanceof Element && e.target.matches("#sa-name")) { syncUI.q = e.target.value; drawSyncProjects(); }
+});
 
 function syncNoProject(d) {
   return '<div class="panel"><div class="empty"><h3>Выберите проект</h3><p>' + ((d.projects || []).length
@@ -1456,8 +1564,14 @@ async function deleteSyncTarget(project) {
 // syncClick — действия экрана; true — событие обработано.
 function syncClick(t) {
   if (!t.closest("#screen-sync")) return false;
-  const pr = t.closest("[data-sync-project]");
-  if (pr) { navigate({ params: new URLSearchParams({ project: pr.getAttribute("data-sync-project") }) }); return true; }
+  const opt = t.closest("#sp-list [role=option]");
+  if (opt) { chooseSyncProject($$('#sp-list [role="option"]').indexOf(opt), false); return true; }
+  if (t.closest("[data-sync-free]")) {
+    syncUI.freeOpen = !syncUI.freeOpen;
+    drawSyncProjects();
+    $("[data-sync-free]").focus();
+    return true;
+  }
   const project = syncUI.project, target = syncTarget(project);
   const pw = t.closest("[data-sync-pw]");
   if (pw) {
@@ -1492,18 +1606,10 @@ function closeSyncConfirm() {
   drawSyncAux(kind === "delete" ? '[data-sync-ask="delete"]' : kind === "rotate" ? '[data-sync-ask="rotate"]' : '[data-sync-ask="schema"]');
 }
 
-// syncSubmit — формы экрана: профиль, цель, ручное добавление проекта.
+// syncSubmit — формы экрана: профиль и цель.
 function syncSubmit(form) {
   if (form.id === "sync-profile") { saveSyncProfile(); return true; }
   if (form.id === "sync-target") { saveSyncTarget(form.getAttribute("data-project")); return true; }
-  if (form.id === "sync-add") {
-    const v = $("#sa-name").value.trim();
-    // то же правило, что validateSyncProject на сервере: сразу, без запроса
-    const bad = !v ? "Введите имя проекта." : !/^[\p{L}\p{N}._-]+$/u.test(v) ? "Допустимы буквы, цифры и символы - _ ." : "";
-    $("#sa-err").textContent = bad;
-    if (!bad) navigate({ params: new URLSearchParams({ project: v }) });
-    return true;
-  }
   return false;
 }
 
@@ -2225,6 +2331,7 @@ document.addEventListener("keydown", function (e) {
   // закрывает только панель
   if (scopePick.root && e.target.matches(".scopepick-q")) { scopePickKey(e); return; }
   if (e.key === "ArrowDown" && e.target.matches(".scopepick-btn")) { e.preventDefault(); openScopePick(e.target.closest(".scopepick")); return; }
+  if (e.target.matches("#sa-name") && syncProjectKey(e)) return;
   if (compose.on) {
     if (e.key === "Escape") { e.preventDefault(); closeCompose(); return; }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitCompose(); return; }
@@ -2254,9 +2361,12 @@ document.addEventListener("keydown", function (e) {
     return;
   }
   if (e.key === "Enter" && e.target.matches("[data-newtag]")) { e.preventDefault(); addTag(e.target); return; }
-  // «/» — в поле поиска (§2.2); из другого раздела — сначала в «Память»
+  // «/» — в поле поиска (§2.2); в «Синхронизации» — в поле проектов, из
+  // остальных разделов — сначала в «Память»
   if (e.key === "/" && !state.id && !e.target.matches("input,textarea,select") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
+    const sq = state.view === "sync" && $("#sa-name");
+    if (sq) { sq.focus(); sq.select(); return; }
     focusSearch = true;
     if (state.view !== "memory") navigate({ view: "memory", params: new URLSearchParams(), id: "" });
     else { const i = $("#q"); if (i) { focusSearch = false; i.focus(); i.select(); } }
