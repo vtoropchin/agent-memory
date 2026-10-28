@@ -165,8 +165,14 @@ type Memory struct {
 	// "code-review", …), не id запуска: только у Kind == KindTask, у остальных
 	// пусто. В БД — nullable-колонка workflow.
 	Workflow string
-	Tags     []string
-	Links    []Link
+	// Author — кто создал запись (имя разработчика, Этап 19): пишется при
+	// создании и больше не меняется. UpdatedBy — кто изменил запись последним
+	// (правка, тумстоун). Оба у любого kind; пусто — неизвестен (запись до
+	// Этапа 19 или процесс без имени). В БД — nullable-колонки author/updated_by.
+	Author    string
+	UpdatedBy string
+	Tags      []string
+	Links     []Link
 }
 
 // Query — параметры поиска для recall.

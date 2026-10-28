@@ -8,7 +8,9 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/store"
+	"agentmemory/internal/memory/write"
 )
 
 // putMemoryWithTTL вставляет живую semantic-запись напрямую в Store (в обход
@@ -39,7 +41,7 @@ func putMemoryWithTTL(t *testing.T, s store.Store, scope, content string, expire
 func TestExpireSweepArchivesOnlyExpired(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	e := NewExpirer(s)
+	e := NewExpirer(s, write.New(s, embed.NewNoop()))
 
 	now := time.Now().Unix()
 	expired := putMemoryWithTTL(t, s, "project:x", "просроченный факт", now-10)
@@ -87,7 +89,7 @@ func TestExpireSweepArchivesOnlyExpired(t *testing.T) {
 func TestExpireSweepIdempotent(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	e := NewExpirer(s)
+	e := NewExpirer(s, write.New(s, embed.NewNoop()))
 
 	now := time.Now().Unix()
 	putMemoryWithTTL(t, s, "project:x", "просроченный факт", now-10)

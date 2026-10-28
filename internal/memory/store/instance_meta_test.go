@@ -39,7 +39,7 @@ func TestParityStatsPendingVectors(t *testing.T) {
 		if err := s.PutVector(ctx, withVec, []float32{1, 0, 0}); err != nil {
 			t.Fatalf("PutVector: %v", err)
 		}
-		if err := s.Supersede(ctx, superseded, withVec); err != nil {
+		if err := s.Supersede(ctx, superseded, withVec, ""); err != nil {
 			t.Fatalf("Supersede: %v", err)
 		}
 
@@ -133,7 +133,7 @@ func TestParityListExpiresBefore(t *testing.T) {
 				t.Fatalf("Put %s: %v", tc.id, err)
 			}
 		}
-		if err := s.Supersede(ctx, archived, archived); err != nil {
+		if err := s.Supersede(ctx, archived, archived, ""); err != nil {
 			t.Fatalf("Supersede: %v", err)
 		}
 

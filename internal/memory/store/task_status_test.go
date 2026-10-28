@@ -434,8 +434,8 @@ func TestMigrateTaskModel(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("чтение user_version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("user_version = %d, want 4", version)
+	if version != schemaVersion {
+		t.Errorf("user_version = %d, want %d (schemaVersion)", version, schemaVersion)
 	}
 
 	want := map[string]struct {

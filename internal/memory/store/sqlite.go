@@ -184,8 +184,9 @@ const createMemoriesFTS = `CREATE VIRTUAL TABLE memories_fts USING fts5(content,
 // Задача 9.4 (TTL) добавила migrations[1]/schemaVersion=2 тем же механизмом, не
 // трогая migrate()/этот комментарий про сам механизм — см. migrateExpiresAt.
 // Задача 14.1 — migrations[2]/3 (status), Этап 15 — migrations[3]/4 (модель
-// задачи v2: task_type/branch/workflow + data-шаги, см. migrateTaskModel).
-const schemaVersion = 4
+// задачи v2: task_type/branch/workflow + data-шаги, см. migrateTaskModel), Этап 19
+// — migrations[4]/5 (author/updated_by, см. migrateAuthor).
+const schemaVersion = 5
 
 // migrationStep — один шаг миграции схемы: переводит БД с версии i на версию i+1.
 // Выполняется целиком в одной транзакции.
@@ -198,6 +199,7 @@ var migrations = []migrationStep{
 	migrateExpiresAt,  // 1 -> 2 (задача 9.4): memories + колонка expires_at (TTL)
 	migrateStatus,     // 2 -> 3 (задача 14.1): memories + колонка status (состояние задачи)
 	migrateTaskModel,  // 3 -> 4 (Этап 15): memories + task_type/branch/workflow, blocked -> todo, backfill task_type
+	migrateAuthor,     // 4 -> 5 (Этап 19): memories + author/updated_by
 }
 
 // migrate применяет по порядку шаги migrations, начиная с версии, прочитанной из
@@ -498,6 +500,33 @@ func migrateTaskModel(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// authorColumns — колонки авторства Этапа 19 (DESIGN.md §4): общий перечень
+// шагов миграции SQLite (migrateAuthor) и PostgreSQL (migrateAuthorPG).
+var authorColumns = []string{"author", "updated_by"}
+
+// migrateAuthor — миграция 4 -> 5 (Этап 19, DESIGN.md §4): две nullable
+// TEXT-колонки memories — author (создатель) и updated_by (последний редактор).
+// Data-шагов нет: у существующих записей автор неизвестен (NULL), его
+// проставит синхронизация при первой отправке. Версионный шаг, а не baseSchema,
+// потому что у SQLite нет ADD COLUMN IF NOT EXISTS; проверка hasColumn на
+// каждую колонку — по тому же доводу, что в migrateTaskModel.
+func migrateAuthor(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range authorColumns {
+		has, err := hasColumn(ctx, tx, "memories", column)
+		if err != nil {
+			return fmt.Errorf("проверка колонки %s: %w", column, err)
+		}
+		if has {
+			continue
+		}
+		// column — константа из authorColumns, не пользовательский ввод.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE memories ADD COLUMN %s TEXT`, column)); err != nil {
+			return fmt.Errorf("добавление колонки %s: %w", column, err)
+		}
+	}
+	return nil
+}
+
 // sqliteStore — реализация Store поверх SQLite (метаданные + FTS5 + sqlite-vec).
 type sqliteStore struct {
 	db  *sql.DB
@@ -645,17 +674,19 @@ func (s *sqliteStore) Put(ctx context.Context, m memory.Memory) error {
 	// task_type/branch/workflow (Этап 15) — по тому же правилу, что status:
 	// пусто хранится как NULL.
 	taskType, branch, workflow := nullIfEmpty(string(m.Type)), nullIfEmpty(m.Branch), nullIfEmpty(m.Workflow)
+	author, updatedBy := nullIfEmpty(m.Author), nullIfEmpty(m.UpdatedBy) // Этап 19, то же правило
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow, author, updated_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			kind=excluded.kind, scope=excluded.scope, content=excluded.content, summary=excluded.summary,
 			importance=excluded.importance, created_at=excluded.created_at, updated_at=excluded.updated_at,
 			accessed_at=excluded.accessed_at, access_count=excluded.access_count,
 			superseded_by=excluded.superseded_by, source=excluded.source, expires_at=excluded.expires_at,
-			status=excluded.status, task_type=excluded.task_type, branch=excluded.branch, workflow=excluded.workflow
-	`, m.Id, string(m.Kind), m.Scope, m.Content, m.Summary, m.Importance, m.CreatedAt, m.UpdatedAt, m.AccessedAt, m.AccessCount, m.SupersededBy, m.Source, expiresAt, status, taskType, branch, workflow)
+			status=excluded.status, task_type=excluded.task_type, branch=excluded.branch, workflow=excluded.workflow,
+			author=excluded.author, updated_by=excluded.updated_by
+	`, m.Id, string(m.Kind), m.Scope, m.Content, m.Summary, m.Importance, m.CreatedAt, m.UpdatedAt, m.AccessedAt, m.AccessCount, m.SupersededBy, m.Source, expiresAt, status, taskType, branch, workflow, author, updatedBy)
 	if err != nil {
 		return fmt.Errorf("upsert memories: %w", err)
 	}
@@ -1404,9 +1435,10 @@ func (s *sqliteStore) Neighbors(ctx context.Context, id string) ([]memory.Memory
 	return neighbors, nil
 }
 
-// Supersede помечает oldID как заменённый записью newID (мягкое забывание).
-func (s *sqliteStore) Supersede(ctx context.Context, oldID, newID string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE memories SET superseded_by = ?, updated_at = ? WHERE id = ?`, newID, s.now(), oldID)
+// Supersede помечает oldID как заменённый записью newID (мягкое забывание);
+// непустой by становится updated_by (см. Store.Supersede).
+func (s *sqliteStore) Supersede(ctx context.Context, oldID, newID, by string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE memories SET superseded_by = ?, updated_at = ?, updated_by = COALESCE(?, updated_by) WHERE id = ?`, newID, s.now(), nullIfEmpty(by), oldID)
 	if err != nil {
 		return fmt.Errorf("supersede %q -> %q: %w", oldID, newID, err)
 	}

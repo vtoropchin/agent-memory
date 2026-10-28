@@ -27,7 +27,7 @@ func parityGetMany(t *testing.T, s Store) {
 	if err := s.Put(ctx, memory.Memory{Id: tomb, Kind: memory.KindSemantic, Scope: "s", Content: "T", CreatedAt: 3, UpdatedAt: 3}); err != nil {
 		t.Fatalf("Put tomb: %v", err)
 	}
-	if err := s.Supersede(ctx, tomb, tomb); err != nil {
+	if err := s.Supersede(ctx, tomb, tomb, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 

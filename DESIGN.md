@@ -526,7 +526,7 @@ type Store interface {
     SearchLexical(ctx context.Context, q Query) ([]Candidate, error)
     SearchVector(ctx context.Context, vec []float32, q Query) ([]Candidate, error) // no-op пока нет Embedder
     Neighbors(ctx context.Context, id string) ([]Memory, error)                    // граф-обход; Tags и Links соседей загружены (Этап 15)
-    Supersede(ctx context.Context, oldID, newID string) error
+    Supersede(ctx context.Context, oldID, newID, by string) error                  // by — имя редактора в updated_by; пусто — не трогать (Этап 19)
     Touch(ctx context.Context, id string) error                                    // accessed_at++, access_count++
     // maintenance-выборки (§11); Tags/Links не заполняются
     ListEpisodicForConsolidation(ctx context.Context, olderThan int64, limit int) ([]Memory, error)

@@ -20,9 +20,9 @@ import (
 func newTestScheduler(s store.Store, r reason.Reasoner, e embed.Embedder) *Scheduler {
 	w := write.New(s, e)
 	return NewScheduler(
-		NewExpirer(s),
+		NewExpirer(s, w),
 		NewDecayer(s, w),
-		NewDedupSweeper(s),
+		NewDedupSweeper(s, w),
 		NewConsolidator(s, r, w),
 		NewReindexer(s, e),
 		s,         // отметка последнего прогона — в тот же Store
@@ -64,7 +64,7 @@ func TestSchedulerRunOnceRunLogErrorDoesNotPanic(t *testing.T) {
 	s := newTestStore(t)
 	w := write.New(s, embed.NewNoop())
 	sched := NewScheduler(
-		NewExpirer(s), NewDecayer(s, w), NewDedupSweeper(s),
+		NewExpirer(s, w), NewDecayer(s, w), NewDedupSweeper(s, w),
 		NewConsolidator(s, &echoReasoner{}, w), NewReindexer(s, embed.NewNoop()),
 		failingRunLog{}, time.Hour, time.Hour,
 	)

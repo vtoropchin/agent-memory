@@ -335,14 +335,30 @@ var searchVecTriggerStatements = []string{
 // поэтому стартовое значение было 0 при пустом pgMigrations. Первый реальный шаг —
 // Этап 15 (migrateTaskModelPG, 0 -> 1): нумерация версий SQLite (4) и PostgreSQL (1)
 // намеренно не совпадает — у них разная история, общая только форма memories на
-// выходе. Следующая миграция добавляется как pgMigrations[1] (1 -> 2) и поднимает
-// эту константу до 2.
-const pgSchemaVersion = 1
+// выходе. Этап 19 — pgMigrations[1] (1 -> 2, author/updated_by); следующая
+// миграция добавляется как pgMigrations[2] и поднимает эту константу до 3.
+const pgSchemaVersion = 2
 
 // pgMigrations — упорядоченный список шагов миграции схемы, pgMigrations[i] соответствует
 // переходу версии i -> i+1 (см. pgSchemaVersion).
 var pgMigrations = []migrationStep{
 	migrateTaskModelPG, // 0 -> 1 (Этап 15): memories + task_type/branch/workflow, blocked -> todo, backfill task_type
+	migrateAuthorPG,    // 1 -> 2 (Этап 19): memories + author/updated_by
+}
+
+// migrateAuthorPG — миграция 1 -> 2 (Этап 19): паритет с migrateAuthor
+// (sqlite.go), те же колонки authorColumns без data-шагов. Версионным шагом, а
+// не ADD COLUMN IF NOT EXISTS в baseSchemaStatements, потому что синхронизация
+// сверяет версию общей базы с pgSchemaVersion (DESIGN.md §4.1): появление
+// колонок должно быть видно по номеру версии.
+func migrateAuthorPG(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range authorColumns {
+		// column — константа из authorColumns, не пользовательский ввод.
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE memories ADD COLUMN IF NOT EXISTS %s text`, column)); err != nil {
+			return fmt.Errorf("добавление колонки %s: %w", column, err)
+		}
+	}
+	return nil
 }
 
 // migrateTaskModelPG — миграция 0 -> 1 (Этап 15): модель задачи v2, паритет с

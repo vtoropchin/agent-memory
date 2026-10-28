@@ -196,6 +196,9 @@ func run(args []string) error {
 		return fmt.Errorf("создание embedder: %w", err)
 	}
 
+	// Имя автора правок (write.WithAuthor, Этап 19) пока не передаётся — записи
+	// остаются без author/updated_by; источник имени (профиль синхронизации,
+	// git config) подключается вместе с локальным состоянием синхронизации.
 	w := write.New(s, embedder)
 	r := recall.New(s, cfg.Recall, reasoner, embedder)
 	srv := mcp.NewServer(w, r, s, cfg.Scope)
@@ -212,9 +215,9 @@ func run(args []string) error {
 		return fmt.Errorf("разбор maint-таймингов: %w", err)
 	}
 	scheduler := maint.NewScheduler(
-		maint.NewExpirer(s),
+		maint.NewExpirer(s, w),
 		maint.NewDecayer(s, w),
-		maint.NewDedupSweeper(s),
+		maint.NewDedupSweeper(s, w),
 		maint.NewConsolidator(s, reasoner, w),
 		maint.NewReindexer(s, embedder),
 		s, // отметка последнего прогона — читает `memo web` (панель «Сервисы»)

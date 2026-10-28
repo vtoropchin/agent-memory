@@ -165,10 +165,10 @@ func liveMemoriesFromDB(ctx context.Context, db *sql.DB) ([]memory.Memory, error
 // обоих драйверов и в scanMemory — и ни в одном из ~20 запросов по отдельности
 // (до Этапа 15 список был продублирован в каждом, и одна забытая копия молча
 // теряла бы поле на одном из путей чтения).
-const memoryColumns = "m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status, m.task_type, m.branch, m.workflow"
+const memoryColumns = "m.id, m.kind, m.scope, m.content, m.summary, m.importance, m.created_at, m.updated_at, m.accessed_at, m.access_count, m.superseded_by, m.source, m.expires_at, m.status, m.task_type, m.branch, m.workflow, m.author, m.updated_by"
 
-// nullIfEmpty — пустая строка -> SQL NULL для nullable-колонок task-полей
-// (status/task_type/branch/workflow; см. довод про NULL в Put).
+// nullIfEmpty — пустая строка -> SQL NULL для nullable-строковых колонок
+// (status/task_type/branch/workflow/author/updated_by; см. довод про NULL в Put).
 func nullIfEmpty(v string) any {
 	if v == "" {
 		return nil
@@ -195,11 +195,13 @@ func scanMemory(row rowScanner) (memory.Memory, error) {
 		taskType   sql.NullString
 		branch     sql.NullString
 		workflow   sql.NullString
+		author     sql.NullString
+		updatedBy  sql.NullString
 	)
 
 	if err := row.Scan(&m.Id, &kind, &m.Scope, &m.Content, &summary, &m.Importance,
 		&m.CreatedAt, &m.UpdatedAt, &accessedAt, &m.AccessCount, &superseded, &source, &expiresAt, &status,
-		&taskType, &branch, &workflow); err != nil {
+		&taskType, &branch, &workflow, &author, &updatedBy); err != nil {
 		return memory.Memory{}, err
 	}
 
@@ -227,6 +229,8 @@ func scanMemory(row rowScanner) (memory.Memory, error) {
 	}
 	m.Branch = branch.String     // NULL -> "" (sql.NullString.String пуст при !Valid)
 	m.Workflow = workflow.String // то же
+	m.Author = author.String
+	m.UpdatedBy = updatedBy.String
 	return m, nil
 }
 

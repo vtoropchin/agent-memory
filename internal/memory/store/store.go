@@ -96,7 +96,10 @@ type Store interface {
 	// блокеры по blocked_by — 15.4) без отдельного «входящего» запроса, пока
 	// множества соседей малы (признак пересмотра — Neighbors стал дорогим).
 	Neighbors(ctx context.Context, id string) ([]memory.Memory, error)
-	Supersede(ctx context.Context, oldID, newID string) error
+	// Supersede помечает oldID заменённой записью newID (тумстоун при oldID ==
+	// newID). Тумстоун — тоже правка (Этап 19): by — имя редактора для
+	// updated_by; пустое имя updated_by не трогает.
+	Supersede(ctx context.Context, oldID, newID, by string) error
 	Touch(ctx context.Context, id string) error // accessed_at++, access_count++
 	// List возвращает страницу записей под фильтр (для browse-морды), отсортированную
 	// по created_at DESC (новые первыми), и total — общее число записей под тот же

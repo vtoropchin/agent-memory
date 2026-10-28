@@ -80,6 +80,14 @@ func formatMemory(m memory.Memory, sections string) string {
 	}
 	fmt.Fprintf(&b, "- scope: %s\n", m.Scope)
 	fmt.Fprintf(&b, "- importance: %d\n", m.Importance)
+	// Авторство (Этап 19) — только здесь, в recall-бриф не выводится; пустые
+	// (запись до Этапа 19, процесс без имени) опускаются.
+	if m.Author != "" {
+		fmt.Fprintf(&b, "- author: %s\n", m.Author)
+	}
+	if m.UpdatedBy != "" {
+		fmt.Fprintf(&b, "- updated_by: %s\n", m.UpdatedBy)
+	}
 	if len(m.Tags) > 0 {
 		fmt.Fprintf(&b, "- tags: %s\n", strings.Join(m.Tags, ", "))
 	}

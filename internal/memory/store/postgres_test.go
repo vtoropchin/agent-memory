@@ -386,7 +386,7 @@ func paritySearchLexicalBasic(t *testing.T, s Store) {
 	}); err != nil {
 		t.Fatalf("Put superseded: %v", err)
 	}
-	if err := s.Supersede(ctx, supersededID, semID); err != nil {
+	if err := s.Supersede(ctx, supersededID, semID, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -851,7 +851,7 @@ func parityListFiltersAndSupersededVisibility(t *testing.T, s Store) {
 	if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "project:parity-a", Content: "устаревшая", CreatedAt: 5, UpdatedAt: 5}); err != nil {
 		t.Fatalf("Put superseded: %v", err)
 	}
-	if err := s.Supersede(ctx, superseded, replacement); err != nil {
+	if err := s.Supersede(ctx, superseded, replacement, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -914,7 +914,7 @@ func parityStats(t *testing.T, s Store) {
 		t.Errorf("ByKind = %v, want semantic=3 procedural=1", stats.ByKind)
 	}
 
-	if err := s.Supersede(ctx, superseded, aSem); err != nil {
+	if err := s.Supersede(ctx, superseded, aSem, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 	stats, err = s.Stats(ctx)
@@ -952,7 +952,7 @@ func parityAllForExport(t *testing.T, s Store) {
 	if err := s.Put(ctx, memory.Memory{Id: tombstoned, Kind: memory.KindSemantic, Scope: "project:parity", Content: "устаревшая", CreatedAt: 3, UpdatedAt: 3}); err != nil {
 		t.Fatalf("Put tombstoned: %v", err)
 	}
-	if err := s.Supersede(ctx, tombstoned, replacement); err != nil {
+	if err := s.Supersede(ctx, tombstoned, replacement, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -1007,7 +1007,7 @@ func TestParityAllForReindex(t *testing.T) {
 		if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "project:parity", Content: "устаревшая", CreatedAt: 3, UpdatedAt: 3}); err != nil {
 			t.Fatalf("Put superseded: %v", err)
 		}
-		if err := s.Supersede(ctx, superseded, replacement); err != nil {
+		if err := s.Supersede(ctx, superseded, replacement, ""); err != nil {
 			t.Fatalf("Supersede: %v", err)
 		}
 
@@ -1074,7 +1074,7 @@ func TestParityNeighbors(t *testing.T) {
 			t.Errorf("neighbors ids = %v, want содержать %q и %q", ids, b, c)
 		}
 
-		if err := s.Supersede(ctx, b, a); err != nil {
+		if err := s.Supersede(ctx, b, a, ""); err != nil {
 			t.Fatalf("Supersede: %v", err)
 		}
 		neighbors, err = s.Neighbors(ctx, a)
@@ -1170,7 +1170,7 @@ func TestParitySupersedeTouch(t *testing.T) {
 		}
 
 		setNow(t, s, func() int64 { return 12345 })
-		if err := s.Supersede(ctx, oldID, newIDVal); err != nil {
+		if err := s.Supersede(ctx, oldID, newIDVal, ""); err != nil {
 			t.Fatalf("Supersede: %v", err)
 		}
 		got, err := s.Get(ctx, oldID)
@@ -1183,7 +1183,7 @@ func TestParitySupersedeTouch(t *testing.T) {
 		if got.UpdatedAt != 12345 {
 			t.Errorf("UpdatedAt = %d, want 12345", got.UpdatedAt)
 		}
-		if err := s.Supersede(ctx, newID(t), newIDVal); err == nil {
+		if err := s.Supersede(ctx, newID(t), newIDVal, ""); err == nil {
 			t.Error("Supersede несуществующего oldID должен вернуть ошибку")
 		}
 
@@ -1592,7 +1592,7 @@ func paritySemanticNeighbors(t *testing.T, s Store) {
 			}
 		}
 	}
-	if err := s.Supersede(ctx, supersededID, replacement); err != nil {
+	if err := s.Supersede(ctx, supersededID, replacement, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -1666,7 +1666,7 @@ func TestParityListMissingVectors(t *testing.T) {
 		if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "s", Content: "устаревшая без вектора", CreatedAt: 3, UpdatedAt: 3}); err != nil {
 			t.Fatalf("Put superseded: %v", err)
 		}
-		if err := s.Supersede(ctx, superseded, withVec); err != nil {
+		if err := s.Supersede(ctx, superseded, withVec, ""); err != nil {
 			t.Fatalf("Supersede: %v", err)
 		}
 

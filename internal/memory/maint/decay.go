@@ -36,7 +36,7 @@ func NewDecayer(s store.Store, w *write.Writer) *Decayer {
 // (сигналы — accessed_at/created_at, access_count, см. DESIGN.md §4, §11), и для
 // каждой:
 //   - если с последнего обращения прошло дольше archiveAfter И importance уже
-//     минимален (<= 1) — запись отправляется в архив: Store.Supersede(id, id),
+//     минимален (<= 1) — запись отправляется в архив: Writer.Forget(id, ""),
 //     тот же self-supersede-тумстоун, что использует memory_forget (см.
 //     .claude/memory/mvp-notes.md). После этого запись выпадает из
 //     recall/SearchLexical, но строка и история остаются в БД;
@@ -72,7 +72,7 @@ func (d *Decayer) Decay(ctx context.Context, demoteAfter, archiveAfter time.Dura
 		idle := now - lastActivity
 
 		if idle >= archiveThreshold && m.Importance <= 1 {
-			if err := d.store.Supersede(ctx, m.Id, m.Id); err != nil {
+			if err := d.writer.Forget(ctx, m.Id, ""); err != nil {
 				log.Printf("maint: decay архивирование %q: %v", m.Id, err)
 				continue
 			}

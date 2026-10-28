@@ -107,6 +107,10 @@ type Writer struct {
 	embedder embed.Embedder
 	now      func() int64
 	entropy  io.Reader
+	// author — имя разработчика, от которого идут правки (Этап 19, DESIGN.md
+	// §4): Save пишет его в Author и UpdatedBy, остальные правки — в UpdatedBy.
+	// Пусто — поля авторства не трогаются.
+	author string
 }
 
 // Option настраивает Writer при создании (используется в тестах для детерминизма).
@@ -115,6 +119,13 @@ type Option func(*Writer)
 // WithNow подменяет источник текущего unix-времени (по умолчанию — time.Now().Unix()).
 func WithNow(now func() int64) Option {
 	return func(w *Writer) { w.now = now }
+}
+
+// WithAuthor задаёт имя разработчика для полей авторства (Memory.Author/
+// UpdatedBy). Имя выбирает composition root; пустое (после TrimSpace) — то же,
+// что без опции: записи остаются без автора, как до Этапа 19.
+func WithAuthor(name string) Option {
+	return func(w *Writer) { w.author = strings.TrimSpace(name) }
 }
 
 // WithEntropy подменяет источник энтропии для генерации ULID (по умолчанию —
@@ -365,6 +376,8 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		Type:       taskType,
 		Branch:     branch,
 		Workflow:   workflow,
+		Author:     w.author,
+		UpdatedBy:  w.author,
 		Tags:       tags,
 		Links:      links,
 	}
@@ -507,6 +520,7 @@ func (w *Writer) reinforce(ctx context.Context, existingID string, importance in
 		merged.Importance = importance
 	}
 	merged.UpdatedAt = w.now()
+	w.stampEditor(&merged)
 
 	if err := w.store.Put(ctx, merged); err != nil {
 		return "", fmt.Errorf("write: усиление дубля %q: %w", existingID, err)
@@ -720,6 +734,7 @@ func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 		return err
 	}
 	m.UpdatedAt = w.now()
+	w.stampEditor(&m)
 	if err := w.store.Put(ctx, m); err != nil {
 		return fmt.Errorf("write: сохранение %q: %w", id, err)
 	}
@@ -750,10 +765,18 @@ func (w *Writer) Forget(ctx context.Context, id string, replacedBy string) error
 		return fmt.Errorf("write: проверка replaced_by %q: %w", replacedBy, err)
 	}
 
-	if err := w.store.Supersede(ctx, id, target); err != nil {
+	if err := w.store.Supersede(ctx, id, target, w.author); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
 	return nil
+}
+
+// stampEditor отмечает правку записи m: UpdatedBy = имя Writer'а; Author не
+// меняется никогда. Пустое имя — запись не трогается (см. WithAuthor).
+func (w *Writer) stampEditor(m *memory.Memory) {
+	if w.author != "" {
+		m.UpdatedBy = w.author
+	}
 }
 
 // mergeLinks объединяет текущие и добавляемые связи без дублей по паре (Dst, Rel):

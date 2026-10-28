@@ -25,7 +25,7 @@ func parityListTasks(t *testing.T, s Store) {
 	put(memory.Memory{Id: other, Kind: memory.KindTask, Scope: "project:b", Content: "чужая", Status: memory.StatusDone, Type: memory.TaskTypeTask, CreatedAt: 3, UpdatedAt: 30})
 	put(memory.Memory{Id: tomb, Kind: memory.KindTask, Scope: "project:a", Content: "отменённая", Status: memory.StatusTodo, Type: memory.TaskTypeTask, CreatedAt: 4, UpdatedAt: 40})
 	put(memory.Memory{Id: fact, Kind: memory.KindSemantic, Scope: "project:a", Content: "факт", CreatedAt: 5, UpdatedAt: 50})
-	if err := s.Supersede(ctx, tomb, tomb); err != nil {
+	if err := s.Supersede(ctx, tomb, tomb, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 

@@ -127,7 +127,7 @@ func TestListExpired(t *testing.T) {
 			t.Fatalf("Put %s: %v", tc.id, err)
 		}
 	}
-	if err := s.Supersede(ctx, alreadySuperseded, alreadySuperseded); err != nil {
+	if err := s.Supersede(ctx, alreadySuperseded, alreadySuperseded, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 

@@ -8,7 +8,9 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"agentmemory/internal/memory"
+	"agentmemory/internal/memory/embed"
 	"agentmemory/internal/memory/store"
+	"agentmemory/internal/memory/write"
 )
 
 // putMemoryWith вставляет запись напрямую в Store (в обход write path) с явными
@@ -65,7 +67,7 @@ const (
 func TestSweepSupersedesMoreImportantSurvives(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	sweeper := NewDedupSweeper(s)
+	sweeper := NewDedupSweeper(s, write.New(s, embed.NewNoop()))
 
 	base := time.Now().Unix()
 	loEnd := putMemoryWith(t, s, "project:x", near1, 2, base)
@@ -102,7 +104,7 @@ func TestSweepSupersedesMoreImportantSurvives(t *testing.T) {
 func TestSweepTieBreaksOnNewerCreatedAt(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	sweeper := NewDedupSweeper(s)
+	sweeper := NewDedupSweeper(s, write.New(s, embed.NewNoop()))
 
 	base := time.Now().Unix()
 	older := putMemoryWith(t, s, "project:x", near1, 3, base)
@@ -128,7 +130,7 @@ func TestSweepTieBreaksOnNewerCreatedAt(t *testing.T) {
 func TestSweepDoesNotDedupAcrossScopes(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	sweeper := NewDedupSweeper(s)
+	sweeper := NewDedupSweeper(s, write.New(s, embed.NewNoop()))
 
 	base := time.Now().Unix()
 	a := putMemoryWith(t, s, "project:x", near1, 3, base)
@@ -166,7 +168,7 @@ func TestSweepDoesNotDedupAcrossScopes(t *testing.T) {
 func TestSweepDoesNotDedupAcrossKinds(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	sweeper := NewDedupSweeper(s)
+	sweeper := NewDedupSweeper(s, write.New(s, embed.NewNoop()))
 
 	base := time.Now().Unix()
 	episodic := putMemoryWithKind(t, s, "project:x", memory.KindEpisodic, near1, 3, base)
@@ -197,7 +199,7 @@ func TestSweepDoesNotDedupAcrossKinds(t *testing.T) {
 func TestSweepChainOfThreeCollapsesToOneSurvivor(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	sweeper := NewDedupSweeper(s)
+	sweeper := NewDedupSweeper(s, write.New(s, embed.NewNoop()))
 
 	base := time.Now().Unix()
 	putMemoryWith(t, s, "project:x", near1, 3, base)
@@ -230,7 +232,7 @@ func TestSweepChainOfThreeCollapsesToOneSurvivor(t *testing.T) {
 func TestSweepLeavesDissimilarRecordsUntouched(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	sweeper := NewDedupSweeper(s)
+	sweeper := NewDedupSweeper(s, write.New(s, embed.NewNoop()))
 
 	base := time.Now().Unix()
 	a := putMemoryWith(t, s, "project:x", near1, 3, base)
@@ -258,7 +260,7 @@ func TestSweepLeavesDissimilarRecordsUntouched(t *testing.T) {
 func TestSweepIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
-	sweeper := NewDedupSweeper(s)
+	sweeper := NewDedupSweeper(s, write.New(s, embed.NewNoop()))
 
 	base := time.Now().Unix()
 	putMemoryWith(t, s, "project:x", near1, 2, base)
@@ -298,7 +300,7 @@ func TestSweepSkipsTasks(t *testing.T) {
 	f1 := putMemoryWithKind(t, s, scope, memory.KindSemantic, near1, 3, 100)
 	f2 := putMemoryWithKind(t, s, scope, memory.KindSemantic, near1, 3, 200)
 
-	res, err := NewDedupSweeper(s).Sweep(ctx)
+	res, err := NewDedupSweeper(s, write.New(s, embed.NewNoop())).Sweep(ctx)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}

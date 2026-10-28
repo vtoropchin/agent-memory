@@ -185,7 +185,7 @@ func TestSearchLexical(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Put superseded: %v", err)
 	}
-	if err := s.Supersede(ctx, supersededID, semID); err != nil {
+	if err := s.Supersede(ctx, supersededID, semID, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -533,7 +533,7 @@ func TestSupersede(t *testing.T) {
 	}
 
 	s.now = func() int64 { return 12345 }
-	if err := s.Supersede(ctx, oldID, newIDVal); err != nil {
+	if err := s.Supersede(ctx, oldID, newIDVal, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -548,7 +548,7 @@ func TestSupersede(t *testing.T) {
 		t.Errorf("UpdatedAt = %d, want 12345", got.UpdatedAt)
 	}
 
-	if err := s.Supersede(ctx, newID(t), newIDVal); err == nil {
+	if err := s.Supersede(ctx, newID(t), newIDVal, ""); err == nil {
 		t.Error("Supersede несуществующего oldID должен вернуть ошибку")
 	}
 }
@@ -657,7 +657,7 @@ func TestNeighborsExcludesSuperseded(t *testing.T) {
 		t.Fatalf("neighbors до supersede = %+v, want [b]", neighbors)
 	}
 
-	if err := s.Supersede(ctx, b, a); err != nil {
+	if err := s.Supersede(ctx, b, a, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -726,7 +726,7 @@ func TestListEpisodicForConsolidation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Put superseded source: %v", err)
 	}
-	if err := s.Supersede(ctx, supersededID, oldA1); err != nil {
+	if err := s.Supersede(ctx, supersededID, oldA1, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -826,7 +826,7 @@ func TestListEpisodicForDecay(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Put superseded source: %v", err)
 	}
-	if err := s.Supersede(ctx, supersededID, staleNoAccess); err != nil {
+	if err := s.Supersede(ctx, supersededID, staleNoAccess, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -1008,7 +1008,7 @@ func TestSearchVectorScopesAndSuperseded(t *testing.T) {
 			t.Fatalf("PutVector %s: %v", tc.id, err)
 		}
 	}
-	if err := s.Supersede(ctx, supersededID, replacement); err != nil {
+	if err := s.Supersede(ctx, supersededID, replacement, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -1253,7 +1253,7 @@ func TestAllForReindex(t *testing.T) {
 	if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "s", Content: "устаревшая", CreatedAt: 3, UpdatedAt: 3}); err != nil {
 		t.Fatalf("Put superseded: %v", err)
 	}
-	if err := s.Supersede(ctx, superseded, replacement); err != nil {
+	if err := s.Supersede(ctx, superseded, replacement, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -1322,7 +1322,7 @@ func TestListMissingVectors(t *testing.T) {
 	if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "s", Content: "устаревшая без вектора", CreatedAt: 3, UpdatedAt: 3}); err != nil {
 		t.Fatalf("Put superseded: %v", err)
 	}
-	if err := s.Supersede(ctx, superseded, withVec); err != nil {
+	if err := s.Supersede(ctx, superseded, withVec, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -1454,7 +1454,7 @@ func TestListSupersededVisibility(t *testing.T) {
 	if err := s.Put(ctx, memory.Memory{Id: superseded, Kind: memory.KindSemantic, Scope: "s", Content: "устаревшая", CreatedAt: 2, UpdatedAt: 2}); err != nil {
 		t.Fatalf("Put superseded: %v", err)
 	}
-	if err := s.Supersede(ctx, superseded, replacement); err != nil {
+	if err := s.Supersede(ctx, superseded, replacement, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -1579,7 +1579,7 @@ func TestStats(t *testing.T) {
 		}
 	})
 
-	if err := s.Supersede(ctx, superseded, aSem); err != nil {
+	if err := s.Supersede(ctx, superseded, aSem, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -1785,7 +1785,7 @@ func TestSemanticNeighborsExcludesSelfAndSuperseded(t *testing.T) {
 			}
 		}
 	}
-	if err := s.Supersede(ctx, supersededID, replacement); err != nil {
+	if err := s.Supersede(ctx, supersededID, replacement, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 

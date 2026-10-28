@@ -58,17 +58,19 @@ func (s *pgStore) Put(ctx context.Context, m memory.Memory) error {
 	// sqliteStore.Put).
 	status := nullIfEmpty(string(m.Status))
 	taskType, branch, workflow := nullIfEmpty(string(m.Type)), nullIfEmpty(m.Branch), nullIfEmpty(m.Workflow)
+	author, updatedBy := nullIfEmpty(m.Author), nullIfEmpty(m.UpdatedBy) // Этап 19, то же правило
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		INSERT INTO memories (id, kind, scope, content, summary, importance, created_at, updated_at, accessed_at, access_count, superseded_by, source, expires_at, status, task_type, branch, workflow, author, updated_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 		ON CONFLICT (id) DO UPDATE SET
 			kind=excluded.kind, scope=excluded.scope, content=excluded.content, summary=excluded.summary,
 			importance=excluded.importance, created_at=excluded.created_at, updated_at=excluded.updated_at,
 			accessed_at=excluded.accessed_at, access_count=excluded.access_count,
 			superseded_by=excluded.superseded_by, source=excluded.source, expires_at=excluded.expires_at,
-			status=excluded.status, task_type=excluded.task_type, branch=excluded.branch, workflow=excluded.workflow
-	`, m.Id, string(m.Kind), m.Scope, m.Content, summary, m.Importance, m.CreatedAt, m.UpdatedAt, accessedAt, m.AccessCount, superseded, source, expiresAt, status, taskType, branch, workflow)
+			status=excluded.status, task_type=excluded.task_type, branch=excluded.branch, workflow=excluded.workflow,
+			author=excluded.author, updated_by=excluded.updated_by
+	`, m.Id, string(m.Kind), m.Scope, m.Content, summary, m.Importance, m.CreatedAt, m.UpdatedAt, accessedAt, m.AccessCount, superseded, source, expiresAt, status, taskType, branch, workflow, author, updatedBy)
 	if err != nil {
 		return fmt.Errorf("upsert memories: %w", err)
 	}
@@ -357,9 +359,10 @@ func (s *pgStore) Neighbors(ctx context.Context, id string) ([]memory.Memory, er
 	return neighbors, nil
 }
 
-// Supersede помечает oldID как заменённый записью newID (мягкое забывание).
-func (s *pgStore) Supersede(ctx context.Context, oldID, newID string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE memories SET superseded_by = $1, updated_at = $2 WHERE id = $3`, newID, s.now(), oldID)
+// Supersede помечает oldID как заменённый записью newID (мягкое забывание);
+// непустой by становится updated_by (см. Store.Supersede).
+func (s *pgStore) Supersede(ctx context.Context, oldID, newID, by string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE memories SET superseded_by = $1, updated_at = $2, updated_by = COALESCE($3, updated_by) WHERE id = $4`, newID, s.now(), nullIfEmpty(by), oldID)
 	if err != nil {
 		return fmt.Errorf("supersede %q -> %q: %w", oldID, newID, err)
 	}

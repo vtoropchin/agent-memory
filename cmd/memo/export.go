@@ -96,11 +96,16 @@ type exportRecord struct {
 	// 15). Аддитивны и omitempty по тем же причинам, что и Status: у прочих
 	// kind пусты, в старых бэкапах отсутствуют и читаются как пустые
 	// (recordToMemory); exportVersion не меняется.
-	Type     string       `json:"type,omitempty"`
-	Branch   string       `json:"branch,omitempty"`
-	Workflow string       `json:"workflow,omitempty"`
-	Tags     []string     `json:"tags"`
-	Links    []exportLink `json:"links"`
+	Type     string `json:"type,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+	Workflow string `json:"workflow,omitempty"`
+	// Author/UpdatedBy — создатель и последний редактор (Этап 19). Аддитивны и
+	// omitempty по тем же причинам: у записей до Этапа 19 пусты, в старых
+	// бэкапах отсутствуют и читаются как пустые; exportVersion не меняется.
+	Author    string       `json:"author,omitempty"`
+	UpdatedBy string       `json:"updated_by,omitempty"`
+	Tags      []string     `json:"tags"`
+	Links     []exportLink `json:"links"`
 }
 
 // memoryToExportRecord переводит доменную Memory в сериализуемую запись.
@@ -136,6 +141,8 @@ func memoryToExportRecord(m memory.Memory) exportRecord {
 		Type:         string(m.Type),
 		Branch:       m.Branch,
 		Workflow:     m.Workflow,
+		Author:       m.Author,
+		UpdatedBy:    m.UpdatedBy,
 		Tags:         tags,
 		Links:        links,
 	}

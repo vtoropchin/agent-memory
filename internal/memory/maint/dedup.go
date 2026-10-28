@@ -23,12 +23,13 @@ type DedupResult struct {
 // правки content через memory_update. Sweep находит такие пары постфактум и
 // сводит их к одной живой записи через Store.Supersede.
 type DedupSweeper struct {
-	store store.Store
+	store  store.Store
+	writer *write.Writer // тумстоуны проигравших — через Forget: Writer несёт имя редактора (Этап 19)
 }
 
-// NewDedupSweeper создаёт DedupSweeper поверх Store.
-func NewDedupSweeper(s store.Store) *DedupSweeper {
-	return &DedupSweeper{store: s}
+// NewDedupSweeper создаёт DedupSweeper поверх Store и Writer.
+func NewDedupSweeper(s store.Store, w *write.Writer) *DedupSweeper {
+	return &DedupSweeper{store: s, writer: w}
 }
 
 // Sweep проходит по всем живым (superseded_by IS NULL) записям, группирует их по
@@ -45,7 +46,7 @@ func NewDedupSweeper(s store.Store) *DedupSweeper {
 // DedupResult.Scanned (счётчик честно означает «просканировано на дубли»).
 //
 // Из каждой найденной пары выживает запись с большим Importance, при равенстве —
-// более новая (CreatedAt); проигравшая помечается Store.Supersede(loserID,
+// более новая (CreatedAt); проигравшая помечается Writer.Forget(loserID,
 // winnerID). Уже проигравшие в рамках этого же прогона повторно не сравниваются
 // и не могут забрать чужую победу (см. sweepGroup).
 //
@@ -132,7 +133,7 @@ func (d *DedupSweeper) sweepGroup(ctx context.Context, members []memory.Memory, 
 				continue
 			}
 			winner, loser := pickDedupWinner(champion, members[j])
-			if err := d.store.Supersede(ctx, loser.Id, winner.Id); err != nil {
+			if err := d.writer.Forget(ctx, loser.Id, winner.Id); err != nil {
 				log.Printf("maint: dedup sweep supersede %q -> %q: %v", loser.Id, winner.Id, err)
 				continue
 			}

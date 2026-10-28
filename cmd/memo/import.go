@@ -97,6 +97,8 @@ func recordToMemory(rec exportRecord) memory.Memory {
 		Type:         memory.TaskType(rec.Type),
 		Branch:       rec.Branch,
 		Workflow:     rec.Workflow,
+		Author:       rec.Author,
+		UpdatedBy:    rec.UpdatedBy,
 		Tags:         rec.Tags,
 	}
 }

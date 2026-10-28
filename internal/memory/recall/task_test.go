@@ -261,7 +261,7 @@ func TestRecall_BlockedTaskMarker(t *testing.T) {
 		m.Status = memory.StatusDone
 		putMemory(t, ctx, s, m)
 	}
-	if err := s.Supersede(ctx, b3, tomb); err != nil {
+	if err := s.Supersede(ctx, b3, tomb, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 	brief, err = r.Recall(ctx, memory.Query{Text: "блокировку задач", Scope: scope})

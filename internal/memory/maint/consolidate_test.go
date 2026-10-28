@@ -513,11 +513,11 @@ type failingSupersedeStore struct {
 	failFor map[string]bool
 }
 
-func (f *failingSupersedeStore) Supersede(ctx context.Context, oldID, newID string) error {
+func (f *failingSupersedeStore) Supersede(ctx context.Context, oldID, newID, by string) error {
 	if f.failFor[oldID] {
 		return errors.New("boom: supersede намеренно проваливается в тесте")
 	}
-	return f.Store.Supersede(ctx, oldID, newID)
+	return f.Store.Supersede(ctx, oldID, newID, by)
 }
 
 func TestConsolidateStoreErrorInOneGroupDoesNotBlockOthers(t *testing.T) {

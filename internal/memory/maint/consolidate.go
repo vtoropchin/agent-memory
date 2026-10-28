@@ -190,7 +190,8 @@ func (c *Consolidator) consolidateGroup(ctx context.Context, group scopeGroup, r
 			result.Created++
 		}
 
-		// Supersede выполняется по одному per source_id, каждый — autocommit-транзакция
+		// Supersede выполняется по одному per source_id (через Writer.Forget — он
+		// несёт имя редактора, Этап 19), каждый — autocommit-транзакция
 		// Store: Store не выставляет BeginTx/батч-supersede в интерфейсе (DESIGN.md §6),
 		// а расширять интерфейс ради этого джоба — больше площади, чем стоит задача.
 		// Цикл уже сгруппирован после успешного Save: Supersede для факта начинается
@@ -200,7 +201,7 @@ func (c *Consolidator) consolidateGroup(ctx context.Context, group scopeGroup, r
 			if sourceID == "" || !allowedSources[sourceID] || superseded[sourceID] {
 				continue // чужой/пустой/уже обработанный id — молча пропускаем (см. godoc Consolidate)
 			}
-			if err := c.store.Supersede(ctx, sourceID, id); err != nil {
+			if err := c.writer.Forget(ctx, sourceID, id); err != nil {
 				log.Printf("maint: supersede %q -> %q: %v", sourceID, id, err)
 				groupHadError = true
 				continue

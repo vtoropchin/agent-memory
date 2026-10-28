@@ -150,7 +150,7 @@ func TestHandleStats(t *testing.T) {
 	putTestMemory(t, s, func(m *memory.Memory) { m.Kind = memory.KindEpisodic; m.Scope = "user:*" })
 	superseder := putTestMemory(t, s, func(m *memory.Memory) { m.Kind = memory.KindSemantic; m.Scope = "project:agentmemory" })
 	old := putTestMemory(t, s, func(m *memory.Memory) { m.Kind = memory.KindSemantic; m.Scope = "project:agentmemory" })
-	if err := s.Supersede(context.Background(), old.Id, superseder.Id); err != nil {
+	if err := s.Supersede(context.Background(), old.Id, superseder.Id, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -220,7 +220,7 @@ func TestHandleListMemories_Filters(t *testing.T) {
 	putTestMemory(t, s, func(m *memory.Memory) { m.Scope = "project:b"; m.Kind = memory.KindEpisodic })
 	superseder := putTestMemory(t, s, func(m *memory.Memory) { m.Scope = "project:a"; m.Kind = memory.KindSemantic })
 	old := putTestMemory(t, s, func(m *memory.Memory) { m.Scope = "project:a"; m.Kind = memory.KindSemantic })
-	if err := s.Supersede(context.Background(), old.Id, superseder.Id); err != nil {
+	if err := s.Supersede(context.Background(), old.Id, superseder.Id, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -584,7 +584,7 @@ func TestHandlePatchMemory_SupersededConflict(t *testing.T) {
 	s := newTestWebStore(t)
 	x := putTestMemory(t, s, func(m *memory.Memory) {})
 	y := putTestMemory(t, s, func(m *memory.Memory) {})
-	if err := s.Supersede(context.Background(), x.Id, y.Id); err != nil {
+	if err := s.Supersede(context.Background(), x.Id, y.Id, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 
@@ -676,7 +676,7 @@ func TestHandleForgetMemory_AlreadyArchivedIdempotent(t *testing.T) {
 	s := newTestWebStore(t)
 	x := putTestMemory(t, s, func(m *memory.Memory) {})
 	y := putTestMemory(t, s, func(m *memory.Memory) {})
-	if err := s.Supersede(context.Background(), x.Id, y.Id); err != nil {
+	if err := s.Supersede(context.Background(), x.Id, y.Id, ""); err != nil {
 		t.Fatalf("Supersede: %v", err)
 	}
 

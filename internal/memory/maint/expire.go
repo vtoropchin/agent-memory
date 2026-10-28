@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"agentmemory/internal/memory/store"
+	"agentmemory/internal/memory/write"
 )
 
 // ExpireResult — статистика одного прогона ExpireSweep.
@@ -24,18 +25,19 @@ type ExpireResult struct {
 //
 // recall уже скрывает такие записи немедленно (Store.SearchLexical/SearchVector,
 // см. metaFilters) — ExpireSweep дополняет это гигиеной БД между прогонами
-// планировщика: превращает уже скрытое из recall в тумстоун (Store.Supersede),
+// планировщика: превращает уже скрытое из recall в тумстоун (Writer.Forget),
 // та же семантика мягкого удаления, что использует Decay/memory_forget.
 type Expirer struct {
-	store store.Store
+	store  store.Store
+	writer *write.Writer // тумстоун через Forget: Writer несёт имя редактора (Этап 19)
 }
 
-// NewExpirer создаёт Expirer поверх Store.
-func NewExpirer(s store.Store) *Expirer {
-	return &Expirer{store: s}
+// NewExpirer создаёт Expirer поверх Store и Writer.
+func NewExpirer(s store.Store, w *write.Writer) *Expirer {
+	return &Expirer{store: s, writer: w}
 }
 
-// ExpireSweep архивирует (self-supersede-тумстоун Store.Supersede(id, id)) все
+// ExpireSweep архивирует (self-supersede-тумстоун Writer.Forget(id, "")) все
 // живые записи с истёкшим TTL (Store.ListExpired: 0 < expires_at < now, без
 // superseded_by). limit <= 0 означает без ограничения на число кандидатов за один
 // прогон.
@@ -57,7 +59,7 @@ func (e *Expirer) ExpireSweep(ctx context.Context, limit int) (ExpireResult, err
 	var result ExpireResult
 	for _, m := range candidates {
 		result.Scanned++
-		if err := e.store.Supersede(ctx, m.Id, m.Id); err != nil {
+		if err := e.writer.Forget(ctx, m.Id, ""); err != nil {
 			log.Printf("maint: expire sweep архивирование %q: %v", m.Id, err)
 			continue
 		}
