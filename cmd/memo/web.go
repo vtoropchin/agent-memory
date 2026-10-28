@@ -283,11 +283,15 @@ type memoryDTO struct {
 	Status string `json:"status"`
 	// Type/Branch/Workflow — тип задачи (epic|story|task), git-ветка и процесс
 	// (kind=task, Этап 15): пусты у прочих типов; правятся PATCH.
-	Type     string    `json:"type"`
-	Branch   string    `json:"branch"`
-	Workflow string    `json:"workflow"`
-	Tags     []string  `json:"tags"`
-	Links    []linkDTO `json:"links"`
+	Type     string `json:"type"`
+	Branch   string `json:"branch"`
+	Workflow string `json:"workflow"`
+	// Author/UpdatedBy — кто создал запись и кто изменил её последним (Этап 19,
+	// DESIGN.md §12): пусто у записей, сделанных до авторства; read-only.
+	Author    string    `json:"author"`
+	UpdatedBy string    `json:"updatedBy"`
+	Tags      []string  `json:"tags"`
+	Links     []linkDTO `json:"links"`
 }
 
 // linkDTO — представление memory.Link ({dst, rel}) для JSON API.
@@ -345,6 +349,8 @@ func toDTO(m memory.Memory) memoryDTO {
 		Type:         string(m.Type),
 		Branch:       m.Branch,
 		Workflow:     m.Workflow,
+		Author:       m.Author,
+		UpdatedBy:    m.UpdatedBy,
 		Tags:         tags,
 		Links:        links,
 	}

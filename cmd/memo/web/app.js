@@ -1,4 +1,5 @@
-// app.js — новая веб-морда memo web (Этап 16: каркас 16.2, экраны 16.3–16.6).
+// app.js — новая веб-морда memo web (Этап 16: каркас 16.2, экраны 16.3–16.6;
+// раздел «Синхронизация» — Этап 19, задача 19.9).
 //
 // Спецификация — design/memo-web-redesign.md, макет — design/memo-web-prototype.html.
 // Фронт — адаптер поверх JSON API (cmd/memo/web.go): доменной логики здесь нет,
@@ -6,12 +7,13 @@
 // сторонних библиотек (решение Этапа 6); стили — cmd/memo/tailwind.input.css.
 //
 // Устройство:
-//   - состояние живёт в URL-хэше: раздел (#/, #/memory, #/board), scope, фильтры
+//   - состояние живёт в URL-хэше: раздел (#/, #/memory, #/board, #/sync), scope, фильтры
 //     экрана и id открытой записи; parseRoute разбирает хэш в state, navigate пишет
 //     новый хэш, hashchange → applyRoute — единственная точка перерисовки (как в
 //     15.6: ссылка воспроизводит экран);
 //   - экраны — объекты screens[view] с render(): обзор (16.3), память (16.4),
-//     доска (16.6); ответ устаревшего запроса отбрасывается по renderSeq;
+//     доска (16.6), синхронизация (19.9); ответ устаревшего запроса отбрасывается
+//     по renderSeq;
 //   - панель записи (drawer) открывается по id= в хэше (16.5), для задачи —
 //     поля доски, иерархия и блокировки (16.6); правки — PATCH/DELETE через
 //     patchRecord/forgetRecord: успех → перечитать карточку и экран + тост,
@@ -202,14 +204,14 @@ const state = {
 let lastFocus = null;   // элемент, открывший панель; к нему возвращается фокус
 
 // parseRoute — хэш → {view, scope, params, id}. "#/" — обзор, "#/memory",
-// "#/board"; неизвестный путь (в т.ч. #main от skip link) — обзор.
+// "#/board", "#/sync"; неизвестный путь (в т.ч. #main от skip link) — обзор.
 function parseRoute() {
   const hash = location.hash || "#/";
   const path = hash.replace(/^#/, "");
   const qIdx = path.indexOf("?");
   const route = qIdx === -1 ? path : path.slice(0, qIdx);
   const params = new URLSearchParams(qIdx === -1 ? "" : path.slice(qIdx + 1));
-  const view = route === "/memory" ? "memory" : route === "/board" ? "board" : "overview";
+  const view = route === "/memory" ? "memory" : route === "/board" ? "board" : route === "/sync" ? "sync" : "overview";
   const scope = params.get("scope") || "";
   const id = (params.get("id") || "").trim();
   params.delete("scope");
@@ -891,10 +893,483 @@ function taskBody(card) {
   return html;
 }
 
+// --- Синхронизация (DESIGN.md §12 «Раздел „Синхронизация“», задача 19.9) ---
+//
+// Рисует ответ /api/sync (web_sync.go): профиль, проекты со статусом, форма
+// цели выбранного проекта (?project= в хэше) и действия над общей базой. Правил
+// синхронизации здесь нет. Пароль write-only: в разметку не попадает никогда —
+// поле пароля рисуется пустым, после сохранения очищается, сервер отдаёт только
+// passwordSet. Форма цели не перерисовывается, пока в ней работают: проверка,
+// подтверждения и итог прогона живут в отдельном #sync-aux.
+
+const SSL_MODES = ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"];
+const SYNC_DEFAULT_MIN = 5;   // интервал по умолчанию (intervalSec = 0), DESIGN.md §11
+
+// syncUI — состояние экрана: последний ответ GET /api/sync и результаты действий
+// по проекту. В хэш не пишутся: это не адрес. confirm — открытое подтверждение
+// (schema | rotate | delete), replacePw — поле пароля открыто для замены, fail —
+// текст отказа операции над общей базой (длинный, для тоста не годится).
+const syncUI = { data: null, project: "", check: {}, run: {}, fail: {}, confirm: "", replacePw: false, warning: "", busy: false };
+
+// syncProject — выбранный проект: ?project= в хэше, иначе первая цель.
+function syncProject() {
+  const p = state.params.get("project") || "";
+  if (p) return p;
+  const d = syncUI.data;
+  return d && d.targets && d.targets.length ? d.targets[0].project : "";
+}
+
+function syncTarget(project) {
+  const d = syncUI.data;
+  return (d && d.targets || []).filter(function (t) { return t.project === project; })[0] || null;
+}
+
+// syncBadge — статус проекта: не настроена / выкл / ошибка / ок + время прогона.
+function syncBadge(t) {
+  if (!t) return '<span class="badge">не настроена</span>';
+  const s = t.state || {};
+  if (!t.push && !t.pull) return '<span class="badge">выкл</span>';
+  if (s.lastError) return '<span class="badge danger" title="' + esc(s.lastError) + '">ошибка' + (s.lastRunAt ? " · " + esc(rel(s.lastRunAt)) : "") + "</span>";
+  if (s.lastOkAt) return '<span class="badge ok">ок · ' + esc(rel(s.lastOkAt)) + "</span>";
+  return '<span class="badge">ещё не запускалась</span>';
+}
+
+async function renderSync() {
+  const el = $("#screen-sync");
+  const seq = ++renderSeq;
+  if (!syncUI.data) el.innerHTML = '<h2 id="h-sync" class="sr-only">Синхронизация</h2><p class="muted">Загрузка…</p>';
+  let data;
+  try {
+    data = await api("/api/sync");
+  } catch (err) {
+    if (seq !== renderSeq) return;
+    syncUI.data = null;
+    screenError(el, err, renderSync);
+    return;
+  }
+  if (seq !== renderSeq) return;
+  syncUI.data = data;
+  drawSync();
+}
+
+// drawSync — весь экран по syncUI.data; смена проекта сбрасывает его временное
+// состояние (открытые подтверждения, замену пароля, предупреждение).
+function drawSync() {
+  const el = $("#screen-sync");
+  const d = syncUI.data;
+  let html = '<h2 id="h-sync" class="sr-only">Синхронизация</h2>';
+  if (!d.available) {
+    // reason сервера — тот же смысл короче; экран говорит его своими словами
+    el.innerHTML = html + '<div class="panel"><div class="empty"><h3>Хранилище уже общее</h3><p>Этот memo работает прямо на PostgreSQL (<code>driver = postgres</code>): ' +
+      "записи сразу видны всем, кто подключён к той же базе, синхронизировать нечего.</p></div></div>";
+    return;
+  }
+  const project = syncProject();
+  if (project !== syncUI.project) {
+    syncUI.project = project; syncUI.confirm = ""; syncUI.replacePw = false; syncUI.warning = "";
+  }
+  html += '<div class="sync">' + '<div class="stack">' + syncProfilePanel(d.profile) + syncProjectsPanel(d, project) + "</div>" +
+    '<div class="stack">' + (project ? syncTargetPanel(project, syncTarget(project)) : syncNoProject(d)) + "</div></div>";
+  el.innerHTML = html;
+  if (project) drawSyncAux();
+}
+
+function syncProfilePanel(p) {
+  const dflt = p.nameDefault ? "имя из git: <b>" + esc(p.nameDefault) + "</b>" : "в git имя не задано — подпись останется пустой";
+  return '<section class="panel" aria-labelledby="h-sync-profile"><header><h2 id="h-sync-profile">Профиль</h2><span class="muted">для всех проектов</span></header>' +
+    '<form class="body" id="sync-profile">' +
+    '<div class="field"><label for="sp-name">Ваше имя</label><input type="text" id="sp-name" value="' + esc(p.name) + '" placeholder="' + esc(p.nameDefault || "Имя Фамилия") + '" maxlength="200" autocomplete="name">' +
+    '<span class="hint muted">Подпись в полях «Автор» и «Изменил последним» у ваших записей. Пусто — ' + dflt + ".</span></div>" +
+    '<div class="field"><label for="sp-interval">Синхронизировать каждые, мин</label><input type="number" id="sp-interval" min="1" max="1440" step="1" value="' + (p.intervalSec ? Math.round(p.intervalSec / 60) : "") + '" placeholder="' + SYNC_DEFAULT_MIN + '">' +
+    '<span class="hint muted">Фоном, в любом запущенном memo (MCP-сервер или memo web). Пусто — каждые ' + SYNC_DEFAULT_MIN + " мин.</span></div>" +
+    '<button type="submit" class="btn">Сохранить профиль</button></form></section>';
+}
+
+// syncProjectsPanel — цели и проекты локальной БД одним списком (DESIGN.md §12)
+// плюс ручной ввод имени: новичок подключает проект, которого у него ещё нет.
+function syncProjectsPanel(d, project) {
+  const names = {};
+  (d.targets || []).forEach(function (t) { names[t.project] = 1; });
+  (d.projects || []).forEach(function (p) { names[p] = 1; });
+  if (project) names[project] = 1;
+  const list = Object.keys(names).sort(function (a, b) { return a.localeCompare(b, "ru"); });
+  return '<section class="panel" aria-labelledby="h-sync-projects"><header><h2 id="h-sync-projects">Проекты</h2><span class="muted">' + list.length + "</span></header>" +
+    '<div class="body">' + (list.length ? '<ul class="sync-projects">' + list.map(function (p) {
+      return '<li><button type="button" data-sync-project="' + esc(p) + '"' + (p === project ? ' aria-current="true"' : "") + ">" + esc(p) + "</button>" + syncBadge(syncTarget(p)) + "</li>";
+    }).join("") + "</ul>"
+      : '<p class="muted small">В локальной базе ещё нет проектов. Введите имя ниже — например, чтобы скачать проект команды, которого у вас пока нет.</p>') +
+    '<form id="sync-add" class="sync-add"><label class="sr-only" for="sa-name">Имя проекта</label>' +
+    '<input type="text" id="sa-name" placeholder="имя проекта" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="sa-err">' +
+    '<button type="submit" class="btn">Добавить проект</button></form><span class="err" id="sa-err" role="alert"></span></div></section>';
+}
+
+function syncNoProject(d) {
+  return '<div class="panel"><div class="empty"><h3>Выберите проект</h3><p>' + ((d.projects || []).length
+    ? "В списке «Проекты» — проекты вашей локальной базы. Выберите проект, чтобы задать для него общую базу команды."
+    : "Добавьте проект по имени — так, как он называется в scope <code>project:имя</code>.") + "</p></div></div>";
+}
+
+// syncTargetPanel — форма цели и действия. Новая цель (t == null): обе стороны
+// включены — проект добавляют, чтобы синхронизировать; тумблеры видны до сохранения.
+function syncTargetPanel(project, t) {
+  const v = t || { host: "", port: 0, user: "", dbname: "", sslmode: "prefer", push: true, pull: true, passwordSet: false };
+  const saved = !!t;
+  const sw = function (id, on, label, hint) {
+    return '<label class="switch"><input type="checkbox" role="switch" id="' + id + '"' + (on ? " checked" : "") + '><span class="track" aria-hidden="true"></span>' +
+      '<span><span class="lbl">' + label + '</span><span class="hint muted">' + hint + "</span></span></label>";
+  };
+  let html = '<section class="panel" aria-labelledby="h-sync-target"><header><h2 id="h-sync-target">Общая база проекта <code>' + esc(project) + "</code></h2>" +
+    '<span class="grow"></span>' + syncBadge(t) + "</header>" +
+    '<form class="body" id="sync-target" data-project="' + esc(project) + '" autocomplete="off">' +
+    (syncUI.warning ? '<div class="notice warn" style="margin-bottom:var(--s4)"><div class="grow">' + esc(syncUI.warning) + "</div></div>" : "") +
+    '<div id="st-err"></div>' +
+    (saved ? "" : '<p class="muted small" style="margin-bottom:var(--s3)">Настройки ещё не сохранены. Параметры подключения к общей PostgreSQL-базе команды для этого проекта — у каждого проекта своя база.</p>') +
+    '<div class="sync-conn">' +
+    '<div class="field host"><label for="st-host">Хост</label><input type="text" id="st-host" class="mono" value="' + esc(v.host) + '" placeholder="db.example.local" spellcheck="false" required></div>' +
+    '<div class="field"><label for="st-port">Порт</label><input type="number" id="st-port" min="1" max="65535" value="' + (v.port || "") + '" placeholder="5432"></div>' +
+    '<div class="field"><label for="st-user">Пользователь</label><input type="text" id="st-user" value="' + esc(v.user) + '" spellcheck="false" required></div>' +
+    '<div class="field"><label for="st-dbname">База</label><input type="text" id="st-dbname" value="' + esc(v.dbname) + '" spellcheck="false" required></div>' +
+    '<div class="field"><label for="st-sslmode">sslmode</label><select id="st-sslmode">' + SSL_MODES.map(function (m) {
+      return '<option value="' + m + '"' + (m === (v.sslmode || "prefer") ? " selected" : "") + ">" + m + (m === "prefer" ? " (по умолчанию)" : "") + "</option>";
+    }).join("") + "</select></div>" +
+    '<div class="field"><label for="st-password">Пароль</label><div id="st-pw-slot">' + syncPasswordField(v.passwordSet) + "</div></div></div>" +
+    '<div class="switches">' +
+    sw("st-push", v.push, "Отправлять в общую базу", "ваши записи проекта уходят команде") +
+    sw("st-pull", v.pull, "Загружать из общей базы", "записи команды появляются у вас") + "</div>" +
+    '<p class="hint muted">Синхронизируются факты, процедуры, долг и задачи проекта; события сессий и <code>user:*</code> остаются только у вас.</p>' +
+    '<div class="sync-actions"><button type="submit" class="btn primary" data-sync-act>Сохранить</button>' +
+    '<button type="button" class="btn" data-sync-check data-sync-act' + (saved ? "" : " disabled") + ">Проверить подключение</button>" +
+    '<button type="button" class="btn" data-sync-run data-sync-act' + (saved ? "" : " disabled") + ">Синхронизировать сейчас</button>" +
+    '<span class="grow"></span>' +
+    (saved ? '<button type="button" class="btn danger" data-sync-ask="delete" data-sync-act>Удалить настройку…</button>' : "") + "</div></form>" +
+    '<div id="sync-aux" class="body"></div></section>';
+  if (saved) html += syncStatePanel(t);
+  return html;
+}
+
+// syncPasswordField — пароль write-only: задан — только признак и «Заменить»;
+// значение в разметку не попадает ни в каком состоянии.
+function syncPasswordField(set) {
+  if (set && !syncUI.replacePw) {
+    return '<div class="pw-set"><span>задан ●●●</span><button type="button" class="btn quiet sm" data-sync-pw="replace">Заменить</button></div>';
+  }
+  return '<div class="pw-set"><input type="password" id="st-password" autocomplete="new-password" placeholder="' + (set ? "новый пароль" : "не задан") + '">' +
+    (set ? '<button type="button" class="btn quiet sm" data-sync-pw="keep">Не менять</button>' : "") + "</div>" +
+    '<span class="hint muted">Хранится в .env рядом с локальной базой; обратно не показывается.</span>';
+}
+
+// syncStatePanel — итог последнего прогона из sync_state (фонового или ручного).
+function syncStatePanel(t) {
+  const s = t.state || {};
+  let body;
+  if (!s.lastRunAt) {
+    body = '<p class="muted small">Ещё не запускалась.' + (t.push || t.pull ? " Фоновый прогон начнётся сам, или нажмите «Синхронизировать сейчас»." : "") + "</p>";
+  } else {
+    body = (s.lastError ? '<div class="notice danger" style="margin-bottom:var(--s3)"><div class="grow"><strong>Последний прогон упал.</strong> ' + esc(s.lastError) + "</div></div>" : "") +
+      '<dl class="meta-grid"><dt>прогон</dt><dd title="' + esc(fmtDate(s.lastRunAt)) + '">' + esc(rel(s.lastRunAt)) + "</dd>" +
+      "<dt>успешный</dt><dd" + (s.lastOkAt ? ' title="' + esc(fmtDate(s.lastOkAt)) + '">' + esc(rel(s.lastOkAt)) : ">ещё не было") + "</dd>" +
+      "<dt>отправлено</dt><dd>" + fmtN(s.pushed) + "</dd><dt>получено</dt><dd>" + fmtN(s.pulled) + "</dd>" +
+      "<dt>конфликтов</dt><dd>" + fmtN(s.conflicts) + ' <span class="muted">· всего ' + fmtN(s.conflictsTotal) + " — побеждает более поздняя правка</span></dd></dl>";
+  }
+  const pending = s.pending ? '<p class="small" style="margin-top:var(--s3)">' + fmtN(s.pending) + " " + plural(s.pending, "запись ждёт", "записи ждут", "записей ждут") + " отправки" + (t.push ? "." : " — отправка выключена.") + "</p>" : "";
+  const off = !t.push && !t.pull ? '<div class="notice" style="margin-bottom:var(--s3)"><div class="grow">Обе стороны выключены — проект не синхронизируется. Скачанные записи остаются у вас.</div></div>' : "";
+  return '<section class="panel" aria-labelledby="h-sync-state"><header><h2 id="h-sync-state">Последний прогон</h2></header><div class="body">' + off + body + pending + "</div></section>";
+}
+
+// drawSyncAux — итог проверки, подтверждение и итог «Синхронизировать сейчас»
+// выбранного проекта; форма при этом не трогается.
+function drawSyncAux(focusSel) {
+  const box = $("#sync-aux");
+  if (!box) return;
+  const p = syncUI.project, t = syncTarget(p);
+  const html = (syncUI.fail[p] ? '<div class="notice danger" role="alert"><div class="grow"><strong>Не выполнено.</strong> ' + esc(syncUI.fail[p]) + "</div></div>" : "") +
+    syncCheckNotice(syncUI.check[p]) + (t ? syncConfirm(syncUI.confirm, t, syncUI.check[p]) : "") + syncRunNotice(syncUI.run[p]);
+  box.innerHTML = html;
+  box.hidden = !html;
+  const f = focusSel ? $(focusSel, box) || $(focusSel) : null;
+  if (f) f.focus();
+}
+
+function syncCheckNotice(c) {
+  if (!c) return "";
+  const n = function (cls, text) { return '<div class="notice ' + cls + '"><div class="grow">' + text + "</div></div>"; };
+  if (!c.reachable) return n("danger", "<strong>Нет подключения к общей базе.</strong> " + esc(c.error));
+  if (!c.schema) return n("danger", "<strong>Подключение есть, схему прочитать не удалось.</strong> " + esc(c.error));
+  const s = c.schema;
+  switch (s.state) {
+    case "ok":
+      return n("ok", "<strong>Подключение есть, схема актуальна</strong> (версия " + s.have + ")." +
+        ' <button type="button" class="btn quiet sm inline-link" data-sync-ask="rotate">База восстановлена из резервной копии?</button>');
+    case "empty":
+      return n("warn", "<strong>Подключение есть, но схемы memo в общей базе ещё нет.</strong> Синхронизация начнётся, когда её создадут.") +
+        '<p class="sync-under"><button type="button" class="btn" data-sync-ask="schema">Создать схему…</button></p>';
+    case "outdated":
+      return n("warn", "<strong>Схема общей базы устарела:</strong> версия " + s.have + ", этому memo нужна " + s.want + ". Пока её не обновят, синхронизация стоит.") +
+        '<p class="sync-under"><button type="button" class="btn" data-sync-ask="schema">Обновить схему…</button></p>';
+    default: // newer
+      return n("danger", "<strong>Схема общей базы новее этого memo</strong> (версия " + s.have + ", этот memo понимает " + s.want + "). Обновите memo — до тех пор синхронизация остановлена.");
+  }
+}
+
+function syncConfirm(kind, t, c) {
+  const where = "<code>" + esc(t.dbname) + "</code> на <code>" + esc(t.host) + "</code>";
+  const box = function (h, p, okText, okCls, attr) {
+    return '<div class="confirm" role="alertdialog" aria-labelledby="sc-h"><h3 id="sc-h">' + h + "</h3><p>" + p + "</p>" +
+      '<div class="btns"><button type="button" class="btn ' + okCls + '" ' + attr + ">" + okText + '</button><button type="button" class="btn" data-sync-cancel>Отмена</button></div></div>';
+  };
+  if (kind === "schema") {
+    const create = !c || !c.schema || c.schema.state === "empty";
+    const want = c && c.schema ? c.schema.want : "";
+    return box(create ? "Создать схему в общей базе?" : "Обновить схему общей базы до версии " + want + "?",
+      "memo выполнит DDL в базе " + where + " — она общая для всей команды." +
+      (create ? "" : " Участники со старым memo после этого перестанут синхронизироваться с ней, пока не обновят memo."),
+      create ? "Создать схему" : "Обновить схему", "primary", "data-sync-schema");
+  }
+  if (kind === "rotate") {
+    return box("База восстановлена из резервной копии?",
+      "memo сменит идентификатор общей базы " + where + ": у всех участников курсор загрузки сбросится, и следующий прогон перечитает общую базу заново. Нужно только после восстановления базы из копии.",
+      "Сменить идентификатор", "danger solid", "data-sync-rotate");
+  }
+  if (kind === "delete") {
+    return box("Удалить настройку синхронизации проекта «" + esc(t.project) + "»?",
+      "Синхронизация проекта прекратится, пароль удалится из .env. <strong>Локальные данные останутся:</strong> всё скачанное и созданное у вас никуда не денется, общая база тоже не меняется.",
+      "Удалить настройку", "danger solid", "data-sync-delete");
+  }
+  return "";
+}
+
+function syncRunNotice(r) {
+  if (!r) return "";
+  // текст ошибки уже в «Последний прогон» (state.lastError) — здесь не повторяем
+  if (r.error) return '<div class="notice danger"><div class="grow"><strong>Синхронизация не прошла.</strong> Причина — ниже, в «Последний прогон».</div></div>';
+  const extra = [];
+  if (r.stamped) extra.push("подписано вашим именем: " + fmtN(r.stamped));
+  if (r.deferred) extra.push("отложено до следующего прогона: " + fmtN(r.deferred));
+  if (r.droppedLinks) extra.push("отброшено связей без адресата: " + fmtN(r.droppedLinks));
+  return '<div class="notice ok"><div class="grow"><strong>Синхронизировано.</strong> Отправлено ' + fmtN(r.pushed) + ", получено " + fmtN(r.pulled) +
+    ", конфликтов " + fmtN(r.conflicts) + "." + (extra.length ? " " + esc(extra.join(" · ")) + "." : "") + "</div></div>";
+}
+
+// syncTargetBody — тело PUT цели из формы. Пароль уходит, только если поле
+// открыто и не пусто: нет поля — сервер пароль не трогает.
+function syncTargetBody() {
+  const body = {
+    host: $("#st-host").value.trim(), port: parseInt($("#st-port").value, 10) || 0,
+    user: $("#st-user").value.trim(), dbname: $("#st-dbname").value.trim(),
+    sslmode: $("#st-sslmode").value, push: $("#st-push").checked, pull: $("#st-pull").checked,
+  };
+  const pw = $("#st-password");
+  if (pw && pw.value !== "") body.password = pw.value;
+  return body;
+}
+
+// syncDirty — в форме есть несохранённые изменения: проверка и прогон идут по
+// сохранённой цели, поэтому сначала — «Сохранить».
+function syncDirty(t) {
+  if (!t) return true;
+  const b = syncTargetBody();
+  return b.password !== undefined || b.host !== t.host || b.port !== t.port || b.user !== t.user || b.dbname !== t.dbname ||
+    b.sslmode !== t.sslmode || b.push !== t.push || b.pull !== t.pull;
+}
+
+// syncAction — общий каркас действия: блокирует кнопки цели на время запроса,
+// ответ на уже сменившийся проект или экран отбрасывает.
+async function syncAction(project, fn) {
+  if (syncUI.busy) return;
+  syncUI.busy = true;
+  delete syncUI.fail[project];
+  $$("[data-sync-act], #sync-aux button").forEach(function (b) { b.disabled = true; });
+  try {
+    await fn(function () { return state.view === "sync" && syncUI.project === project; });
+  } finally {
+    syncUI.busy = false;
+    if (state.view === "sync" && syncUI.project === project && syncUI.data) {
+      const saved = !!syncTarget(project);
+      $$("[data-sync-act], #sync-aux button").forEach(function (b) { b.disabled = !saved && (b.hasAttribute("data-sync-check") || b.hasAttribute("data-sync-run")); });
+    }
+  }
+}
+
+function syncPost(project, op, body) {
+  return api("/api/sync/targets/" + encodeURIComponent(project) + "/" + op, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+  });
+}
+
+function syncErrText(err) {
+  return err.status === 0 ? "Сервер памяти не отвечает — действие не выполнено." : err.message;
+}
+
+async function saveSyncProfile() {
+  const name = $("#sp-name").value.trim();
+  const min = $("#sp-interval").value.trim();
+  try {
+    syncUI.data.profile = await api("/api/sync/profile", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name, intervalSec: min ? Math.round(Number(min) * 60) : 0 }),
+    });
+  } catch (err) { showToast(syncErrText(err)); return; }
+  showToast("Профиль сохранён");
+}
+
+async function saveSyncTarget(project) {
+  const body = syncTargetBody();
+  const pw = $("#st-password");
+  let done = false;
+  await syncAction(project, async function (current) {
+    let t;
+    try {
+      t = await api("/api/sync/targets/" + encodeURIComponent(project), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } catch (err) {
+      if (!current()) return;
+      $("#st-err").innerHTML = '<div class="notice danger" role="alert" style="margin-bottom:var(--s4)"><div class="grow"><strong>Не сохранено.</strong> ' + esc(syncErrText(err)) + "</div></div>";
+      return;
+    }
+    if (pw) pw.value = "";
+    if (!current()) return;
+    syncUI.warning = t.warning || "";
+    syncUI.replacePw = false;
+    delete syncUI.check[project];   // проверка относилась к прежним параметрам
+    done = true;
+    showToast("Настройки проекта сохранены");
+  });
+  // форма перерисовывается по ответу сервера: поле пароля снова пустое
+  if (done && state.view === "sync" && syncUI.project === project) await renderSync();
+}
+
+async function checkSyncTarget(project) {
+  await syncAction(project, async function (current) {
+    let c;
+    try { c = await syncPost(project, "check"); } catch (err) { if (current()) showToast(syncErrText(err)); return; }
+    if (!current()) return;
+    syncUI.check[project] = c;
+    syncUI.confirm = "";
+  });
+  drawSyncAux();
+}
+
+async function runSyncTarget(project) {
+  let done = false;
+  await syncAction(project, async function (current) {
+    let r;
+    try { r = await syncPost(project, "run"); } catch (err) {
+      if (current()) showToast(err.status === 409 ? "Синхронизация уже идёт — дождитесь окончания прогона." : syncErrText(err));
+      return;
+    }
+    if (!current()) return;
+    syncUI.run[project] = r;
+    done = true;
+  });
+  // итог прогона уже в sync_state: перечитать бейджи и «Последний прогон»
+  if (done && state.view === "sync" && syncUI.project === project) await renderSync();
+}
+
+// applySyncSchema / rotateSyncBase — операции над общей базой, только после
+// подтверждения: {confirm:true} уходит лишь с кнопки подтверждения.
+async function applySyncSchema(project) {
+  await syncAction(project, async function (current) {
+    let c;
+    try { c = await syncPost(project, "schema", { confirm: true }); } catch (err) {
+      if (current()) { syncUI.fail[project] = syncErrText(err); syncUI.confirm = ""; }
+      return;
+    }
+    if (!current()) return;
+    syncUI.check[project] = c;
+    syncUI.confirm = "";
+    showToast("Схема общей базы готова");
+  });
+  drawSyncAux("[data-sync-check]");
+}
+
+async function rotateSyncBase(project) {
+  await syncAction(project, async function (current) {
+    try { await syncPost(project, "rotate", { confirm: true }); } catch (err) {
+      if (current()) { syncUI.fail[project] = syncErrText(err); syncUI.confirm = ""; }
+      return;
+    }
+    if (!current()) return;
+    syncUI.confirm = "";
+    showToast("Идентификатор общей базы сменён — следующий прогон перечитает её заново");
+  });
+  drawSyncAux("[data-sync-check]");
+}
+
+async function deleteSyncTarget(project) {
+  let done = false;
+  await syncAction(project, async function (current) {
+    try { await api("/api/sync/targets/" + encodeURIComponent(project), { method: "DELETE" }); } catch (err) { if (current()) showToast(syncErrText(err)); return; }
+    done = true;
+  });
+  if (!done) return;
+  delete syncUI.check[project]; delete syncUI.run[project];
+  syncUI.confirm = "";
+  showToast("Настройка «" + project + "» удалена — локальные данные на месте");
+  if (state.view === "sync") await renderSync();
+}
+
+// syncClick — действия экрана; true — событие обработано.
+function syncClick(t) {
+  if (!t.closest("#screen-sync")) return false;
+  const pr = t.closest("[data-sync-project]");
+  if (pr) { navigate({ params: new URLSearchParams({ project: pr.getAttribute("data-sync-project") }) }); return true; }
+  const project = syncUI.project, target = syncTarget(project);
+  const pw = t.closest("[data-sync-pw]");
+  if (pw) {
+    syncUI.replacePw = pw.getAttribute("data-sync-pw") === "replace";
+    $("#st-pw-slot").innerHTML = syncPasswordField(target && target.passwordSet);
+    const f = syncUI.replacePw ? $("#st-password") : $('[data-sync-pw="replace"]');
+    if (f) f.focus();
+    return true;
+  }
+  if (t.closest("[data-sync-check]") || t.closest("[data-sync-run]")) {
+    if (syncDirty(target)) { showToast("Сначала сохраните изменения — проверяются сохранённые настройки."); return true; }
+    if (t.closest("[data-sync-check]")) checkSyncTarget(project); else runSyncTarget(project);
+    return true;
+  }
+  const ask = t.closest("[data-sync-ask]");
+  if (ask) {
+    syncUI.confirm = ask.getAttribute("data-sync-ask");
+    drawSyncAux("#sync-aux .confirm .btn:first-child");
+    return true;
+  }
+  if (t.closest("[data-sync-cancel]")) { closeSyncConfirm(); return true; }
+  if (t.closest("[data-sync-schema]")) { applySyncSchema(project); return true; }
+  if (t.closest("[data-sync-rotate]")) { rotateSyncBase(project); return true; }
+  if (t.closest("[data-sync-delete]")) { deleteSyncTarget(project); return true; }
+  return false;
+}
+
+// closeSyncConfirm — снять подтверждение и вернуть фокус на кнопку, открывшую его.
+function closeSyncConfirm() {
+  const kind = syncUI.confirm;
+  syncUI.confirm = "";
+  drawSyncAux(kind === "delete" ? '[data-sync-ask="delete"]' : kind === "rotate" ? '[data-sync-ask="rotate"]' : '[data-sync-ask="schema"]');
+}
+
+// syncSubmit — формы экрана: профиль, цель, ручное добавление проекта.
+function syncSubmit(form) {
+  if (form.id === "sync-profile") { saveSyncProfile(); return true; }
+  if (form.id === "sync-target") { saveSyncTarget(form.getAttribute("data-project")); return true; }
+  if (form.id === "sync-add") {
+    const v = $("#sa-name").value.trim();
+    // то же правило, что validateSyncProject на сервере: сразу, без запроса
+    const bad = !v ? "Введите имя проекта." : !/^[\p{L}\p{N}._-]+$/u.test(v) ? "Допустимы буквы, цифры и символы - _ ." : "";
+    $("#sa-err").textContent = bad;
+    if (!bad) navigate({ params: new URLSearchParams({ project: v }) });
+    return true;
+  }
+  return false;
+}
+
+document.addEventListener("submit", function (e) {
+  if (e.target instanceof HTMLFormElement && e.target.closest("#screen-sync") && syncSubmit(e.target)) e.preventDefault();
+});
+
 const screens = {
   overview: { render: renderOverview },
   memory: { render: renderMemory },
   board: { render: renderBoard },
+  sync: { render: renderSync },
 };
 
 let lastScreenKey = "";  // раздел+scope+фильтры последней отрисовки: смена одного id панели экран не перерисовывает
@@ -1083,12 +1558,15 @@ function forgetConfirm(card) {
     '<div class="btns"><button type="button" class="btn danger solid" data-forget>Забыть</button><button type="button" class="btn" data-forget-cancel>Оставить</button></div></div>';
 }
 
-// serviceMeta — «Служебное»: id, полные даты, чтения, источник, вектор.
+// serviceMeta — «Служебное»: id, полные даты, авторство, чтения, источник, вектор.
 function serviceMeta(card) {
   const m = card.memory, e = card.embedding || {};
   return '<div class="section"><h3>Служебное</h3><dl class="meta-grid">' +
     "<dt>id</dt><dd><code>" + esc(m.id) + "</code></dd><dt>scope</dt><dd>" + esc(m.scope) + "</dd>" +
     "<dt>создана</dt><dd>" + esc(fmtDate(m.createdAt)) + "</dd><dt>изменена</dt><dd>" + esc(fmtDate(m.updatedAt)) + "</dd>" +
+    // авторство (Этап 19): у записей, сделанных до него, полей нет — строк тоже
+    (m.author ? "<dt>автор</dt><dd>" + esc(m.author) + "</dd>" : "") +
+    (m.updatedBy ? "<dt>изменил последним</dt><dd>" + esc(m.updatedBy) + "</dd>" : "") +
     "<dt>читалась</dt><dd>" + (m.accessedAt ? esc(fmtDate(m.accessedAt)) + " · " + m.accessCount + " " + plural(m.accessCount, "раз", "раза", "раз") : "ещё ни разу") + "</dd>" +
     "<dt>источник</dt><dd>" + (m.source ? "<code>" + esc(m.source) + "</code>" : "—") + "</dd>" +
     (m.expiresAt ? "<dt>истекает</dt><dd>" + esc(fmtDate(m.expiresAt)) + "</dd>" : "") +
@@ -1558,6 +2036,7 @@ document.addEventListener("click", function (e) {
   if (pickerClick(t)) return;
   if (compose.on && composeClick(t)) return;
   if (state.id && t.closest("#drawer-root") && drawerClick(t)) return;
+  if (state.view === "sync" && syncClick(t)) return;
   if (t.closest("#b-new")) { openCompose({}, boardParentLabel()); return; }
   const nw = t.closest("[data-new]");
   if (nw) { openCompose({ status: nw.getAttribute("data-new") }, boardParentLabel()); return; }
@@ -1606,6 +2085,8 @@ document.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && e.target.matches("[data-newtag]")) { e.preventDefault(); addComposeTag(e.target); return; }
     return;
   }
+  // Esc снимает подтверждение раздела «Синхронизация»
+  if (e.key === "Escape" && state.view === "sync" && syncUI.confirm && !state.id) { e.preventDefault(); closeSyncConfirm(); return; }
   // n — новая задача из любого раздела (§2.6); вне полей ввода и вне панели
   if (e.key === "n" && !state.id && !e.target.matches("input,textarea,select") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();

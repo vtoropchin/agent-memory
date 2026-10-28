@@ -104,7 +104,7 @@
   h3 { font-size: var(--fs-md); }
   p { margin: 0; }
   code { font-family: var(--font-mono); font-size: 0.92em; }
-  input[type=search], input[type=text], select, textarea {
+  input[type=search], input[type=text], input[type=password], input[type=number], select, textarea {
     background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r);
     padding: 5px 8px; min-height: 30px;
   }
@@ -451,6 +451,53 @@
   .compose .err { display: block; color: var(--danger); font-size: var(--fs-xs); margin-top: 6px; font-weight: 400; letter-spacing: 0; }
   .compose .bad input { border-color: var(--danger); }
   .compose .hint { display: block; color: var(--ink-3); font-size: var(--fs-sm); margin-bottom: 0; margin-top: 6px; }
+
+  /* --- синхронизация (DESIGN.md §12, задача 19.9): профиль и проекты слева, цель справа --- */
+  .sync { display: grid; grid-template-columns: minmax(300px, .75fr) minmax(0, 1.5fr); gap: var(--s5); align-items: start; }
+  .sync .field input[type=text], .sync .field input[type=number], .sync .field input[type=password], .sync .field select { width: 100%; height: 32px; }
+  .sync .field { align-content: start; }
+  .sync .field .hint { margin-bottom: 0; }
+  .sync .err { display: block; color: var(--danger); font-size: var(--fs-xs); margin-top: 4px; }
+  .sync .err:empty { display: none; }
+  .badge {
+    display: inline-block; font-size: var(--fs-xs); padding: 1px 7px; border-radius: 3px; white-space: nowrap;
+    background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line);
+  }
+  .badge.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+  .badge.danger { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+  .sync-projects { list-style: none; margin: 0 0 var(--s3); padding: 0; font-size: var(--fs-sm); }
+  .sync-projects li { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); padding: 6px 0; border-top: 1px solid var(--line); }
+  .sync-projects li:first-child { border-top: 0; }
+  .sync-projects button { border: 0; background: none; padding: 0; cursor: pointer; color: var(--ink); font: inherit; text-align: left; min-width: 0; overflow-wrap: anywhere; }
+  .sync-projects button:hover { color: var(--accent); text-decoration: underline; }
+  .sync-projects button[aria-current="true"] { font-weight: 600; color: var(--accent); }
+  .sync-add { display: flex; gap: var(--s2); }
+  .sync-add input { flex: 1; min-width: 0; height: 32px; }
+  .sync-conn { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 0 var(--s3); }
+  .pw-set { display: flex; align-items: center; gap: var(--s2); min-height: 32px; }
+  .pw-set input { flex: 1; min-width: 0; }
+  .switches { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); margin: var(--s2) 0 var(--s3); }
+  /* тумблер — checkbox role=switch: сам input прозрачен поверх дорожки и остаётся фокусируемым */
+  .switch { display: flex; gap: var(--s3); align-items: flex-start; cursor: pointer; position: relative; font-size: var(--fs-sm); }
+  .switch input { position: absolute; left: 0; top: 0; width: 34px; height: 20px; margin: 0; opacity: 0; cursor: pointer; }
+  .switch .track { flex: none; width: 34px; height: 20px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line-strong); position: relative; transition: background .15s; }
+  .switch .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--ink-3); transition: transform .15s; }
+  .switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+  .switch input:checked + .track::after { background: var(--accent-ink); transform: translateX(14px); }
+  .switch input:focus-visible + .track { box-shadow: var(--focus); }
+  .switch .lbl { display: block; color: var(--ink); font-weight: 600; }
+  .switch .hint { display: block; margin: 0; }
+  .sync-actions { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; margin-top: var(--s3); }
+  #sync-aux { display: grid; gap: var(--s3); border-top: 1px solid var(--line); }
+  #sync-aux[hidden] { display: none; }
+  #sync-aux .confirm { margin-top: 0; }
+  .sync-under { margin: 0; }
+  @media (max-width: 1100px) {
+    .sync { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 760px) {
+    .sync-conn, .switches { grid-template-columns: 1fr; }
+  }
 
   .inline-link { color: inherit; text-decoration: underline; padding: 0 2px; min-height: 0; }
   .editing .prose { display: none; }

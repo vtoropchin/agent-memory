@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,4 +115,29 @@ func TestRunMigrate_CarriesAuthor(t *testing.T) {
 	}
 	assertAuthor(t, dstPath, authoredID, "Анна", "Борис")
 	assertAuthor(t, dstPath, plainID, "", "")
+}
+
+// TestHandleGetMemory_Author: карточка записи в морде несёт author/updatedBy
+// (панель записи и карточка задачи, задача 19.9); у записи без авторства —
+// пустые строки, фронт тогда строк не показывает.
+func TestHandleGetMemory_Author(t *testing.T) {
+	s := newTestWebStore(t)
+	authoredID, plainID := putAuthored(t, s)
+	srv := httptest.NewServer(newTestWebHandler(s))
+	defer srv.Close()
+
+	for _, tc := range []struct{ id, author, updatedBy string }{
+		{authoredID, "Анна", "Борис"},
+		{plainID, "", ""},
+	} {
+		var card struct {
+			Memory map[string]any `json:"memory"`
+		}
+		if resp := getJSON(t, srv.URL+"/api/memories/"+tc.id, &card); resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: статус %d", tc.id, resp.StatusCode)
+		}
+		if card.Memory["author"] != tc.author || card.Memory["updatedBy"] != tc.updatedBy {
+			t.Errorf("%s: author=%v updatedBy=%v, хочу %q/%q", tc.id, card.Memory["author"], card.Memory["updatedBy"], tc.author, tc.updatedBy)
+		}
+	}
 }

@@ -10,7 +10,7 @@
 </head>
 <body>
   <!-- Каркас новой морды (Этап 16, задача 16.2; спецификация design/memo-web-redesign.md).
-       Шапка: <h1>, три раздела по хэшу (#/, #/memory, #/board; активный — aria-current),
+       Шапка: <h1>, разделы по хэшу (#/, #/memory, #/board, #/sync — Этап 19; активный — aria-current),
        единственный на всё приложение селект scope (app.js наполняет его из /api/stats,
        домашний scope помечен по homeScope). Ссылки разделов app.js дописывает текущим
        scope, чтобы он переживал переключение раздела. -->
@@ -21,6 +21,7 @@
       <a href="#/" data-view="overview">Обзор</a>
       <a href="#/memory" data-view="memory">Память</a>
       <a href="#/board" data-view="board">Доска</a>
+      <a href="#/sync" data-view="sync">Синхронизация</a>
     </nav>
     <div class="grow"></div>
     <div class="scopebox">
@@ -35,8 +36,8 @@
     <!-- ошибка API (§5): «Сервер памяти не отвечает» с кнопкой «Повторить» -->
     <div id="notice-root"></div>
 
-    <!-- контейнеры трёх экранов: виден только текущий (hidden снимает app.js);
-         содержимое рисует app.js (16.3 Обзор, 16.4 Память, 16.6 Доска), заголовок
+    <!-- контейнеры экранов: виден только текущий (hidden снимает app.js);
+         содержимое рисует app.js (16.3 Обзор, 16.4 Память, 16.6 Доска, 19.9 Синхронизация), заголовок
          секции — скрытый h2 для aria-labelledby -->
     <section id="screen-overview" hidden aria-labelledby="h-overview">
       <h2 id="h-overview" class="sr-only">Обзор</h2>
@@ -46,6 +47,9 @@
     </section>
     <section id="screen-board" hidden aria-labelledby="h-board">
       <h2 id="h-board" class="sr-only">Доска</h2>
+    </section>
+    <section id="screen-sync" hidden aria-labelledby="h-sync">
+      <h2 id="h-sync" class="sr-only">Синхронизация</h2>
     </section>
   </main>
 
