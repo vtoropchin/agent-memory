@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 
@@ -706,5 +707,43 @@ func TestBeginWriteTx_TakesWriteLock(t *testing.T) {
 	}
 	if _, err := other.ExecContext(ctx, `INSERT INTO sync_profile (id) VALUES (1)`); err != nil {
 		t.Fatalf("после отката второй писатель: %v", err)
+	}
+}
+
+// TestSyncLocal_PutTargetWaitsForOtherWriter: другой процесс memo на том же файле
+// держит запись (MCP-сервер стартует рядом с мордой) — PutTarget ждёт его по
+// busy_timeout, а не падает «database is locked»: транзакция, начатая чтением,
+// после чужого коммита получала бы SQLITE_BUSY_SNAPSHOT без ожидания (приёмка 19.10).
+func TestSyncLocal_PutTargetWaitsForOtherWriter(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "memory.db")
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	other, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite второго процесса: %v", err)
+	}
+	t.Cleanup(func() { other.Close() })
+
+	tx, err := other.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO sync_profile (id, author_name, interval_s) VALUES (1, 'другой', 300)`); err != nil {
+		t.Fatal(err)
+	}
+	committed := make(chan error, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		committed <- tx.Commit()
+	}()
+	if _, err := s.SyncLocal().PutTarget(ctx, SyncTarget{Project: "alpha", Host: "h", User: "u", DBName: "d", Push: true}); err != nil {
+		t.Fatalf("PutTarget при чужой записи: %v", err)
+	}
+	if err := <-committed; err != nil {
+		t.Fatalf("commit второго процесса: %v", err)
 	}
 }

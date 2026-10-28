@@ -131,8 +131,8 @@ type Result struct {
 	DroppedLinks int // отброшено рёбер, адресат которых не нашёлся
 }
 
-// Local — локальная база инстанса, ровно то, что нужно Syncer. Цели, профиль
-// и lease — порт планировщика прогонов (19.6), не этот.
+// Local — локальная база инстанса, ровно то, что нужно Syncer. Цели и интервал —
+// порт Plan планировщика, lease берёт вызывающий прогон (cmd/memo), не этот порт.
 type Local interface {
 	// State — состояние цели; нулевое, если прогонов не было.
 	State(ctx context.Context, project string) (State, error)

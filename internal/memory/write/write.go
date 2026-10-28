@@ -11,6 +11,7 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -109,8 +110,9 @@ type Writer struct {
 	entropy  io.Reader
 	// author — имя разработчика, от которого идут правки (Этап 19, DESIGN.md
 	// §4): Save пишет его в Author и UpdatedBy, остальные правки — в UpdatedBy.
-	// Пусто — поля авторства не трогаются.
-	author string
+	// Пусто — поля авторства не трогаются. Atomic: SetAuthor меняет имя на ходу,
+	// пока правки идут из других горутин.
+	author atomic.Pointer[string]
 }
 
 // Option настраивает Writer при создании (используется в тестах для детерминизма).
@@ -125,7 +127,23 @@ func WithNow(now func() int64) Option {
 // UpdatedBy). Имя выбирает composition root; пустое (после TrimSpace) — то же,
 // что без опции: записи остаются без автора, как до Этапа 19.
 func WithAuthor(name string) Option {
-	return func(w *Writer) { w.author = strings.TrimSpace(name) }
+	return func(w *Writer) { w.SetAuthor(name) }
+}
+
+// SetAuthor меняет имя разработчика для последующих правок — для процесса,
+// в котором имя только что сменили (раздел «Синхронизация» memo web); правила
+// те же, что у WithAuthor.
+func (w *Writer) SetAuthor(name string) {
+	name = strings.TrimSpace(name)
+	w.author.Store(&name)
+}
+
+// authorName — текущее имя разработчика; пусто, если не задано.
+func (w *Writer) authorName() string {
+	if p := w.author.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // WithEntropy подменяет источник энтропии для генерации ULID (по умолчанию —
@@ -361,6 +379,7 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		summaryPtr = &summary
 	}
 
+	author := w.authorName() // одно имя на Author и UpdatedBy, даже если SetAuthor идёт параллельно
 	m := memory.Memory{
 		Id:         id,
 		Kind:       in.Kind,
@@ -376,8 +395,8 @@ func (w *Writer) Save(ctx context.Context, in SaveInput) (id string, merged bool
 		Type:       taskType,
 		Branch:     branch,
 		Workflow:   workflow,
-		Author:     w.author,
-		UpdatedBy:  w.author,
+		Author:     author,
+		UpdatedBy:  author,
 		Tags:       tags,
 		Links:      links,
 	}
@@ -519,7 +538,7 @@ func (w *Writer) reinforce(ctx context.Context, existingID string, importance in
 	if importance > merged.Importance {
 		merged.Importance = importance
 	}
-	merged.UpdatedAt = w.now()
+	merged.UpdatedAt = w.editedAt(existing.UpdatedAt)
 	w.stampEditor(&merged)
 
 	if err := w.store.Put(ctx, merged); err != nil {
@@ -733,7 +752,7 @@ func (w *Writer) Update(ctx context.Context, in UpdateInput) error {
 	if err := w.checkBlocked(ctx, m); err != nil {
 		return err
 	}
-	m.UpdatedAt = w.now()
+	m.UpdatedAt = w.editedAt(m.UpdatedAt)
 	w.stampEditor(&m)
 	if err := w.store.Put(ctx, m); err != nil {
 		return fmt.Errorf("write: сохранение %q: %w", id, err)
@@ -765,17 +784,25 @@ func (w *Writer) Forget(ctx context.Context, id string, replacedBy string) error
 		return fmt.Errorf("write: проверка replaced_by %q: %w", replacedBy, err)
 	}
 
-	if err := w.store.Supersede(ctx, id, target, w.author); err != nil {
+	if err := w.store.Supersede(ctx, id, target, w.authorName()); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
 	return nil
 }
 
+// editedAt — updated_at правки записи с прежним updated_at prev: max(now, prev+1).
+// Время в секундах, и без «+1» LWW синхронизации не отличил бы вторую правку в ту
+// же секунду от первой, а правка поверх версии с часов, ушедших вперёд, вышла бы
+// старее её (DESIGN.md §4, §7.1).
+func (w *Writer) editedAt(prev int64) int64 {
+	return max(w.now(), prev+1)
+}
+
 // stampEditor отмечает правку записи m: UpdatedBy = имя Writer'а; Author не
 // меняется никогда. Пустое имя — запись не трогается (см. WithAuthor).
 func (w *Writer) stampEditor(m *memory.Memory) {
-	if w.author != "" {
-		m.UpdatedBy = w.author
+	if name := w.authorName(); name != "" {
+		m.UpdatedBy = name
 	}
 }
 

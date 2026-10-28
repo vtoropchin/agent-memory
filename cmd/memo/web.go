@@ -233,7 +233,7 @@ func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder
 	mux.HandleFunc("DELETE /api/memories/{id}", handleForgetMemory(s, w))
 	mux.HandleFunc("GET /api/search", handleSearch(s, rc, embedder))
 	mux.HandleFunc("GET /api/board", handleBoard(s))
-	registerSyncRoutes(mux, s, inst.SyncEnvDir) // раздел «Синхронизация», web_sync.go
+	registerSyncRoutes(mux, s, inst.SyncEnvDir, w.SetAuthor) // раздел «Синхронизация», web_sync.go
 	// Catch-all для неизвестных /api/*-путей: без него они проваливаются в
 	// файловый хендлер на "/" и отдают plain-text 404 вместо JSON-ошибки.
 	// Менее специфичен, чем method-aware паттерны выше, поэтому известные

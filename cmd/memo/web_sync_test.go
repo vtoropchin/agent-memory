@@ -142,6 +142,38 @@ func TestSyncAPI_Profile(t *testing.T) {
 	}
 }
 
+// TestSyncAPI_ProfileNameAppliesToWebEdits: имя, сохранённое в разделе, сразу
+// подписывает правки этой же морды (приёмка 19.10: «ввёл имя → двинул карточку»),
+// без перезапуска; сброс имени — снова имя из git.
+func TestSyncAPI_ProfileNameAppliesToWebEdits(t *testing.T) {
+	s, _ := newSyncWebSQLite(t)
+	useGitGlobalConfig(t, "[user]\n\tname = Гит Тестов\n")
+	ctx := context.Background()
+	w := write.New(s, embed.NewNoop(), write.WithAuthor(authorName(ctx, s))) // как runWeb: имя на старте
+	rc := recall.New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: testRecallWeights()}, reason.NewNoop(), embed.NewNoop())
+	srv := httptest.NewServer(newWebHandler(s, w, rc, embed.NewNoop(), webInstance{}))
+	t.Cleanup(srv.Close)
+	id, _, err := w.Save(ctx, write.SaveInput{Kind: memory.KindTask, Scope: "project:alpha", Content: "задача", Summary: "Задача"})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	for _, tc := range []struct{ name, status, want string }{
+		{"Борис", "doing", "Борис"},
+		{"", "review", "Гит Тестов"},
+	} {
+		syncDoJSON(t, http.MethodPut, srv.URL+"/api/sync/profile", `{"name":"`+tc.name+`","intervalSec":0}`, http.StatusOK, nil)
+		syncDoJSON(t, http.MethodPatch, srv.URL+"/api/memories/"+id, `{"status":"`+tc.status+`"}`, http.StatusOK, nil)
+		got, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.UpdatedBy != tc.want {
+			t.Errorf("после имени %q правка из морды: updated_by = %q, хочу %q", tc.name, got.UpdatedBy, tc.want)
+		}
+	}
+}
+
 // TestSyncAPI_TargetPassword: цель заводится на проект без локальных записей;
 // пароль только на запись — лежит в .env каталога БД, наружу лишь passwordSet;
 // без поля password пароль не трогается, пустая строка — удаляет.

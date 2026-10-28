@@ -211,9 +211,9 @@ func (l *SyncLocal) PutTarget(ctx context.Context, t SyncTarget) (SyncTarget, er
 		t.SSLMode = syncDefaultSSLMode
 	}
 
-	tx, err := l.s.db.BeginTx(ctx, nil)
+	tx, err := beginWriteTx(ctx, l.s.db)
 	if err != nil {
-		return SyncTarget{}, fmt.Errorf("начало транзакции: %w", err)
+		return SyncTarget{}, err
 	}
 	defer tx.Rollback()
 
@@ -738,8 +738,8 @@ func (l *SyncLocal) Apply(ctx context.Context, recs []memsync.Guarded) (applied,
 	return applied, stale, nil
 }
 
-// beginWriteTx начинает транзакцию с пишущего оператора. Apply и StampAuthor
-// сначала читают, затем пишут: в WAL отложенная транзакция, начатая чтением,
+// beginWriteTx начинает транзакцию с пишущего оператора. PutTarget, Apply и
+// StampAuthor сначала читают, затем пишут: в WAL отложенная транзакция, начатая чтением,
 // получает SQLITE_BUSY_SNAPSHOT сразу, без ожидания по busy_timeout, если
 // другой процесс memo успел записать между её чтением и первой записью (тот же
 // урок, что у applyTriggers). Пустой UPDATE берёт блокировку записи в начале —

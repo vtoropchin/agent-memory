@@ -53,12 +53,15 @@ type syncAPI struct {
 	s      store.Store
 	local  *store.SyncLocal
 	envDir string // каталог локальной БД: там .env с паролями общих баз
+	// setAuthor — имя для правок этой морды (Writer.SetAuthor): новое имя профиля
+	// действует на них сразу.
+	setAuthor func(name string)
 }
 
 // registerSyncRoutes регистрирует маршруты /api/sync поверх хранилища s;
-// envDir — каталог локальной БД (syncEnvDir).
-func registerSyncRoutes(mux *http.ServeMux, s store.Store, envDir string) {
-	api := &syncAPI{s: s, envDir: envDir}
+// envDir — каталог локальной БД (syncEnvDir), setAuthor — смена имени Writer'а морды.
+func registerSyncRoutes(mux *http.ServeMux, s store.Store, envDir string, setAuthor func(name string)) {
+	api := &syncAPI{s: s, envDir: envDir, setAuthor: setAuthor}
 	api.local, _ = store.SyncLocalOf(s)
 
 	mux.HandleFunc("GET /api/sync", api.handleGet)
@@ -243,6 +246,9 @@ func (a *syncAPI) handlePutProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
+	// Свои правки морда подписывает новым именем без перезапуска; уже запущенные
+	// MCP-серверы подхватят его после своего перезапуска (DESIGN.md §4).
+	a.setAuthor(authorName(r.Context(), a.s))
 	profile, err := a.profileDTO(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)

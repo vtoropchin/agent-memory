@@ -380,9 +380,10 @@ func (s *pgStore) Neighbors(ctx context.Context, id string) ([]memory.Memory, er
 }
 
 // Supersede помечает oldID как заменённый записью newID (мягкое забывание);
-// непустой by становится updated_by (см. Store.Supersede).
+// непустой by становится updated_by (см. Store.Supersede); updated_at = max(now,
+// прежний + 1) — тумстоун тоже правка и строго новее прежней версии (DESIGN.md §4).
 func (s *pgStore) Supersede(ctx context.Context, oldID, newID, by string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE memories SET superseded_by = $1, updated_at = $2, updated_by = COALESCE($3, updated_by) WHERE id = $4`, newID, s.now(), nullIfEmpty(by), oldID)
+	res, err := s.db.ExecContext(ctx, `UPDATE memories SET superseded_by = $1, updated_at = GREATEST($2, updated_at + 1), updated_by = COALESCE($3, updated_by) WHERE id = $4`, newID, s.now(), nullIfEmpty(by), oldID)
 	if err != nil {
 		return fmt.Errorf("supersede %q -> %q: %w", oldID, newID, err)
 	}

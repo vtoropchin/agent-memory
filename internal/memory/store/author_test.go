@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"agentmemory/internal/memory"
 )
@@ -279,4 +280,25 @@ func TestMigrateAuthorPG(t *testing.T) {
 	if got, err := s.Get(ctx, id); err != nil || got.Author != "Анна" || got.UpdatedBy != "Борис" {
 		t.Errorf("после миграции поля не пишутся: %+v (%v)", got, err)
 	}
+}
+
+// TestParitySupersedeUpdatedAtGrows: тумстоун — правка, и его updated_at строго
+// больше прежнего даже при часах позади записи (её версия пришла с машины, чьи часы
+// впереди): иначе LWW синхронизации не отличил бы forget от живой версии (DESIGN.md §4).
+func TestParitySupersedeUpdatedAtGrows(t *testing.T) {
+	runParity(t, "SupersedeUpdatedAtGrows", func(t *testing.T, s Store) {
+		ctx := context.Background()
+		ahead := time.Now().Unix() + 3600
+		id := putTestMemory(t, s, func(m *memory.Memory) { m.CreatedAt, m.UpdatedAt = ahead, ahead })
+		if err := s.Supersede(ctx, id, id, "Борис"); err != nil {
+			t.Fatalf("Supersede: %v", err)
+		}
+		got, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.UpdatedAt != ahead+1 {
+			t.Errorf("updated_at тумстоуна = %d, хочу %d (прежний + 1)", got.UpdatedAt, ahead+1)
+		}
+	})
 }

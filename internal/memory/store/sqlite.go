@@ -1506,9 +1506,10 @@ func (s *sqliteStore) Neighbors(ctx context.Context, id string) ([]memory.Memory
 }
 
 // Supersede помечает oldID как заменённый записью newID (мягкое забывание);
-// непустой by становится updated_by (см. Store.Supersede).
+// непустой by становится updated_by (см. Store.Supersede); updated_at = max(now,
+// прежний + 1) — тумстоун тоже правка и строго новее прежней версии (DESIGN.md §4).
 func (s *sqliteStore) Supersede(ctx context.Context, oldID, newID, by string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE memories SET superseded_by = ?, updated_at = ?, updated_by = COALESCE(?, updated_by) WHERE id = ?`, newID, s.now(), nullIfEmpty(by), oldID)
+	res, err := s.db.ExecContext(ctx, `UPDATE memories SET superseded_by = ?, updated_at = MAX(?, updated_at + 1), updated_by = COALESCE(?, updated_by) WHERE id = ?`, newID, s.now(), nullIfEmpty(by), oldID)
 	if err != nil {
 		return fmt.Errorf("supersede %q -> %q: %w", oldID, newID, err)
 	}
