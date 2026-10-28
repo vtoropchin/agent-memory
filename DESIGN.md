@@ -578,8 +578,11 @@ type Reasoner interface {
 не импортирует `store`). В `store` пакет берётся под псевдонимом `memsync` (коллизия со
 stdlib `sync`).
 `Store` эти методы не получает: синхронизация — отдельный вариант использования со своим
-узким контрактом, `Writer`/`Recall` о ней не знают. Сигнатуры ниже — форма контракта;
-точные имена фиксирует задача 19.4.
+узким контрактом, `Writer`/`Recall` о ней не знают. Сигнатуры ниже — зафиксированы задачей
+19.4 (`internal/memory/sync/ports.go`, там же контракт каждого метода). Цели, профиль
+(имя, интервал) и lease в `Local` не входят: `Syncer` прогоняет одну цель, которую ему
+передали, а читать цели и брать lease — дело планировщика (19.6), его порт объявляется у
+него.
 
 ```go
 package sync
@@ -595,25 +598,28 @@ type Guarded struct {
     ExpectSeq int64  // локальная сторона: seq пометки sync_dirty; 0 — пометки нет
 }
 
+type Remote struct { Memory memory.Memory; XID uint64 }            // версия в общей базе
+type Pending struct { Memory memory.Memory; Seq int64; Edited bool } // версия в локальной + пометка
+
 // Local — локальная SQLite инстанса.
 type Local interface {
-    Settings(ctx context.Context) (Settings, []Target, error) // профиль (имя, интервал) + цели с тумблерами
-    Lease(ctx context.Context, project, holder string, until int64) (bool, error)
-    Release(ctx context.Context, project, holder string) error
-    State(ctx context.Context, project string) (State, error)
+    State(ctx context.Context, project string) (State, error) // нулевое — прогонов не было
     SaveState(ctx context.Context, project string, st State) error
     SchemaAhead(ctx context.Context) (bool, error) // локальная БД новее бинаря — не синхронизировать
-    Mark(ctx context.Context, scope string, kinds []memory.Kind, ids []string) error // ids == nil — весь набор (edited = 0)
-    Dirty(ctx context.Context, scope string, kinds []memory.Kind, limit int) ([]Pending, error) // Pending{Memory, Seq, Edited}
+    // ids == nil — весь набор; новая пометка — edited = 0, уже стоящая сохраняет edited
+    Mark(ctx context.Context, scope string, kinds []memory.Kind, ids []string) error
+    // пометки с seq > after по возрастанию seq; after даёт циклу push завершиться,
+    // хотя stale-записи остаются помеченными
+    Dirty(ctx context.Context, scope string, kinds []memory.Kind, after int64, limit int) ([]Pending, error)
     Versions(ctx context.Context, ids []string) (map[string]Pending, error)     // запись (с Tags/Links) + пометка
-    StampAuthor(ctx context.Context, ids []string, name string) error           // author/updated_by IS NULL → name; без updated_at и без пометки
+    StampAuthor(ctx context.Context, ids []string, name string) error           // пустые author/updated_by → name; без updated_at и без пометки
     Apply(ctx context.Context, recs []Guarded) (applied, stale []string, err error)
     MarkPushed(ctx context.Context, done []Pending) error                       // снять пометку, если seq не изменился
 }
 
 // Shared — общая база одного проекта, открытая без автомиграции.
 type Shared interface {
-    Base(ctx context.Context) (Base, error) // base_id, версия схемы, xmax снимка, max(change_xid)
+    Base(ctx context.Context) (Base, error) // Base{ID, Version, XMax, MaxXID} в одном снимке; Version 0 — схемы нет
     Pull(ctx context.Context, scope string, kinds []memory.Kind, from Cursor, limit int,
         page func(Page) error) error        // один снимок REPEATABLE READ на все страницы
     Versions(ctx context.Context, ids []string) (Snapshot, error) // версии по id + их Refs, один снимок
@@ -621,18 +627,24 @@ type Shared interface {
     Close() error
 }
 
-// Page — страница изменений: записи (с Tags/Links), записи общей базы, на которые
-// ссылаются их связи, но которых в странице нет (Refs, тот же снимок), и безопасный
-// курсор после применения страницы (§4.1). Snapshot — то же для выборки по id.
-type Page struct { Records, Refs []Remote; Next Cursor } // Remote{Memory, XID}
+// Page — страница изменений: записи (с Tags/Links) по возрастанию (XID, Id); Refs —
+// ВСЕ адресаты их связей, которых нет в странице, любого scope и вида (тот же снимок):
+// по ним интерактор отличает рёбра внутри набора от рёбер вне его; Next — безопасный
+// курсор после применения страницы (§4.1). Snapshot{Records, Refs} — то же для выборки
+// по id (Refs — адресаты, которых нет среди запрошенных id).
+type Page struct { Records, Refs []Remote; Next Cursor }
 
 type Dialer interface { Dial(ctx context.Context, project string) (Shared, error) }
 
+type Target struct { Project string; Push, Pull bool }
+
+// Run(ctx, Target, name) (Result, error): name — автор отправляемых записей
+// (пусто — авторы не проставляются); ошибка — вторым значением, Result при ошибке
+// отражает уже сделанное.
 type Result struct {
     Project                          string
     Pushed, Pulled, Conflicts        int
     Stamped, Deferred, DroppedLinks  int // проставлено авторов; отложено из-за гонки CAS; отброшено рёбер
-    Err                              error
 }
 ```
 
@@ -666,7 +678,7 @@ want`, `want` — `pgSchemaVersion` бинаря, передаёт composition r
 
 ### 7.1 Sync path — синхронизация с общей базой (Этап 19)
 
-Прогон `Syncer.Run(ctx, target)` синхронизирует набор одного проекта (§2.1) с его общей
+Прогон `Syncer.Run(ctx, target, name)` синхронизирует набор одного проекта (§2.1) с его общей
 базой. Порядок: **проверка → pull → push** (каждая половина — только если включён её
 тумблер). Pull идёт первым: после него push реже встречает в общей базе версии, которых
 клиент ещё не видел, то есть реже конфликтует.
@@ -675,9 +687,13 @@ want`, `want` — `pgSchemaVersion` бинаря, передаёт composition r
 (без автомиграции) → `Base()`. Версия схемы общей базы не равна `pgSchemaVersion` →
 прогон не идёт, ошибка в статусе («примените схему» / «обновите memo»). Признаки
 восстановления базы (курсор или `max(change_xid)` больше `xmax`, §4.1) → прогон не идёт,
-ошибка «выполните ротацию». `base_id` не совпал с сохранённым → курсор в начало, набор
-размечается целиком (`Mark` с `ids == nil`). Нет `sync_state` или push включён при
+ошибка «выполните ротацию» (проверяется, только если `base_id` прежний: после ротации
+курсор и так сброшен). `base_id` не совпал с сохранённым → курсор в начало,
+`push_marked = 0` — набор размечается целиком (`Mark` с `ids == nil`) при включённом push
+сейчас или при его включении позже. Нет `sync_state` или push включён при
 `push_marked = 0` → разметка и `push_marked = 1`; push выключен → `push_marked = 0`.
+Итог прогона (счётчики, `last_error`) пишется в `sync_state` и после отмены контекста
+(таймаут прогона), кроме случая `SchemaAhead`.
 Полный pull и полная сверка при push идемпотентны.
 
 **Last-write-wins.** Версии сравниваются по `updated_at`, запись — целиком (поля, теги,
@@ -693,9 +709,15 @@ want`, `want` — `pgSchemaVersion` бинаря, передаёт composition r
 **Конфликт** (счётчик в статусе) — LWW отбросил чьё-то изменение, которого другая
 сторона не видела: (а) отброшена локальная **правка** (пометка `edited = 1`, а общая
 версия новее или ничья; пометка первичной разметки конфликтом не считается); (б) push
-перезаписал в общей базе чужую версию (`updated_by` ≠ имя отправителя), которую этот
-клиент не видел: `change_xid` не меньше курсора pull, и pull этого прогона её не
-сравнивал. Обычное «я изменил — отправил» конфликтом не считается.
+перезаписал в общей базе чужую версию (`updated_by` ≠ имя отправителя), которой этот
+клиент не видел к началу прогона: её `change_xid` не меньше курсора pull **на начало
+прогона**. Сюда входит и версия, которую pull этого прогона сравнил, но локальная правка
+оказалась новее: правка сделана без знания о ней, и чужое изменение отброшено. Обычное
+«я изменил — отправил» конфликтом не считается. Принятая неточность: версию из окна
+перечитывания `[xmin, xmax)` (§4.1), уже полученную прошлым прогоном, правило считает
+невиденной — при долгой транзакции на сервере счётчик может засчитать ложный конфликт.
+Точный учёт («последний известный `change_xid`» по записи) отложен до первой жалобы на
+ложные конфликты.
 
 **Применение общей версии локально** (общее для pull и для проигравших при push).
 `Local.Apply` — мимо write path: без дедупа и классификации, `id`, `created_at`,
@@ -710,9 +732,12 @@ id, а новый `updated_at` вызвал бы пинг-понг); локал�
   локальные связи на записи **вне** набора (episodic, `user:*`, другие проекты). `Put`
   заменяет связи записи целиком, поэтому слияние делает интерактор до `Apply`, — иначе
   pull стирал бы локальные связи на эпизоды. Входящие связи (чужие `src`) не трогаются.
-- **FK на `links.dst`.** Адресаты связей применяемых записей, которых нет ни локально,
-  ни в пачке, приходят в `Refs` (тот же снимок; общая база держит тот же FK, поэтому
-  адресат там есть всегда). **`Refs` применяются без связей из общей базы** — как
+- **FK на `links.dst`.** Все адресаты связей записей страницы, которых в странице нет,
+  приходят в `Refs` — любого scope и вида (тот же снимок; общая база держит тот же FK,
+  поэтому адресат там есть всегда). Адаптер не знает, что есть локально: что из `Refs`
+  применять, решает интерактор, а `Refs` вне набора служат только классификации рёбер
+  (внутри набора или вне). Адресат, которого нет в снимке, классифицируется по локальной
+  базе (сосед по пачке push). **`Refs` применяются без связей из общей базы** — как
   заглушка версии, со своими локальными связями, если запись уже есть: у самих `Refs`
   адресаты могут лежать на дальних страницах, и применение со связями ломало бы FK и
   останавливало pull навсегда. Полные связи `Ref`-записи придут с её собственной
@@ -733,7 +758,9 @@ id, а новый `updated_at` вызвал бы пинг-понг); локал�
 **Push** — пачками ограниченного размера (порядка сотен записей); каждая пачка — своя
 транзакция на общей стороне и свой `MarkPushed`, поэтому большой первичный push под
 таймаутом прогона продвигается, а не откатывается целиком каждый тик.
-1. `Dirty(limit)` → очередная пачка помеченных записей набора; `Shared.Versions` →
+1. `Dirty(after, limit)` → очередная пачка помеченных записей набора с `seq > after`
+   (`after` — наибольший `seq` прошлой пачки: отложенные `stale` остаются помеченными, и
+   без него цикл не завершился бы); `Shared.Versions` →
    версии общей базы (с `change_xid`) и `Refs` их связей.
 2. LWW по каждой. **Равные** → только снять пометку. **Побеждает общая** (новее или ничья)
    → при включённом pull общая версия сразу применяется локально (`Apply`, выше), а не
