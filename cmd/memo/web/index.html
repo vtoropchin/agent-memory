@@ -11,9 +11,10 @@
 <body>
   <!-- Каркас новой морды (Этап 16, задача 16.2; спецификация design/memo-web-redesign.md).
        Шапка: <h1>, разделы по хэшу (#/, #/memory, #/board, #/sync — Этап 19; активный — aria-current),
-       единственный на всё приложение селект scope (app.js наполняет его из /api/stats,
-       домашний scope помечен по homeScope). Ссылки разделов app.js дописывает текущим
-       scope, чтобы он переживал переключение раздела. -->
+       единственный на всё приложение выбор scope с поиском (кнопку и панель app.js
+       дописывает в .scopebox, варианты — из /api/stats, домашний помечен по homeScope;
+       клавиша p открывает его). Ссылки разделов app.js дописывает текущим scope,
+       чтобы он переживал переключение раздела. -->
   <a class="skip" href="#main">К содержимому</a>
   <header class="topbar">
     <h1 class="brand">memo <small id="brand-host">память агента</small></h1>
@@ -25,10 +26,7 @@
     </nav>
     <div class="grow"></div>
     <div class="scopebox">
-      <label for="scope-global"><span>Scope</span></label>
-      <select id="scope-global" aria-label="Scope записей">
-        <option value="">все scope</option>
-      </select>
+      <label for="scope-global" id="scope-global-lbl"><span>Scope</span></label>
     </div>
   </header>
 

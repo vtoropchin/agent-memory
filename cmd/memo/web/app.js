@@ -198,7 +198,7 @@ const state = {
   scope: "",           // глобальный фильтр scope; "" — все scope
   params: new URLSearchParams(), // фильтры текущего экрана (без scope и id)
   id: "",              // id открытой записи (панель)
-  stats: null,         // ответ /api/stats: scope-селект, homeScope
+  stats: null,         // ответ /api/stats: выбор scope, homeScope
 };
 
 let lastFocus = null;   // элемент, открывший панель; к нему возвращается фокус
@@ -277,19 +277,36 @@ function renderNav() {
   });
 }
 
-// renderScopeSelect — «все scope» + stats.byScope (по алфавиту), домашний помечен
-// по homeScope; выбранный — state.scope (даже если его нет в статистике: ссылка
-// на пустой scope не должна молча переключать фильтр).
+// renderScopeSelect — подпись кнопки выбора scope в шапке: state.scope
+// (варианты список строит при открытии — scopeItems). Панель, открытая до
+// ответа /api/stats (клавиша p на старте), получает варианты здесь.
 function renderScopeSelect() {
-  const sel = $("#scope-global");
-  const stats = state.stats;
-  const scopes = stats && stats.byScope ? Object.keys(stats.byScope).sort() : [];
-  if (state.scope && scopes.indexOf(state.scope) === -1) scopes.push(state.scope);
-  const home = stats && stats.homeScope ? stats.homeScope : "";
-  sel.innerHTML = '<option value="">все scope</option>' + scopes.map(function (s) {
-    return '<option value="' + esc(s) + '">' + esc(s) + (s === home ? " (домашний)" : "") + "</option>";
-  }).join("");
-  sel.value = state.scope;
+  $("#scope-global").textContent = scopeLabel(state.scope);
+  if (scopePick.root && scopePick.root.getAttribute("data-scopepick") === "global") {
+    scopePick.items = scopeItems(true, state.scope);
+    filterScopePick(state.scope);
+  }
+}
+
+// scopeLabel — подпись scope: домашний помечен по homeScope, "" — «все scope».
+function scopeLabel(s) {
+  if (!s) return "все scope";
+  return s + (state.stats && s === state.stats.homeScope ? " (домашний)" : "");
+}
+
+// scopeItems — варианты выбора scope: «все scope» (withAll, только в шапке) +
+// stats.byScope по алфавиту; current — даже если его нет в статистике (ссылка
+// на пустой scope не должна молча переключать фильтр). key — имя без
+// «project:»/«user:» в нижнем регистре: по нему ищет поле поиска.
+function scopeItems(withAll, current) {
+  const by = state.stats && state.stats.byScope ? state.stats.byScope : {};
+  const scopes = Object.keys(by).sort();
+  if (current && scopes.indexOf(current) === -1) scopes.push(current);
+  const items = scopes.map(function (s) {
+    return { value: s, text: scopeLabel(s), key: s.replace(/^(project|user):/, "").toLowerCase(), n: by[s] };
+  });
+  if (withAll) items.unshift({ value: "", text: scopeLabel(""), key: null });
+  return items;
 }
 
 // defaultScope — scope при пустом стартовом хэше: домашний scope инстанса
@@ -737,10 +754,10 @@ document.addEventListener("change", function (e) {
   const t = e.target;
   if (!(t instanceof Element)) return;
   if (compose.on && t.closest(".compose")) {
-    // тип и scope меняют только затронутые узлы формы — панель не перерисовывается (§2.6)
+    // тип меняет только затронутые узлы формы — панель не перерисовывается (§2.6);
+    // scope — выбор с поиском (SCOPE_PICKS.compose), change не шлёт
     syncCompose();
     if (t.id === "nt-type") { setComposeType(t.value); return; }
-    if (t.id === "nt-scope") { setComposeScope(t.value); return; }
     return;
   }
   if (t.id === "b-type") { setBoardParams({ type: t.value }); return; }
@@ -828,6 +845,135 @@ function pickerClick(t) {
   else if (kind === "task-blocker") patchRecord({ links: [{ id: id, rel: "blocked_by" }] }, "Блокер добавлен", '[data-picker="task-blocker"]');
   return true;
 }
+
+// --- выбор scope с поиском: шапка и форма задачи ---
+//
+// Combobox по шаблону WAI-ARIA: кнопка с текущим scope; клик, Enter или ↓
+// открывают панель с полем поиска (role=combobox) и listbox. Стрелки только
+// двигают подсветку (aria-activedescendant) — экран не перерисовывается на
+// каждую стрелку; значение применяется по Enter или клику, Esc закрывает панель
+// без изменений. Варианты — scopeItems, поиск — подстрока в key. Открыта не
+// больше одной панели, её состояние — scopePick.
+
+const SCOPE_PICKS = {
+  global: { all: true, value: function () { return state.scope; }, pick: function (v) { navigate({ scope: v }); } },
+  compose: { all: false, value: function () { return compose.draft.scope; }, pick: function (v) { syncCompose(); setComposeScope(v); } },
+};
+
+const scopePick = { root: null, items: [], shown: [], active: 0 };
+
+// scopePickHTML — разметка выбора; id — id кнопки. Подпись поля — <label for=id
+// id=id-lbl> снаружи; имя кнопки — подпись + текущий scope (aria-labelledby),
+// иначе <label> заменил бы значение.
+function scopePickHTML(name, id, value) {
+  return '<div class="scopepick" data-scopepick="' + name + '">' +
+    '<button type="button" class="scopepick-btn" id="' + id + '" aria-labelledby="' + id + "-lbl " + id + '" aria-haspopup="listbox" aria-expanded="false">' + esc(scopeLabel(value)) + "</button>" +
+    '<div class="scopepick-pop" hidden>' +
+    '<input type="text" class="scopepick-q" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="' + id + '-list" aria-label="Найти scope" placeholder="Найти scope…" autocomplete="off" spellcheck="false">' +
+    '<ul class="scopepick-list" role="listbox" id="' + id + '-list" aria-label="Scope"></ul>' +
+    '<p class="scopepick-empty" hidden>Ничего не найдено</p></div></div>';
+}
+
+function scopePickCfg() { return SCOPE_PICKS[scopePick.root.getAttribute("data-scopepick")]; }
+
+function openScopePick(root) {
+  if (scopePick.root) closeScopePick(false);
+  scopePick.root = root;
+  const cur = scopePickCfg().value();
+  scopePick.items = scopeItems(scopePickCfg().all, cur);
+  $(".scopepick-btn", root).setAttribute("aria-expanded", "true");
+  $(".scopepick-pop", root).hidden = false;
+  const q = $(".scopepick-q", root);
+  q.value = "";
+  filterScopePick(cur);
+  q.focus();
+}
+
+function closeScopePick(focusBtn) {
+  const root = scopePick.root;
+  if (!root) return;
+  scopePick.root = null;
+  $(".scopepick-pop", root).hidden = true;
+  const btn = $(".scopepick-btn", root);
+  btn.setAttribute("aria-expanded", "false");
+  if (focusBtn) btn.focus();
+}
+
+// filterScopePick — список по запросу; подсветка — на sel (текущий scope при
+// открытии), если он прошёл фильтр, иначе на первом варианте: при единственном
+// совпадении Enter берёт его. «все scope» виден только при пустом запросе.
+function filterScopePick(sel) {
+  const root = scopePick.root;
+  const q = $(".scopepick-q", root).value.trim().toLowerCase();
+  const cur = scopePickCfg().value();
+  const id = $(".scopepick-btn", root).id;
+  scopePick.shown = scopePick.items.filter(function (it) { return it.key === null ? q === "" : it.key.indexOf(q) !== -1; });
+  $(".scopepick-list", root).innerHTML = scopePick.shown.map(function (it, i) {
+    return '<li role="option" id="' + id + "-o" + i + '" data-i="' + i + '"' + (it.value === cur ? ' class="cur"' : "") + "><span>" + esc(it.text) + "</span>" +
+      (it.n ? '<span class="n">' + fmtN(it.n) + "</span>" : "") + "</li>";
+  }).join("");
+  $(".scopepick-empty", root).hidden = scopePick.shown.length > 0;
+  const i = scopePick.shown.findIndex(function (it) { return it.value === sel; });
+  markScopePick(i === -1 ? 0 : i);
+}
+
+function markScopePick(i) {
+  const q = $(".scopepick-q", scopePick.root);
+  const opts = $$('[role="option"]', scopePick.root);
+  scopePick.active = i;
+  opts.forEach(function (o, k) { o.setAttribute("aria-selected", k === i ? "true" : "false"); });
+  if (opts[i]) { q.setAttribute("aria-activedescendant", opts[i].id); opts[i].scrollIntoView({ block: "nearest" }); }
+  else q.removeAttribute("aria-activedescendant");
+}
+
+function chooseScopePick(i) {
+  const it = scopePick.shown[i];
+  if (!it) return;
+  const cfg = scopePickCfg();
+  closeScopePick(true);
+  if (it.value !== cfg.value()) cfg.pick(it.value);
+}
+
+// scopePickKey — клавиатура в поле поиска открытой панели.
+function scopePickKey(e) {
+  const n = scopePick.shown.length;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    if (n) markScopePick(Math.min(n - 1, Math.max(0, scopePick.active + (e.key === "ArrowDown" ? 1 : -1))));
+  } else if (e.key === "Enter") { e.preventDefault(); chooseScopePick(scopePick.active); }
+  else if (e.key === "Escape") { e.preventDefault(); closeScopePick(true); }
+}
+
+// scopePickClick — кнопка открывает/закрывает панель, вариант выбирается;
+// клик вне открытой панели её закрывает и обрабатывается дальше (false).
+function scopePickClick(t) {
+  const btn = t.closest(".scopepick-btn");
+  if (btn) {
+    const root = btn.closest(".scopepick");
+    if (scopePick.root === root) closeScopePick(true);
+    else openScopePick(root);
+    return true;
+  }
+  const opt = t.closest(".scopepick-list [role=option]");
+  if (opt) { chooseScopePick(parseInt(opt.getAttribute("data-i"), 10)); return true; }
+  if (scopePick.root && !scopePick.root.contains(t)) closeScopePick(false);
+  return false;
+}
+
+// фокус остаётся в поле поиска при клике по панели и кнопке (иначе Safari,
+// не фокусирующий кнопки по клику, закрыл бы панель по focusout раньше click)
+document.addEventListener("mousedown", function (e) {
+  const t = e.target;
+  if (t instanceof Element && t.closest(".scopepick") && !t.matches(".scopepick-q")) e.preventDefault();
+});
+document.addEventListener("input", function (e) {
+  if (scopePick.root && e.target instanceof Element && e.target.matches(".scopepick-q")) filterScopePick(null);
+});
+// Tab и любой другой уход фокуса из панели закрывают её
+document.addEventListener("focusout", function (e) {
+  const root = scopePick.root;
+  if (root && root.contains(e.target) && !(e.relatedTarget && root.contains(e.relatedTarget))) closeScopePick(false);
+});
 
 // --- панель задачи (§2.5): поверх общей панели записи ---
 
@@ -1764,9 +1910,6 @@ function parentOptions() {
 // «Описание / Входит в / Теги (общий tagsEditor) / Служебное» и футер действий.
 function composeDrawer() {
   const c = compose.draft;
-  const stats = state.stats;
-  const scopes = stats && stats.byScope ? Object.keys(stats.byScope).sort() : [];
-  if (c.scope && scopes.indexOf(c.scope) === -1) scopes.push(c.scope);
   return '<div class="drawer-backdrop" data-close-compose></div>' +
     '<aside class="drawer compose editing" role="dialog" aria-modal="true" aria-label="Новая задача на доске" tabindex="-1">' +
     '<header>' + kindTag("task") + '<div class="grow"><span class="muted" id="nt-scope-label">' + esc(c.scope) + "</span></div>" +
@@ -1785,10 +1928,8 @@ function composeDrawer() {
     '<select id="nt-parent" style="width:100%">' + parentOptions() + "</select>" +
     '<span class="hint" id="nt-parent-hint"></span></div>' +
     '<div class="section"><h3>Теги</h3><div id="nt-tags">' + tagsEditor({ tags: c.tags }) + "</div></div>" +
-    '<div class="section"><h3>Служебное</h3><div class="field" style="margin-bottom:0"><label for="nt-scope">Scope</label>' +
-    '<select id="nt-scope" style="max-width:320px">' + scopes.map(function (s) {
-      return '<option value="' + esc(s) + '"' + (s === c.scope ? " selected" : "") + ">" + esc(s) + "</option>";
-    }).join("") + "</select>" +
+    '<div class="section"><h3>Служебное</h3><div class="field" style="margin-bottom:0"><label for="nt-scope" id="nt-scope-lbl">Scope</label>' +
+    scopePickHTML("compose", "nt-scope", c.scope) +
     '<span class="hint">id и даты запись получит при создании.</span></div></div>' +
     "</div>" +
     '<div class="actions"><button type="button" class="btn primary" data-compose-submit>Создать</button>' +
@@ -1906,6 +2047,7 @@ function setComposeScope(scope) {
   c.scope = scope;
   c.parent = "";
   $("#nt-scope-label").textContent = scope;
+  $("#nt-scope").textContent = scopeLabel(scope);
   loadParents();
 }
 
@@ -1931,7 +2073,6 @@ function syncCompose() {
   c.branch = $("#nt-branch").value;
   c.workflow = $("#nt-workflow").value;
   c.parent = c.type === "epic" ? "" : $("#nt-parent").value;
-  c.scope = $("#nt-scope").value;
 }
 
 // addComposeTag — Enter в поле «+ тег…»: тег уходит в черновик, запроса нет
@@ -2033,6 +2174,7 @@ function showToast(text) {
 document.addEventListener("click", function (e) {
   const t = e.target;
   if (!(t instanceof Element)) return;
+  if (scopePickClick(t)) return;
   if (pickerClick(t)) return;
   if (compose.on && composeClick(t)) return;
   if (state.id && t.closest("#drawer-root") && drawerClick(t)) return;
@@ -2079,6 +2221,10 @@ document.addEventListener("click", function (e) {
 });
 
 document.addEventListener("keydown", function (e) {
+  // открытая панель выбора scope забирает клавиши раньше формы задачи: её Esc
+  // закрывает только панель
+  if (scopePick.root && e.target.matches(".scopepick-q")) { scopePickKey(e); return; }
+  if (e.key === "ArrowDown" && e.target.matches(".scopepick-btn")) { e.preventDefault(); openScopePick(e.target.closest(".scopepick")); return; }
   if (compose.on) {
     if (e.key === "Escape") { e.preventDefault(); closeCompose(); return; }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitCompose(); return; }
@@ -2091,6 +2237,12 @@ document.addEventListener("keydown", function (e) {
   if (e.key === "n" && !state.id && !e.target.matches("input,textarea,select") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     openCompose({});
+    return;
+  }
+  // p — выбор scope в шапке с фокусом в поиске; вне полей ввода и вне панели
+  if (e.key === "p" && !state.id && !e.target.matches("input,textarea,select") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    openScopePick($('[data-scopepick="global"]'));
     return;
   }
   if (e.key === "Escape" && state.id) {
@@ -2109,10 +2261,6 @@ document.addEventListener("keydown", function (e) {
     if (state.view !== "memory") navigate({ view: "memory", params: new URLSearchParams(), id: "" });
     else { const i = $("#q"); if (i) { focusSearch = false; i.focus(); i.select(); } }
   }
-});
-
-$("#scope-global").addEventListener("change", function (e) {
-  navigate({ scope: e.target.value });
 });
 
 window.addEventListener("hashchange", applyRoute);
@@ -2134,6 +2282,7 @@ async function loadStats() {
 
 async function init() {
   $("#brand-host").textContent = "память агента · " + location.host;
+  $(".scopebox").insertAdjacentHTML("beforeend", scopePickHTML("global", "scope-global", ""));
   const ok = await loadStats();
   const bare = !location.hash || location.hash === "#/" || location.hash === "#";
   if (ok && bare) {
