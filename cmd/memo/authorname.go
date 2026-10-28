@@ -17,8 +17,9 @@ const gitUserNameTimeout = 2 * time.Second
 // authorName — имя разработчика для полей авторства записей (Этап 19, DESIGN.md
 // §4), передаётся Writer через write.WithAuthor: имя из профиля синхронизации
 // локальной БД, иначе git config --global user.name, иначе пусто — записи без
-// автора, не ошибка. При driver = "postgres" профиля нет — сразу git. Читается
-// один раз при старте процесса.
+// автора, не ошибка. При driver = "postgres" профиля нет — сразу git. Writer
+// получает имя один раз при старте процесса, фоновая синхронизация — на каждый
+// прогон.
 func authorName(ctx context.Context, s store.Store) string {
 	if l, ok := store.SyncLocalOf(s); ok {
 		p, err := l.Profile(ctx)

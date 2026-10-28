@@ -17,7 +17,7 @@
 | Компонент | Go-пакет; единица развёртывания — один бинарь `cmd/memo` |
 | Порт | `interface`: `store.Store`, `embed.Embedder`, `reason.Reasoner` |
 | Структура через границу | `struct` из `internal/memory`: `Memory`, `Query`, `Brief`, `Candidate` |
-| Composition root (`Main`) | `cmd/memo/main.go` — `main()` и фабрики `newEmbedder`, `newReasoner`; сборка прогона синхронизации — `cmd/memo/syncrun.go`; сборка графа и деградация до `noop` живут только здесь |
+| Composition root (`Main`) | `cmd/memo/main.go` — `main()` и фабрики `newEmbedder`, `newReasoner`; сборка прогона синхронизации — `cmd/memo/syncrun.go`, фоновый цикл — `cmd/memo/syncloop.go`; сборка графа и деградация до `noop` живут только здесь |
 | Ограничение видимости | `internal/`, регистр имени; экспортируется минимум |
 | Подмена в тестах | своя реализация интерфейса, переданная полем/аргументом (`fakeEmbedder` в `write_test.go`, `recall_test.go`, `consolidate_test.go`; `fakeLocal`/`fakeHub` в `sync/fake_test.go`); моки-библиотеки не используются |
 | Изоляция времени и случайности | порт времени есть в `write` и `recall`: поле `now func() int64` + опция `WithNow` (по умолчанию `time.Now().Unix()`). В `maint` (`decay.go`, `expire.go`, `consolidate.go`) `time.Now()` зовётся напрямую — так делать в новом коде не надо, время передавать полем (образец — `scheduler.go`: поле `now func() int64`). Идентификаторы — `oklog/ulid` |

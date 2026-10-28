@@ -221,6 +221,8 @@ func run(args []string) error {
 		decayInterval, consolidateAfter,
 	)
 	go scheduler.Run(ctx)
+	stopSync := startSyncLoop(ctx, s, cfg.Store) // фоновая синхронизация целей (Этап 19); стоп — до закрытия хранилища
+	defer stopSync()
 
 	log.Printf("memo: запуск MCP-сервера (stdio), store=%s", cfg.Store.Target())
 	if err := srv.Run(ctx); err != nil {

@@ -139,6 +139,8 @@ func runWeb(args []string, stdout io.Writer) error {
 	// переэмбеддит запись, как memory_update; при Noop — вектор досчитает reindex.
 	w := write.New(s, embedder, write.WithAuthor(authorName(ctx, s)))
 	rc := recall.New(s, cfg.Recall, reason.NewNoop(), embedder)
+	stopSync := startSyncLoop(ctx, s, cfg.Store) // фоновая синхронизация целей (Этап 19); стоп — до закрытия хранилища
+	defer stopSync()
 
 	srv := &http.Server{
 		Addr:    *addr,
