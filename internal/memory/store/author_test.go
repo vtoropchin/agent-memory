@@ -239,7 +239,7 @@ func TestMigrateAuthor(t *testing.T) {
 }
 
 // TestMigrateAuthorPG: схема PostgreSQL версии 1 (до Этапа 19, без author/
-// updated_by) приводится init к версии 2 без потери записей.
+// updated_by) приводится init к текущей версии без потери записей.
 func TestMigrateAuthorPG(t *testing.T) {
 	ctx := context.Background()
 	s := newTestPgStore(t)
@@ -262,8 +262,8 @@ func TestMigrateAuthorPG(t *testing.T) {
 	if err := s.init(ctx); err != nil {
 		t.Fatalf("init (миграция 1->2): %v", err)
 	}
-	if v, err := s.SchemaVersion(ctx); err != nil || v != 2 {
-		t.Fatalf("SchemaVersion = %d (%v), want 2", v, err)
+	if v, err := s.SchemaVersion(ctx); err != nil || v != pgSchemaVersion {
+		t.Fatalf("SchemaVersion = %d (%v), want %d", v, err, pgSchemaVersion)
 	}
 	got, err := s.Get(ctx, id)
 	if err != nil {

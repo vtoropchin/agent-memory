@@ -85,6 +85,19 @@ func newTestPgStoreWithVector(t *testing.T) *pgStore {
 
 func newTestPgStoreSchema(t *testing.T, withVector bool) *pgStore {
 	t.Helper()
+	s := &pgStore{db: newTestPgSchemaDB(t, withVector), now: defaultNow}
+	if err := s.init(context.Background()); err != nil {
+		t.Fatalf("init тестовой схемы: %v", err)
+	}
+	return s
+}
+
+// newTestPgSchemaDB создаёт свежую уникальную схему PostgreSQL (см. newTestPgStore
+// про изоляцию), регистрирует её удаление и возвращает пул соединений с search_path на
+// неё — БЕЗ init: схема пуста, это нужно тестам открытия общей базы без автомиграции
+// (postgres_hub_test.go).
+func newTestPgSchemaDB(t *testing.T, withVector bool) *sql.DB {
+	t.Helper()
 	baseDSN := os.Getenv(pgTestDSNEnv)
 	if baseDSN == "" {
 		t.Skipf("%s не задан — пропуск postgres-тестов store. Пример:\n  %s=postgres://memo:memo@postgres.lan:5432/memo?sslmode=disable make test", pgTestDSNEnv, pgTestDSNEnv)
@@ -141,12 +154,7 @@ func newTestPgStoreSchema(t *testing.T, withVector bool) *pgStore {
 		t.Fatalf("открытие тестового соединения (схема %s): %v", schema, err)
 	}
 	t.Cleanup(func() { db.Close() })
-
-	s := &pgStore{db: db, now: defaultNow}
-	if err := s.init(ctx); err != nil {
-		t.Fatalf("init схемы %s: %v", schema, err)
-	}
-	return s
+	return db
 }
 
 // setNow подменяет источник текущего времени у store для детерминированных тестов

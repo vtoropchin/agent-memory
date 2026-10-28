@@ -335,15 +335,17 @@ var searchVecTriggerStatements = []string{
 // поэтому стартовое значение было 0 при пустом pgMigrations. Первый реальный шаг —
 // Этап 15 (migrateTaskModelPG, 0 -> 1): нумерация версий SQLite (4) и PostgreSQL (1)
 // намеренно не совпадает — у них разная история, общая только форма memories на
-// выходе. Этап 19 — pgMigrations[1] (1 -> 2, author/updated_by); следующая
-// миграция добавляется как pgMigrations[2] и поднимает эту константу до 3.
-const pgSchemaVersion = 2
+// выходе. Этап 19 — pgMigrations[1] (1 -> 2, author/updated_by) и pgMigrations[2]
+// (2 -> 3, change_xid); следующая миграция добавляется как pgMigrations[3] и
+// поднимает эту константу до 4.
+const pgSchemaVersion = 3
 
 // pgMigrations — упорядоченный список шагов миграции схемы, pgMigrations[i] соответствует
 // переходу версии i -> i+1 (см. pgSchemaVersion).
 var pgMigrations = []migrationStep{
 	migrateTaskModelPG, // 0 -> 1 (Этап 15): memories + task_type/branch/workflow, blocked -> todo, backfill task_type
 	migrateAuthorPG,    // 1 -> 2 (Этап 19): memories + author/updated_by
+	migrateChangeXIDPG, // 2 -> 3 (Этап 19): серверный номер изменения change_xid, его триггеры, sync_meta
 }
 
 // migrateAuthorPG — миграция 1 -> 2 (Этап 19): паритет с migrateAuthor
@@ -356,6 +358,91 @@ func migrateAuthorPG(ctx context.Context, tx *sql.Tx) error {
 		// column — константа из authorColumns, не пользовательский ввод.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE memories ADD COLUMN IF NOT EXISTS %s text`, column)); err != nil {
 			return fmt.Errorf("добавление колонки %s: %w", column, err)
+		}
+	}
+	return nil
+}
+
+// changeXIDLocalColumns — колонки memories, изменение которых НЕ двигает номер
+// изменения (DESIGN.md §4.1): локальные сигналы ранжирования (accessed_at/
+// access_count — иначе чтение на одной машине гнало бы запись на все остальные),
+// производный search_vec и сам change_xid. Любая другая колонка, в том числе
+// добавленная будущей миграцией, считается синхронизируемой без правки триггера:
+// забытая в перечне синхронизируемая колонка молча терялась бы при синхронизации,
+// а забытая здесь локальная лишь вызовет лишнее идемпотентное перечитывание.
+const changeXIDLocalColumns = `'{accessed_at,access_count,search_vec,change_xid}'::text[]`
+
+// changeXIDStatements — DDL шага migrateChangeXIDPG по одной команде (см.
+// baseSchemaStatements про одну команду на Exec).
+//
+// ADD COLUMN с изменчивым DEFAULT переписывает таблицу: существующие записи получают
+// xid транзакции миграции — это и есть backfill, первый pull увидит их все.
+// memories_change_ins перекрывает явное значение при вставке: номер ставит только
+// сервер. memories_change_upd срабатывает, только если изменилось что-то кроме
+// changeXIDLocalColumns, поэтому Touch и пересчёт search_vec номер не двигают.
+// tags_change_xid / links_change_xid двигают номер записи-владельца (tags.memory_id,
+// links.src); условие change_xid <> pg_current_xact_id() гасит повторные UPDATE
+// внутри одного Put, который удаляет и вставляет теги и связи пачкой. Их UPDATE
+// трогает только change_xid и под WHEN memories_change_upd не попадает.
+var changeXIDStatements = []string{
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS change_xid xid8 NOT NULL DEFAULT pg_current_xact_id()`,
+	`CREATE INDEX IF NOT EXISTS memories_change_idx ON memories (scope, change_xid)`,
+	`CREATE TABLE IF NOT EXISTS sync_meta (
+		id      smallint PRIMARY KEY CHECK (id = 1),
+		base_id text NOT NULL
+	)`,
+	`INSERT INTO sync_meta (id, base_id) VALUES (1, gen_random_uuid()::text) ON CONFLICT (id) DO NOTHING`,
+
+	`CREATE OR REPLACE FUNCTION memories_change_xid() RETURNS trigger AS $$
+	BEGIN
+		NEW.change_xid := pg_current_xact_id();
+		RETURN NEW;
+	END;
+	$$ LANGUAGE plpgsql`,
+	`DROP TRIGGER IF EXISTS memories_change_ins ON memories`,
+	`CREATE TRIGGER memories_change_ins
+		BEFORE INSERT ON memories
+		FOR EACH ROW EXECUTE FUNCTION memories_change_xid()`,
+	`DROP TRIGGER IF EXISTS memories_change_upd ON memories`,
+	`CREATE TRIGGER memories_change_upd
+		BEFORE UPDATE ON memories
+		FOR EACH ROW
+		WHEN ((to_jsonb(OLD) - ` + changeXIDLocalColumns + `) IS DISTINCT FROM (to_jsonb(NEW) - ` + changeXIDLocalColumns + `))
+		EXECUTE FUNCTION memories_change_xid()`,
+
+	`CREATE OR REPLACE FUNCTION tags_change_xid() RETURNS trigger AS $$
+	BEGIN
+		UPDATE memories SET change_xid = pg_current_xact_id()
+		WHERE id IN (NEW.memory_id, OLD.memory_id) AND change_xid <> pg_current_xact_id();
+		RETURN NULL;
+	END;
+	$$ LANGUAGE plpgsql`,
+	`DROP TRIGGER IF EXISTS tags_change ON tags`,
+	`CREATE TRIGGER tags_change
+		AFTER INSERT OR UPDATE OR DELETE ON tags
+		FOR EACH ROW EXECUTE FUNCTION tags_change_xid()`,
+
+	`CREATE OR REPLACE FUNCTION links_change_xid() RETURNS trigger AS $$
+	BEGIN
+		UPDATE memories SET change_xid = pg_current_xact_id()
+		WHERE id IN (NEW.src, OLD.src) AND change_xid <> pg_current_xact_id();
+		RETURN NULL;
+	END;
+	$$ LANGUAGE plpgsql`,
+	`DROP TRIGGER IF EXISTS links_change ON links`,
+	`CREATE TRIGGER links_change
+		AFTER INSERT OR UPDATE OR DELETE ON links
+		FOR EACH ROW EXECUTE FUNCTION links_change_xid()`,
+}
+
+// migrateChangeXIDPG — миграция 2 -> 3 (Этап 19, DESIGN.md §4.1): серверный номер
+// изменения для инкрементального pull синхронизации и идентичность базы sync_meta.
+// Версионный шаг, а не часть searchVecTriggerStatements с чек-суммой: старый бинарь с
+// driver = "postgres", переприменяя свои триггеры search_vec, эти не трогает.
+func migrateChangeXIDPG(ctx context.Context, tx *sql.Tx) error {
+	for _, stmt := range changeXIDStatements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("номер изменения: %w", err)
 		}
 	}
 	return nil

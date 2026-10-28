@@ -344,17 +344,17 @@ PostgreSQL делает сервер: поведение с отбрасыван
 так же, как синхронизация, — поэтому номер ставят **триггеры сервера**, а не код `sync`.
 
 ```sql
--- PostgreSQL, шаг 2 → 3 (pgMigrations[2]), DDL + data-шаги
+-- PostgreSQL, шаг migrateChangeXIDPG (номер — по порядку вливания, см. ниже), DDL + data-шаги
 ALTER TABLE memories ADD COLUMN change_xid xid8 NOT NULL DEFAULT pg_current_xact_id();
 CREATE INDEX memories_change_idx ON memories (scope, change_xid);
 CREATE TABLE sync_meta (id smallint PRIMARY KEY CHECK (id = 1), base_id text NOT NULL);
 INSERT INTO sync_meta VALUES (1, gen_random_uuid()::text);   -- идентичность базы для курсора
 -- memories_change_ins: BEFORE INSERT ON memories → NEW.change_xid := pg_current_xact_id()
 -- memories_change_upd: BEFORE UPDATE ON memories
---   WHEN ((OLD.kind, OLD.scope, OLD.content, OLD.summary, OLD.importance, OLD.created_at,
---          OLD.updated_at, OLD.superseded_by, OLD.source, OLD.expires_at, OLD.status,
---          OLD.task_type, OLD.branch, OLD.workflow, OLD.author, OLD.updated_by)
---         IS DISTINCT FROM (NEW.<те же колонки>))  → NEW.change_xid := pg_current_xact_id()
+--   WHEN ((to_jsonb(OLD) - '{accessed_at,access_count,search_vec,change_xid}'::text[])
+--         IS DISTINCT FROM (to_jsonb(NEW) - <тот же список>))  → NEW.change_xid := pg_current_xact_id()
+--   (список ИСКЛЮЧЕНИЙ, а не перечень синхронизируемых колонок: новая колонка —
+--    author/updated_by из шага 19.1 или будущая — синхронизируется без правки триггера)
 -- tags_change / links_change: AFTER INSERT OR UPDATE OR DELETE ON tags | links →
 --   UPDATE memories SET change_xid = pg_current_xact_id()
 --   WHERE id = <memory_id | src> AND change_xid <> pg_current_xact_id()
@@ -365,7 +365,10 @@ INSERT INTO sync_meta VALUES (1, gen_random_uuid()::text);   -- идентичн
   строки» ниже. `xid8` — 64-битный xid с эпохой, не заворачивается за время жизни
   кластера и упорядочиваем (btree), поэтому годится и для индекса, и для курсора.
 - **`Touch` номер не двигает**: `accessed_at`/`access_count` (и производный `search_vec`)
-  в список `WHEN` не входят — чтение на одной машине не гонит запись на все остальные.
+  исключены из сравнения `WHEN` — чтение на одной машине не гонит запись на все остальные.
+  Сравнение — «всё, кроме локальных колонок»: забытая в перечне синхронизируемая колонка
+  молча терялась бы при синхронизации, а забытая в исключениях локальная стоит лишь
+  идемпотентного перечитывания.
 - **Изменение тегов/связей двигает номер записи-владельца** (`tags.memory_id`,
   `links.src`); условие `change_xid <> pg_current_xact_id()` гасит повторные `UPDATE`
   внутри одного `Put` (тот удаляет и вставляет теги и связи пачкой).
@@ -456,9 +459,10 @@ INSERT INTO sync_meta VALUES (1, gen_random_uuid()::text);   -- идентичн
 
 **Версии схем после Этапа 19.** SQLite `4 → 5` (`migrations[4]`): `author`,
 `updated_by` (два `ADD COLUMN`, без data-шагов; у SQLite нет `ADD COLUMN IF NOT EXISTS`,
-поэтому версионно). PostgreSQL `1 → 2` (`pgMigrations[1]`): `author`, `updated_by`;
-`2 → 3` (`pgMigrations[2]`): `change_xid` с индексом, триггеры номера изменения,
-`sync_meta`. Синхронизация требует, чтобы версия общей базы **равнялась**
+поэтому версионно). PostgreSQL — два шага: `author`, `updated_by` (19.1) и
+`migrateChangeXIDPG` (19.2): `change_xid` с индексом, триггеры номера изменения,
+`sync_meta`. Шаги независимы (триггер сравнивает строку через список исключений), поэтому
+их порядок не важен. Синхронизация требует, чтобы версия общей базы **равнялась**
 `pgSchemaVersion` бинаря: меньше — «примените схему», больше — «обновите memo», прогон
 не идёт (§7.1). Номера шагов фиксирует порядок вливания задач 19.1 и 19.2: какая
 вливается второй, та берёт следующий номер.
@@ -469,7 +473,9 @@ INSERT INTO sync_meta VALUES (1, gen_random_uuid()::text);   -- идентичн
 сообщает состояние: пусто (нет `schema_version`) / версия N меньше, равна или больше
 `pgSchemaVersion`. Создание и обновление схемы — отдельная явная операция (кнопка с
 подтверждением в морде, `memo sync -apply-schema`), она выполняет тот же `init`, что
-`store.Open`, под тем же advisory lock. Расширение `vector` для общей базы не требуется:
+`store.Open`, под тем же advisory lock, и отказывает на схеме новее бинаря. В `store` это
+`OpenHub` (только подключение) → `Hub.Schema` (состояние) / `Hub.ApplySchema` / `Hub.Changes`
+(страницы изменений набора по курсору `(xid, id)` в одном снимке) — основа адаптера `Shared` (19.5). Расширение `vector` для общей базы не требуется:
 векторы не синхронизируются, а `memories_vec` создаётся только при `ResetVectorIndex`.
 
 ---
