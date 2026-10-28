@@ -89,6 +89,12 @@ type hubDialer struct {
 var _ memsync.Dialer = hubDialer{}
 
 func (d hubDialer) Dial(ctx context.Context, project string) (memsync.Shared, error) {
+	return d.open(ctx, project)
+}
+
+// open — то же, что Dial, но отдаёт сам Hub: CLI, морде и doctor нужны
+// Schema/ApplySchema/RotateBase, которых нет в порте интерактора.
+func (d hubDialer) open(ctx context.Context, project string) (*store.Hub, error) {
 	t, err := d.local.Target(ctx, project)
 	if err != nil {
 		return nil, err

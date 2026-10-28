@@ -103,6 +103,8 @@ func newRootCmd(stdin io.Reader, stdout, stderr io.Writer, exitCode *int) *cobra
 			func(args []string) error { return runImport(args, stdout) }),
 		newForwardingCmd("migrate", "перенос памяти между бэкендами хранилища (sqlite <-> postgres)", exitCode, stderr, "memo migrate",
 			func(args []string) error { return runMigrate(args, stdout) }),
+		newForwardingCmd("sync", "синхронизация проектов с общей базой команды: прогон, статус, схема", exitCode, stderr, "memo sync",
+			func(args []string) error { return runSyncCmd(args, stdin, stdout) }),
 	)
 	return root
 }
