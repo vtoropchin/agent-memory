@@ -25,8 +25,8 @@ import (
 
 const syncTestPassword = "пароль-который-нельзя-показывать"
 
-// unreachableTarget — тело PUT цели на недоступный сервер.
-const unreachableTarget = `{"host":"127.0.0.1","port":1,"user":"memo","dbname":"memo","sslmode":"disable","push":true,"pull":true`
+// syncWebUnreachableBody — тело PUT цели на недоступный сервер.
+const syncWebUnreachableBody = `{"host":"127.0.0.1","port":1,"user":"memo","dbname":"memo","sslmode":"disable","push":true,"pull":true`
 
 // newSyncWebServer поднимает морду над SQLite во временном каталоге; envDir —
 // каталог БД (там .env с паролями). Глобальный git-конфиг подменён: имя по
@@ -232,7 +232,7 @@ func TestSyncAPI_DeleteTarget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("DEEPSEEK_API_KEY=ключ\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	syncDoJSON(t, http.MethodPut, srv.URL+"/api/sync/targets/alpha", unreachableTarget+`,"password":"`+syncTestPassword+`"}`, http.StatusOK, nil)
+	syncDoJSON(t, http.MethodPut, srv.URL+"/api/sync/targets/alpha", syncWebUnreachableBody+`,"password":"`+syncTestPassword+`"}`, http.StatusOK, nil)
 
 	syncDoJSON(t, http.MethodDelete, srv.URL+"/api/sync/targets/alpha", "", http.StatusOK, nil)
 	var got syncResponse
@@ -257,7 +257,7 @@ func TestSyncAPI_DeleteTarget(t *testing.T) {
 func TestSyncAPI_HubOpsUnreachable(t *testing.T) {
 	s, dir := newSyncWebSQLite(t)
 	srv := newSyncWebServer(t, s, dir)
-	syncDoJSON(t, http.MethodPut, srv.URL+"/api/sync/targets/alpha", unreachableTarget+`,"password":"`+syncTestPassword+`"}`, http.StatusOK, nil)
+	syncDoJSON(t, http.MethodPut, srv.URL+"/api/sync/targets/alpha", syncWebUnreachableBody+`,"password":"`+syncTestPassword+`"}`, http.StatusOK, nil)
 	// Запись после появления цели помечают триггеры; эпизод в число неотправленного не входит.
 	putTestMemory(t, s, func(m *memory.Memory) { m.Scope = "project:alpha"; m.Kind = memory.KindSemantic })
 	putTestMemory(t, s, func(m *memory.Memory) { m.Scope = "project:alpha"; m.Kind = memory.KindEpisodic })
