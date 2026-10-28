@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	gosync "sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -36,9 +37,20 @@ const (
 // errSyncBusy — цель уже прогоняет другой процесс этой машины (его lease не истёк).
 var errSyncBusy = errors.New("синхронизация проекта уже идёт в другом процессе memo")
 
-// syncHolder — владелец lease от имени этого процесса: pid плюс случайный
-// суффикс — pid переиспользуется после перезапуска.
+// syncHolder — префикс владельца lease от имени этого процесса: pid плюс
+// случайный суффикс — pid переиспользуется после перезапуска. Сам владелец —
+// syncRunHolder, свой на каждый прогон.
 var syncHolder = fmt.Sprintf("pid-%d-%s", os.Getpid(), ulid.Make())
+
+// syncRunHolder — владелец lease одного прогона. Lease пускает повторный захват
+// тем же владельцем, поэтому общий на процесс владелец не развёл бы два прогона
+// одной цели внутри процесса (фон и «Синхронизировать сейчас», двойной клик), а
+// первый закончивший снял бы lease из-под второго.
+func syncRunHolder() string { return syncHolder + "-" + ulid.Make().String() }
+
+// syncEnvMu сериализует read-modify-write .env паролей внутри процесса: два
+// одновременных сохранения разных целей иначе потеряли бы один из паролей.
+var syncEnvMu gosync.Mutex
 
 // syncEnvDir — каталог локальной БД: в его .env лежат пароли общих баз целей
 // (DESIGN.md §13), а не в проектном .env рядом с agentmemory.toml.
@@ -59,7 +71,8 @@ func runSync(ctx context.Context, local *store.SyncLocal, envDir, project, name 
 	if err != nil {
 		return res, err
 	}
-	ok, err := local.Lease(ctx, project, syncHolder, time.Now().Add(syncLeaseTTL).Unix())
+	holder := syncRunHolder()
+	ok, err := local.Lease(ctx, project, holder, time.Now().Add(syncLeaseTTL).Unix())
 	if err != nil {
 		return res, err
 	}
@@ -67,7 +80,7 @@ func runSync(ctx context.Context, local *store.SyncLocal, envDir, project, name 
 		return res, errSyncBusy
 	}
 	defer func() {
-		if err := local.Release(context.WithoutCancel(ctx), project, syncHolder); err != nil {
+		if err := local.Release(context.WithoutCancel(ctx), project, holder); err != nil {
 			log.Printf("memo: синхронизация %s: %v", project, err)
 		}
 	}()
@@ -89,6 +102,12 @@ type hubDialer struct {
 var _ memsync.Dialer = hubDialer{}
 
 func (d hubDialer) Dial(ctx context.Context, project string) (memsync.Shared, error) {
+	return d.open(ctx, project)
+}
+
+// open — то же, что Dial, но отдаёт сам Hub: CLI, морде и doctor нужны
+// Schema/ApplySchema/RotateBase, которых нет в порте интерактора.
+func (d hubDialer) open(ctx context.Context, project string) (*store.Hub, error) {
 	t, err := d.local.Target(ctx, project)
 	if err != nil {
 		return nil, err
@@ -163,13 +182,62 @@ func saveSyncPassword(envDir, name, password string) error {
 	if err := os.MkdirAll(envDir, 0o700); err != nil {
 		return fmt.Errorf("каталог %s: %w", envDir, err)
 	}
+	syncEnvMu.Lock()
+	defer syncEnvMu.Unlock()
 	path := filepath.Join(envDir, ".env")
 	existing, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("чтение %s: %w", path, err)
 	}
-	content := mergeEnvContent(existing, map[string]string{name: "'" + password + "'"})
+	return writeEnvFile(envDir, mergeEnvContent(existing, map[string]string{name: "'" + password + "'"}))
+}
 
+// deleteSyncPassword убирает переменную name из <envDir>/.env (прочие строки
+// остаются как были); нет файла или переменной — no-op. Если loadDotEnv на
+// старте влил этот же файл в окружение (каталог БД совпал с каталогом
+// конфига), значение снимается и с окружения — иначе syncPassword продолжал бы
+// находить удалённый пароль до перезапуска.
+func deleteSyncPassword(envDir, name string) error {
+	syncEnvMu.Lock()
+	defer syncEnvMu.Unlock()
+	path := filepath.Join(envDir, ".env")
+	vars, _, err := parseDotEnv(path)
+	if err != nil {
+		return fmt.Errorf("чтение %s: %w", path, err)
+	}
+	if v, ok := vars[name]; ok && v != "" && os.Getenv(name) == v {
+		os.Unsetenv(name)
+	}
+	existing, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("чтение %s: %w", path, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if key, _, ok := strings.Cut(trimmed, "="); ok && !strings.HasPrefix(trimmed, "#") && strings.TrimSpace(key) == name {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) == len(lines) {
+		return nil
+	}
+	content := strings.Join(kept, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	return writeEnvFile(envDir, content)
+}
+
+// writeEnvFile заменяет <envDir>/.env содержимым content через временный файл и
+// rename (читатель не увидит недописанный файл), права 0600.
+func writeEnvFile(envDir, content string) error {
+	path := filepath.Join(envDir, ".env")
 	tmp, err := os.CreateTemp(envDir, ".env.tmp-*") // CreateTemp создаёт файл с правами 0600
 	if err != nil {
 		return fmt.Errorf("временный файл для %s: %w", path, err)

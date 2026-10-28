@@ -140,9 +140,13 @@ func runWeb(args []string, stdout io.Writer) error {
 	w := write.New(s, embedder, write.WithAuthor(authorName(ctx, s)))
 	rc := recall.New(s, cfg.Recall, reason.NewNoop(), embedder)
 
+	inst := newWebInstance(cfg, reasonerAvailable(reasoner))
+	if inst.SyncEnvDir, err = syncEnvDir(cfg.Store); err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: newWebHandler(s, w, rc, embedder, newWebInstance(cfg, reasonerAvailable(reasoner))),
+		Handler: newWebHandler(s, w, rc, embedder, inst),
 	}
 
 	errCh := make(chan error, 1)
@@ -183,6 +187,7 @@ type webInstance struct {
 	ReasonerProvider  string // noop | deepseek | cliproxy
 	ReasonerModel     string
 	ReasonerAvailable bool
+	SyncEnvDir        string // каталог локальной БД: .env с паролями общих баз синхронизации
 }
 
 // newWebInstance собирает webInstance из конфига; пустые provider/driver
@@ -226,6 +231,7 @@ func newWebHandler(s store.Store, w *write.Writer, rc *recall.Recaller, embedder
 	mux.HandleFunc("DELETE /api/memories/{id}", handleForgetMemory(s, w))
 	mux.HandleFunc("GET /api/search", handleSearch(s, rc, embedder))
 	mux.HandleFunc("GET /api/board", handleBoard(s))
+	registerSyncRoutes(mux, s, inst.SyncEnvDir) // раздел «Синхронизация», web_sync.go
 	// Catch-all для неизвестных /api/*-путей: без него они проваливаются в
 	// файловый хендлер на "/" и отдают plain-text 404 вместо JSON-ошибки.
 	// Менее специфичен, чем method-aware паттерны выше, поэтому известные

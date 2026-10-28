@@ -212,3 +212,39 @@ func TestHubDialer_LivePG(t *testing.T) {
 		t.Fatalf("Dial с неверным паролем: %v, хочу ошибку без пароля", err)
 	}
 }
+
+// TestRunSync_SameProcessBusy: lease, взятый этим же процессом под другим
+// прогоном, тоже занят — владелец свой на каждый прогон, а не на процесс.
+func TestRunSync_SameProcessBusy(t *testing.T) {
+	ctx := context.Background()
+	l, dir, _ := newSyncLocal(t, store.SyncTarget{Host: "127.0.0.1", Port: 1, User: "memo", DBName: "memo"})
+	if ok, err := l.Lease(ctx, "alpha", syncRunHolder(), 1<<40); err != nil || !ok {
+		t.Fatalf("Lease: %v, %v", ok, err)
+	}
+	if _, err := runSync(ctx, l, dir, "alpha", "alice"); !errors.Is(err, errSyncBusy) {
+		t.Fatalf("runSync при прогоне этого же процесса = %v, хочу errSyncBusy", err)
+	}
+}
+
+// TestDeleteSyncPassword: удаляется только своя строка, прочие остаются; значение,
+// влитое из этого же файла в окружение, снимается; нет файла — no-op.
+func TestDeleteSyncPassword(t *testing.T) {
+	dir := t.TempDir()
+	if err := deleteSyncPassword(dir, "MEMO_SYNC_PASSWORD_A"); err != nil {
+		t.Fatalf("без .env: %v", err)
+	}
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte("# комментарий\nMEMO_SYNC_PASSWORD_A=секрет\nDEEPSEEK_API_KEY=ключ\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MEMO_SYNC_PASSWORD_A", "секрет")
+	if err := deleteSyncPassword(dir, "MEMO_SYNC_PASSWORD_A"); err != nil {
+		t.Fatalf("deleteSyncPassword: %v", err)
+	}
+	if got := string(mustRead(t, path)); got != "# комментарий\nDEEPSEEK_API_KEY=ключ\n" {
+		t.Errorf(".env после удаления:\n%s", got)
+	}
+	if got, _ := syncPassword(dir, "MEMO_SYNC_PASSWORD_A"); got != "" {
+		t.Errorf("пароль после удаления = %q, хочу пусто (окружение тоже снято)", got)
+	}
+}
