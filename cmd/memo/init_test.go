@@ -833,7 +833,7 @@ func TestDoInit_DshInstallsHomePatch(t *testing.T) {
 
 	firstDir := t.TempDir()
 	var first strings.Builder
-	if err := doInit(initConfig{Project: "first", Dir: firstDir, Agent: "dsh"}, &first); err != nil {
+	if err := doInit(initConfig{Project: "first", Dir: firstDir, Agents: []string{"dsh"}}, &first); err != nil {
 		t.Fatalf("doInit (первый проект): %v", err)
 	}
 	raw, err := os.ReadFile(layerPath)
@@ -853,7 +853,7 @@ func TestDoInit_DshInstallsHomePatch(t *testing.T) {
 
 	secondDir := t.TempDir()
 	var second strings.Builder
-	if err := doInit(initConfig{Project: "second", Dir: secondDir, Agent: "dsh"}, &second); err != nil {
+	if err := doInit(initConfig{Project: "second", Dir: secondDir, Agents: []string{"dsh"}}, &second); err != nil {
 		t.Fatalf("doInit (второй проект): %v", err)
 	}
 	raw, err = os.ReadFile(layerPath)
@@ -883,7 +883,7 @@ func TestDoInit_DshCreatesHomePatch(t *testing.T) {
 	t.Setenv("DSH_HOME", home)
 	dir := t.TempDir()
 	for i := 0; i < 2; i++ {
-		if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh"}, &strings.Builder{}); err != nil {
+		if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}}, &strings.Builder{}); err != nil {
 			t.Fatalf("doInit #%d: %v", i+1, err)
 		}
 	}
@@ -2076,5 +2076,33 @@ func TestProviderRegistries_OptionsAndEnvKeysMatchExpected(t *testing.T) {
 	selNoop := selectedProviders(initConfig{EmbedderProvider: "noop", ReasonerProvider: "noop"})
 	if len(selNoop) != 2 || selNoop[0].envKey != "" || selNoop[1].envKey != "" {
 		t.Errorf("selectedProviders(noop, noop) = %+v, хочу обе записи с пустым envKey", selNoop)
+	}
+}
+
+// TestDoInit_DshBrokenHomePatchWarnsOnce проверяет, что битый домашний слой
+// (маркер этого проекта без парного) даёт одно предупреждение, а не два:
+// домашний слой ведёт только installDshPatch, syncDshProfileCopies его не
+// перечитывает. Подсказка не должна утверждать, что каталога dsh нет.
+func TestDoInit_DshBrokenHomePatchWarnsOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DSH_HOME", home)
+	dir := t.TempDir()
+	layerPath := filepath.Join(home, "cordis.patch.yml")
+	broken := dshBlockStart(dir) + "\n- insert: []\n"
+	if err := os.WriteFile(layerPath, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}}, &out); err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+	if got := strings.Count(out.String(), "без парного"); got != 1 {
+		t.Errorf("предупреждений о незакрытом маркере %d, хочу 1:\n%s", got, out.String())
+	}
+	if !strings.Contains(out.String(), "не удалось разобрать") {
+		t.Errorf("подсказка не называет битый слой возможной причиной:\n%s", out.String())
+	}
+	if raw, _ := os.ReadFile(layerPath); string(raw) != broken {
+		t.Errorf("битый слой изменён:\n%s", raw)
 	}
 }
