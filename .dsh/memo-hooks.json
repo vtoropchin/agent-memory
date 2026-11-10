@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "command": "\"/Users/vladimir/.local/bin/memo\" hook -event session-start -config \"/Users/vladimir/Programming/AgentMemory\" -format json",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "command": "\"/Users/vladimir/.local/bin/memo\" hook -event prompt-submit -config \"/Users/vladimir/Programming/AgentMemory\" -format json",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

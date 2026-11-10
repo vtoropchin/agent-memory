@@ -1,0 +1,26 @@
+# Проектный patch-оверлей DeepSeek Harness (Cordis) — MCP-сервер memo
+# для проекта AgentMemory. Сгенерирован `memo init`; пути абсолютные, потому что dsh
+# запускает MCP-процесс с рабочим каталогом процесса харнесса.
+#
+# Подключение: init подключает блок ниже сам — в $DSH_HOME/cordis.patch.yml.
+# Файл нужен для разового запуска (`dsh web --patch <этот файл>`) и чтобы
+# подключение можно было перенести в профильный patch-слой вручную.
+# >>> memo /Users/vladimir/Programming/AgentMemory
+# сгенерировано memo init — правки внутри блока перезапишет следующий прогон
+- insert:
+    - id: memo
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: memo
+        transport: stdio
+        command: '/Users/vladimir/.local/bin/memo'
+        args:
+          - '-config'
+          - '/Users/vladimir/Programming/AgentMemory'
+        env:
+          DEEPSEEK_API_KEY: !!js process.env.DEEPSEEK_API_KEY ?? ''
+    - id: memo-hooks
+      name: '@deepseek-ai/dsh-hooks-claude-code'
+      config:
+        configPath: '/Users/vladimir/Programming/AgentMemory/.dsh/memo-hooks.json'
+# <<< memo /Users/vladimir/Programming/AgentMemory
