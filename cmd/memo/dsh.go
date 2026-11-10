@@ -265,11 +265,12 @@ func dshHome() (string, error) {
 	return filepath.Join(userHome, ".dsh"), nil
 }
 
-// syncDshProfileCopies обновляет блок оверлея этого проекта в patch-слоях dsh
-// ($DSH_HOME/cordis.patch.yml и $DSH_HOME/profiles/*/cordis.patch.yml), куда
-// пользователь вставил его для постоянного подключения. Трогаются только
-// слои, где уже есть блок с маркерами ЭТОГО проекта: сам init блок никуда не
-// вставляет — подключение к профилю остаётся решением пользователя. Остальные
+// syncDshProfileCopies обновляет блок оверлея этого проекта в профильных
+// patch-слоях dsh ($DSH_HOME/profiles/*/cordis.patch.yml), куда пользователь
+// вставил его вручную. Домашний слой ($DSH_HOME/cordis.patch.yml) здесь не
+// трогается: его ведёт installDshPatch, и второй проход по нему только
+// задвоил бы предупреждения. Трогаются только слои, где уже есть блок с
+// маркерами ЭТОГО проекта: в профильные слои init блок не вставляет. Остальные
 // строки слоя и его права сохраняются. Слой с незакрытым маркером не
 // меняется — init предупреждает и продолжает: чужой битый файл не повод
 // ронять настройку проекта.
@@ -283,7 +284,7 @@ func syncDshProfileCopies(dir, block string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("поиск patch-слоёв dsh: %w", err)
 	}
-	for _, path := range append([]string{filepath.Join(home, "cordis.patch.yml")}, layers...) {
+	for _, path := range layers {
 		raw, err := os.ReadFile(path)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -398,7 +399,8 @@ func dshOverlayHint(dir string, connected bool) string {
 	overlay := dshOverlayPath(absDir)
 	if !connected {
 		return fmt.Sprintf(`dsh не читает проектный MCP-конфиг — запись сервера memo лежит в оверлее %s.
-каталог dsh не найден, поэтому блок не подключён: подними харнесс или укажи DSH_HOME.
+блок не подключён к patch-слою dsh: каталог dsh не найден (установи dsh или укажи DSH_HOME)
+либо его patch-слой не удалось разобрать (причина — в предупреждении выше).
   разово:      dsh web --patch %s
   постоянно:   блок оверлея целиком, от строки "%s" до "%s", —
                в patch-слой $DSH_HOME/cordis.patch.yml (все профили) или
