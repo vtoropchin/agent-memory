@@ -5,15 +5,18 @@
 // `$DSH_HOME/profiles/<профиль>/cordis.patch.yml` или `--patch <файл>`), а
 // формат записи — YAML с JS-выражениями (`!!js`), а не JSON. Поэтому init не
 // мержит запись в чужой файл, а генерирует проектный оверлей целиком
-// (writeDshOverlay); подключить его к профилю dsh пользователь должен сам —
-// что именно для этого сделать, печатает dshOverlayHint (подсказки на этом
-// шаге харнесс не даёт: разовое `--patch` и вставка блока в patch-слой профиля
-// — разные действия). Блок оверлея обрамлён маркерами с путём проекта: копию,
-// вставленную в patch-слой, повторный init находит и обновляет сам
-// (syncDshProfileCopies) — иначе смена провайдеров или -hooks молча не
-// доезжала бы до харнесса. Подключить блок через `include` Cordis нельзя:
-// плагины внутри include резолвятся от каталога файла, а не от установки dsh
-// (проверено: «failed to import»).
+// (writeDshOverlay) и подключает его блок сам — в домашний patch-слой
+// `$DSH_HOME/cordis.patch.yml` (installDshPatch): он применяется после
+// профильного слоя, общий для всех профилей и не принадлежит Desktop-
+// приложению, которое перезаписывает профильный файл при recovery. Блок
+// обрамлён маркерами с путём проекта: повторный init находит свой блок и
+// обновляет его, а блоки других проектов удаляет — id строк у всех проектов
+// одинаковые, поэтому блоки не складываются, а перекрывают друг друга, и
+// переключение сопровождается предупреждением. Копии, вставленные в профильные
+// слои вручную, init тоже обновляет (syncDshProfileCopies) — иначе смена
+// провайдеров или -hooks молча не доезжала бы до харнесса. Подключить блок
+// через `include` Cordis нельзя: плагины внутри include резолвятся от каталога
+// файла, а не от установки dsh (проверено: «failed to import»).
 //
 // Пути в оверлее и в командах хуков абсолютные: dsh запускает MCP-процесс с
 // рабочим каталогом процесса харнесса (у Desktop-приложения, по lsof живого
@@ -101,12 +104,16 @@ func scaffoldDsh(dir, project, command string, cfg initConfig, out io.Writer) (s
 	if err := writeDshOverlay(dir, project, block, out); err != nil {
 		return "", err
 	}
+	connected, err := installDshPatch(dir, block, out)
+	if err != nil {
+		return "", err
+	}
 	if err := syncDshProfileCopies(dir, block, out); err != nil {
 		return "", err
 	}
 	if !hooksOn {
-		// Конфиг хуков прошлого прогона удаляется: строка моста могла уйти в
-		// patch-слой профиля (постоянное подключение), и тогда выключить хуки
+		// Конфиг хуков прошлого прогона удаляется: строка моста уходит в patch-слой
+		// dsh (постоянное подключение), и тогда выключить хуки
 		// может только отсутствие файла — мост без конфига не регистрирует ни
 		// одного хука.
 		if err := os.Remove(dshHooksPath(dir)); err == nil {
@@ -118,7 +125,7 @@ func scaffoldDsh(dir, project, command string, cfg initConfig, out io.Writer) (s
 		// задним числом правкой конфига нельзя: оверлей нужно перегенерировать.
 		fmt.Fprintf(out, "ambient-режим (авто-recall через хуки dsh) не подключён — включить: memo init -agent dsh -hooks %s\n", hooksSessionStart)
 	}
-	return dshOverlayHint(dir), nil
+	return dshOverlayHint(dir, connected), nil
 }
 
 // renderDshBlock собирает блок проектного patch-оверлея dsh — то, что
@@ -184,11 +191,20 @@ func renderDshBlock(command, dir string, cfg initConfig, hooksOn bool) string {
 	return b.String()
 }
 
+// dshMarkerPrefix — общее начало строк-маркеров блока оверлея; путь проекта
+// дописывается к нему в dshBlockStart/dshBlockEnd. Отдельная константа нужна
+// разбору слоя (dshOverlaySpans): dshBlockStart("") превратил бы пустой путь в
+// рабочий каталог процесса и не совпал бы ни с одним маркером.
+const (
+	dshMarkerStartPrefix = "# >>> memo "
+	dshMarkerEndPrefix   = "# <<< memo "
+)
+
 // dshBlockStart / dshBlockEnd — строки-маркеры блока оверлея (YAML-комментарии,
 // загрузчику не мешают). Путь проекта в маркере отличает блоки разных проектов
 // в одном patch-слое: init обновляет только блок своего проекта.
-func dshBlockStart(dir string) string { return "# >>> memo " + dshAbsDir(dir) }
-func dshBlockEnd(dir string) string   { return "# <<< memo " + dshAbsDir(dir) }
+func dshBlockStart(dir string) string { return dshMarkerStartPrefix + dshAbsDir(dir) }
+func dshBlockEnd(dir string) string   { return dshMarkerEndPrefix + dshAbsDir(dir) }
 
 // dshEnvVar — плейсхолдер переменной в env-блоке записи сервера.
 type dshEnvVar struct {
@@ -225,10 +241,9 @@ func writeDshOverlay(dir, project, block string, out io.Writer) error {
 # для проекта %s. Сгенерирован `+"`memo init`"+`; пути абсолютные, потому что dsh
 # запускает MCP-процесс с рабочим каталогом процесса харнесса.
 #
-# Подключение: разово — `+"`dsh web --patch <этот файл>`"+`, постоянно — блок
-# ниже целиком, вместе со строками-маркерами, в patch-слой профиля
-# ($DSH_HOME/cordis.patch.yml или $DSH_HOME/profiles/<профиль>/cordis.patch.yml);
-# повторный memo init обновит вставленный блок сам.
+# Подключение: init подключает блок ниже сам — в $DSH_HOME/cordis.patch.yml.
+# Файл нужен для разового запуска (`+"`dsh web --patch <этот файл>`"+`) и чтобы
+# подключение можно было перенести в профильный patch-слой вручную.
 `, project)
 	return overwriteFile(path, header+block, out)
 }
@@ -373,27 +388,162 @@ func writeDshHooks(dir, memoPath string, mappings []hookEventMapping, out io.Wri
 	return nil
 }
 
-// dshOverlayHint — что `memo init` печатает в конце вывода: у dsh нет
-// проектного MCP-конфига, поэтому оверлей надо подключить к профилю вручную.
-// Пути печатаются абсолютными (init мог запускаться из другого каталога), а
-// patch-слои — в форме $DSH_HOME из документации dsh. Предупреждение про
-// перекрытие — следствие одинаковых id строк у всех проектов (см.
-// dshServerName).
-func dshOverlayHint(dir string) string {
+// dshOverlayHint — что `memo init` печатает в конце вывода. Постоянное
+// подключение init делает сам (installDshPatch), поэтому подсказка говорит,
+// подключён блок или нет, и что означает переключение проектов. Пути
+// печатаются абсолютными (init мог запускаться из другого каталога), а
+// patch-слой — в форме $DSH_HOME из документации dsh.
+func dshOverlayHint(dir string, connected bool) string {
 	absDir := dshAbsDir(dir)
 	overlay := dshOverlayPath(absDir)
-	return fmt.Sprintf(`dsh не читает проектный MCP-конфиг — запись сервера memo лежит в оверлее %s.
-подключи её к профилю dsh:
+	if !connected {
+		return fmt.Sprintf(`dsh не читает проектный MCP-конфиг — запись сервера memo лежит в оверлее %s.
+каталог dsh не найден, поэтому блок не подключён: подними харнесс или укажи DSH_HOME.
   разово:      dsh web --patch %s
   постоянно:   блок оверлея целиком, от строки "%s" до "%s", —
-               в patch-слой профиля:
-               $DSH_HOME/cordis.patch.yml (все профили) или
+               в patch-слой $DSH_HOME/cordis.patch.yml (все профили) или
                $DSH_HOME/profiles/<профиль>/cordis.patch.yml (один профиль;
                Desktop-приложение использует профиль desktop). Профиль с HMR
                подхватит правку без перезапуска, а повторный memo init обновит
                вставленный блок сам.
-в один профиль подключай оверлей ОДНОГО проекта: строки оверлеев разных проектов
-перекрывают друг друга (действует последний слой, --patch — поверх профиля), и
-сессия молча пойдёт в память другого проекта.
 `, overlay, shellQuoteSingle(overlay), dshBlockStart(absDir), dshBlockEnd(absDir))
+	}
+	return fmt.Sprintf(`dsh не читает проектный MCP-конфиг — блок оверлея подключён в $DSH_HOME/cordis.patch.yml.
+профиль с HMR подхватывает правку без перезапуска приложения.
+  разово, без постоянной записи: dsh web --patch %s
+  оверлей: %s
+память dsh одна: повторный init в другом проекте переключает блок на него и удаляет
+блок прежнего проекта (id строк у всех проектов одинаковые), о чём init предупреждает.
+`, shellQuoteSingle(overlay), overlay)
+}
+
+// dshPatchLayerPath — путь домашнего patch-слоя dsh, куда init подключает блок
+// оверлея. Именно домашний слой ($DSH_HOME/cordis.patch.yml), а не профильный:
+// он применяется после профильного слоя, общий для всех профилей и не
+// принадлежит Desktop-приложению (тот перезаписывает профильный файл при
+// recovery), поэтому и переживает пересоздание профиля.
+func dshPatchLayerPath(home string) string { return filepath.Join(home, "cordis.patch.yml") }
+
+// installDshPatch подключает блок оверлея этого проекта к домашнему patch-слою
+// dsh: создаёт слой, если его нет, заменяет блок этого проекта и удаляет блоки
+// других проектов (id строк у всех проектов одинаковые, поэтому блоки не
+// складываются, а перекрывают друг друга — действует последний). Именно
+// поэтому переключение сопровождается предупреждением: сессия dsh начнёт
+// ходить в память другого проекта.
+//
+// connected=false — блок не подключён, и это не ошибка: каталога dsh нет (dsh
+// не установлен) или каталог не определён. Ошибки записи возвращаются: init не
+// должен делать вид, что память подключена, когда её нет.
+//
+// Слой с непарным маркером не трогается (как и в syncDshProfileCopies): это
+// чужая правка, и «замена до конца файла» съела бы строки пользователя.
+func installDshPatch(dir, block string, out io.Writer) (bool, error) {
+	home, err := dshHome()
+	if err != nil {
+		fmt.Fprintf(out, "warning: каталог dsh не определён, блок оверлея не подключён: %v\n", err)
+		return false, nil
+	}
+	if strings.TrimSpace(os.Getenv("DSH_HOME")) == "" {
+		if _, err := os.Stat(home); errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+	}
+
+	path := dshPatchLayerPath(home)
+	raw, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+	case errors.Is(err, fs.ErrNotExist):
+	default:
+		return false, fmt.Errorf("чтение %q: %w", path, err)
+	}
+	text := string(raw)
+
+	spans, err := dshOverlaySpans(text)
+	if err != nil {
+		fmt.Fprintf(out, "warning: %s: %v — блок оверлея не подключён\n", path, err)
+		return false, nil
+	}
+
+	absDir := dshAbsDir(dir)
+	var rest strings.Builder
+	var replaced []string
+	last := 0
+	for _, span := range spans {
+		rest.WriteString(text[last:span.from])
+		last = span.to
+		if span.dir != absDir {
+			replaced = append(replaced, span.dir)
+		}
+	}
+	rest.WriteString(text[last:])
+	kept := rest.String()
+	if kept != "" && !strings.HasSuffix(kept, "\n") {
+		kept += "\n"
+	}
+	updated := kept + block
+	if updated == text {
+		fmt.Fprintf(out, "  блок memo уже подключён: %s\n", path)
+		return true, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("создание каталога %q: %w", filepath.Dir(path), err)
+	}
+	mode := fs.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.WriteFile(path, []byte(updated), mode); err != nil {
+		return false, fmt.Errorf("запись %q: %w", path, err)
+	}
+
+	if len(replaced) == 0 {
+		fmt.Fprintf(out, "  блок memo подключён: %s\n", path)
+	} else {
+		for _, other := range replaced {
+			fmt.Fprintf(out, "warning: память dsh переключена с %s на %s — блок прежнего проекта удалён из %s\n",
+				other, absDir, path)
+		}
+		fmt.Fprintf(out, "  блок memo обновлён: %s\n", path)
+	}
+	return true, nil
+}
+
+// dshOverlaySpan — границы вставленного блока оверлея в тексте patch-слоя:
+// from — смещение строки-маркера начала, to — сразу за строкой-маркером конца.
+type dshOverlaySpan struct {
+	dir  string
+	from int
+	to   int
+}
+
+// dshOverlaySpans находит в тексте patch-слоя все блоки оверлея — в том числе
+// вставленные для других проектов: при подключении своего блока их нужно
+// снять, иначе они перекроют друг друга по id. Непарный маркер — ошибка:
+// подставлять чужой блок «до конца файла» нельзя.
+func dshOverlaySpans(text string) ([]dshOverlaySpan, error) {
+	var spans []dshOverlaySpan
+	offset := 0
+	openAt := -1
+	openDir := ""
+	for _, line := range strings.SplitAfter(text, "\n") {
+		trimmed := strings.TrimRight(line, "\r\n")
+		if dir, ok := strings.CutPrefix(trimmed, dshMarkerStartPrefix); ok && strings.TrimSpace(dir) != "" {
+			if openAt >= 0 {
+				return nil, fmt.Errorf("маркер %q без парного %q", dshBlockStart(openDir), dshBlockEnd(openDir))
+			}
+			openAt, openDir = offset, strings.TrimSpace(dir)
+		} else if dir, ok := strings.CutPrefix(trimmed, dshMarkerEndPrefix); ok && strings.TrimSpace(dir) != "" {
+			if openAt >= 0 {
+				spans = append(spans, dshOverlaySpan{dir: openDir, from: openAt, to: offset + len(line)})
+				openAt, openDir = -1, ""
+			}
+		}
+		offset += len(line)
+	}
+	if openAt >= 0 {
+		return nil, fmt.Errorf("маркер %q без парного %q", dshBlockStart(openDir), dshBlockEnd(openDir))
+	}
+	return spans, nil
 }

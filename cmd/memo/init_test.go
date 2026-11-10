@@ -811,8 +811,137 @@ func TestDoInit_DshSyncsProfileCopy(t *testing.T) {
 	if !strings.Contains(out.String(), "обновлён блок memo в "+profilePatch) {
 		t.Errorf("вывод не сообщает об обновлении слоя профиля: %s", out.String())
 	}
-	if got, _ := os.ReadFile(homePatch); string(got) != before {
-		t.Errorf("слой без блока проекта изменён:\n%s", got)
+	if got, _ := os.ReadFile(homePatch); string(got) != before+newBlock {
+		t.Errorf("домашний слой после init:\n%s\nхочу:\n%s", got, before+newBlock)
+	}
+}
+
+// TestDoInit_DshInstallsHomePatch проверяет автоподключение: init сам вставляет
+// блок оверлея в домашний patch-слой dsh ($DSH_HOME/cordis.patch.yml), не
+// требует ручной вставки и сохраняет чужие строки слоя. Повторный init в
+// другом проекте переключает слой на него — id строк у всех проектов
+// одинаковые, поэтому блок прежнего проекта удаляется, а вывод предупреждает
+// о переключении.
+func TestDoInit_DshInstallsHomePatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DSH_HOME", home)
+	layerPath := filepath.Join(home, "cordis.patch.yml")
+	userRows := "- id: user-row\n  disabled: true\n"
+	if err := os.WriteFile(layerPath, []byte(userRows), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	firstDir := t.TempDir()
+	var first strings.Builder
+	if err := doInit(initConfig{Project: "first", Dir: firstDir, Agent: "dsh"}, &first); err != nil {
+		t.Fatalf("doInit (первый проект): %v", err)
+	}
+	raw, err := os.ReadFile(layerPath)
+	if err != nil {
+		t.Fatalf("чтение домашнего слоя: %v", err)
+	}
+	layer := string(raw)
+	if !strings.HasPrefix(layer, userRows) {
+		t.Errorf("домашний слой потерял чужие строки:\n%s", layer)
+	}
+	if got := strings.Count(layer, dshMarkerStartPrefix); got != 1 || !strings.Contains(layer, dshBlockStart(firstDir)) {
+		t.Errorf("домашний слой: %d блоков, жду один блок проекта %s:\n%s", got, firstDir, layer)
+	}
+	if !strings.Contains(first.String(), "блок memo подключён: "+layerPath) {
+		t.Errorf("вывод не сообщает о подключении блока: %s", first.String())
+	}
+
+	secondDir := t.TempDir()
+	var second strings.Builder
+	if err := doInit(initConfig{Project: "second", Dir: secondDir, Agent: "dsh"}, &second); err != nil {
+		t.Fatalf("doInit (второй проект): %v", err)
+	}
+	raw, err = os.ReadFile(layerPath)
+	if err != nil {
+		t.Fatalf("чтение домашнего слоя после переключения: %v", err)
+	}
+	layer = string(raw)
+	if strings.Contains(layer, dshBlockStart(firstDir)) || !strings.Contains(layer, dshBlockStart(secondDir)) {
+		t.Errorf("слой не переключён на второй проект:\n%s", layer)
+	}
+	if got := strings.Count(layer, dshMarkerStartPrefix); got != 1 {
+		t.Errorf("блоков в домашнем слое %d, жду один:\n%s", got, layer)
+	}
+	if !strings.Contains(second.String(), "переключена с "+firstDir+" на "+secondDir) {
+		t.Errorf("вывод не предупреждает о переключении памяти: %s", second.String())
+	}
+	if info, err := os.Stat(layerPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("права домашнего слоя = %v (err=%v), хочу 0600", info.Mode().Perm(), err)
+	}
+}
+
+// TestDoInit_DshCreatesHomePatch проверяет создание домашнего слоя, когда его
+// ещё нет (первый dsh-проект на машине), и что повторный init того же проекта
+// не задваивает блок.
+func TestDoInit_DshCreatesHomePatch(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".dsh")
+	t.Setenv("DSH_HOME", home)
+	dir := t.TempDir()
+	for i := 0; i < 2; i++ {
+		if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh"}, &strings.Builder{}); err != nil {
+			t.Fatalf("doInit #%d: %v", i+1, err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(home, "cordis.patch.yml"))
+	if err != nil {
+		t.Fatalf("чтение домашнего слоя: %v", err)
+	}
+	if got := strings.Count(string(raw), dshMarkerStartPrefix); got != 1 {
+		t.Errorf("повторный init задвоил блок (%d):\n%s", got, raw)
+	}
+}
+
+// TestInstallDshPatch_SkipsWithoutHarness проверяет, что init не выдумывает
+// каталог dsh, когда харнесс не установлен: ~/.dsh нет, DSH_HOME не задан —
+// блок не подключается (подсказка о ручном подключении печатается отдельно).
+func TestInstallDshPatch_SkipsWithoutHarness(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DSH_HOME", "")
+	var out strings.Builder
+	connected, err := installDshPatch(t.TempDir(), "- insert: []\n", &out)
+	if err != nil {
+		t.Fatalf("installDshPatch: %v", err)
+	}
+	if connected {
+		t.Errorf("блок подключён без установленного dsh")
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".dsh")); !os.IsNotExist(err) {
+		t.Errorf("каталог ~/.dsh создан без dsh: err=%v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("без dsh вывод должен молчать (подсказка печатается отдельно): %s", out.String())
+	}
+}
+
+// TestInstallDshPatch_KeepsUnpairedMarker проверяет, что слой с незакрытым
+// маркером не меняется: это чужая правка, и «замена до конца файла» съела бы
+// строки пользователя. init предупреждает и продолжает.
+func TestInstallDshPatch_KeepsUnpairedMarker(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DSH_HOME", home)
+	layerPath := filepath.Join(home, "cordis.patch.yml")
+	broken := dshBlockStart("/old") + "\n- insert: []\n"
+	if err := os.WriteFile(layerPath, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	connected, err := installDshPatch(t.TempDir(), "- insert: []\n", &out)
+	if err != nil {
+		t.Fatalf("installDshPatch: %v", err)
+	}
+	if connected {
+		t.Errorf("битый слой подключён")
+	}
+	if raw, _ := os.ReadFile(layerPath); string(raw) != broken {
+		t.Errorf("битый слой изменён:\n%s", raw)
+	}
+	if !strings.Contains(out.String(), "без парного") {
+		t.Errorf("вывод без предупреждения о незакрытом маркере: %s", out.String())
 	}
 }
 
