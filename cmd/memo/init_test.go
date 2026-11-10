@@ -400,7 +400,7 @@ func TestDoInit_OpencodeMCPConfigMergePreservesForeignServer(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode"}, &out); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"opencode"}}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
 
@@ -472,7 +472,7 @@ func TestDoInit_MCPConfigMalformedExistingErrorsWithoutWrite(t *testing.T) {
 func TestDoInit_UnknownAgent(t *testing.T) {
 	dir := t.TempDir()
 	var out strings.Builder
-	err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "bogus"}, &out)
+	err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"bogus"}}, &out)
 	if err == nil {
 		t.Fatalf("doInit с неизвестным Agent = nil error, хочу ошибку")
 	}
@@ -489,7 +489,7 @@ func TestDoInit_OpencodeTarget(t *testing.T) {
 	dir := t.TempDir()
 	var out strings.Builder
 
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode"}, &out); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"opencode"}}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
 
@@ -585,7 +585,7 @@ func TestDoInit_DshTarget(t *testing.T) {
 	dir := t.TempDir()
 	var out strings.Builder
 
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh"}, &out); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
 
@@ -664,7 +664,7 @@ func TestDoInit_DshHooks(t *testing.T) {
 	dir := t.TempDir()
 	var out strings.Builder
 
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksBoth}, &out); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooksBoth}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
 
@@ -714,7 +714,7 @@ func TestDoInit_DshHooksNoneDoesNotWriteHooks(t *testing.T) {
 	for _, hooks := range []string{hooksNone, ""} {
 		dir := t.TempDir()
 		var out strings.Builder
-		if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooks}, &out); err != nil {
+		if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooks}, &out); err != nil {
 			t.Fatalf("doInit (Hooks=%q): %v", hooks, err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, ".dsh", "memo-hooks.json")); !os.IsNotExist(err) {
@@ -737,10 +737,10 @@ func TestDoInit_DshHooksNoneDoesNotWriteHooks(t *testing.T) {
 func TestDoInit_DshHooksNoneRemovesStaleHooks(t *testing.T) {
 	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
 	dir := t.TempDir()
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksBoth}, &strings.Builder{}); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooksBoth}, &strings.Builder{}); err != nil {
 		t.Fatalf("doInit (хуки): %v", err)
 	}
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksNone}, &strings.Builder{}); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooksNone}, &strings.Builder{}); err != nil {
 		t.Fatalf("doInit (без хуков): %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".dsh", "memo-hooks.json")); !os.IsNotExist(err) {
@@ -757,7 +757,7 @@ func TestDoInit_DshSyncsProfileCopy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("DSH_HOME", home)
 	dir := t.TempDir()
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksBoth}, &strings.Builder{}); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooksBoth}, &strings.Builder{}); err != nil {
 		t.Fatalf("doInit (хуки): %v", err)
 	}
 	overlay, err := os.ReadFile(dshOverlayPath(dir))
@@ -787,7 +787,7 @@ func TestDoInit_DshSyncsProfileCopy(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksNone}, &out); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooksNone}, &out); err != nil {
 		t.Fatalf("doInit (без хуков): %v", err)
 	}
 	overlay, err = os.ReadFile(dshOverlayPath(dir))
@@ -843,7 +843,7 @@ func TestDoInit_HarnessHintAfterSummary(t *testing.T) {
 	t.Setenv("DSH_HOME", t.TempDir())
 	for agent, hint := range map[string]string{"dsh": "dsh web --patch", "claude": "одобри проектный MCP-сервер"} {
 		var out strings.Builder
-		if err := doInit(initConfig{Project: "myproj", Dir: t.TempDir(), Agent: agent}, &out); err != nil {
+		if err := doInit(initConfig{Project: "myproj", Dir: t.TempDir(), Agents: []string{agent}}, &out); err != nil {
 			t.Fatalf("doInit (%s): %v", agent, err)
 		}
 		summary, at := strings.Index(out.String(), "хранилище:"), strings.Index(out.String(), hint)
@@ -860,7 +860,7 @@ func TestDoInit_DshRerunIdempotent(t *testing.T) {
 	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
 	dir := t.TempDir()
 	var first strings.Builder
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksSessionStart}, &first); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooksSessionStart}, &first); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
 	overlayPath := filepath.Join(dir, ".dsh", "memo.cordis.yml")
@@ -870,7 +870,7 @@ func TestDoInit_DshRerunIdempotent(t *testing.T) {
 	}
 
 	var second strings.Builder
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksSessionStart}, &second); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooksSessionStart}, &second); err != nil {
 		t.Fatalf("повторный doInit: %v", err)
 	}
 	after, err := os.ReadFile(overlayPath)
@@ -952,7 +952,7 @@ func TestWriteDshHooks_RegeneratesFile(t *testing.T) {
 func TestDoInit_DshRelativeStorePath(t *testing.T) {
 	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
 	dir := t.TempDir()
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "dsh", Hooks: hooksSessionStart, StorePath: "./mem.db"}, &strings.Builder{}); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"dsh"}, Hooks: hooksSessionStart, StorePath: "./mem.db"}, &strings.Builder{}); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
 
@@ -1771,7 +1771,7 @@ func TestDoInit_HooksMalformedExistingSettingsErrorsWithoutWrite(t *testing.T) {
 func TestDoInit_HooksOpencodeNotesUnsupported(t *testing.T) {
 	dir := t.TempDir()
 	var out strings.Builder
-	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agent: "opencode", Hooks: hooksSessionStart}, &out); err != nil {
+	if err := doInit(initConfig{Project: "myproj", Dir: dir, Agents: []string{"opencode"}, Hooks: hooksSessionStart}, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".claude", "settings.json")); !os.IsNotExist(err) {

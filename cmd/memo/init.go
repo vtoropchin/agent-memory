@@ -29,6 +29,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -548,31 +549,61 @@ func agentKeys() []string {
 	return keys
 }
 
+// parseAgentList разбирает значение флага -agent — один ключ или список через
+// запятую ("claude,opencode") — в список ключей: пробелы вокруг ключей и пустые
+// элементы отбрасываются, повторы схлопываются с сохранением порядка первого
+// вхождения. Пустая строка — nil (агенты не заданы, дефолт проставит
+// applyInitDefaults или спросит визард). Ключи здесь не проверяются — это
+// делает doInit (validateAgentKeys) до записи любых файлов.
+func parseAgentList(s string) []string {
+	var agents []string
+	for _, part := range strings.Split(s, ",") {
+		key := strings.TrimSpace(part)
+		if key == "" || slices.Contains(agents, key) {
+			continue
+		}
+		agents = append(agents, key)
+	}
+	return agents
+}
+
+// validateAgentKeys проверяет, что все ключи есть в agentRegistry. Вызывается
+// до записи файлов: опечатка во втором агенте списка не должна оставить проект
+// наполовину настроенным под первый.
+func validateAgentKeys(agents []string) error {
+	for _, a := range agents {
+		if _, ok := agentRegistry[a]; !ok {
+			return fmt.Errorf("неизвестное агентское приложение %q — поддерживаются: %s", a, strings.Join(agentKeys(), ", "))
+		}
+	}
+	return nil
+}
+
 // initConfig — параметры одного прогона `memo init`: заданы флагом, либо (в
 // интерактивном TTY-режиме) дозапрошены promptInitTUI, либо остаются пустыми
 // и получают дефолт в doInit/applyInitDefaults.
 type initConfig struct {
 	Project          string
 	Dir              string
-	Agent            string
-	EmbedderProvider string // ollama | openai | noop
-	EmbedderBaseURL  string // ollama/openai: base URL; noop — не используется
-	EmbedderModel    string // ollama/openai: модель эмбеддинга; noop — не используется
-	ReasonerProvider string // deepseek | cliproxy | noop
-	ReasonerBaseURL  string // cliproxy: base URL; deepseek — дефолт провайдера, в TOML не пишется; noop — не используется
-	ReasonerModel    string // deepseek/cliproxy: модель reasoner; noop — не используется
-	StoreDriver      string // "" (== sqlite) | sqlite | postgres
-	StorePath        string // только если StoreDriver sqlite: путь к файлу БД
-	PostgresHost     string // только если StoreDriver == "postgres"
-	PostgresPort     int    // только если StoreDriver == "postgres"; 0 — дефолт defaultPostgresPort
-	PostgresUser     string // только если StoreDriver == "postgres"
-	PostgresDBName   string // только если StoreDriver == "postgres"
-	PostgresSSLMode  string // только если StoreDriver == "postgres"
-	PostgresPassword string // только если StoreDriver == "postgres"; в TOML не попадает никогда — только в .env
-	OpenAIKey        string // только если EmbedderProvider == "openai"
-	DeepseekKey      string // только если ReasonerProvider == "deepseek"
-	CLIProxyKey      string // только если ReasonerProvider == "cliproxy"
-	Hooks            string // "" | session-start | session-start+prompt-submit | none (см. hooksOptions)
+	Agents           []string // ключи agentRegistry; артефакты раскладываются под каждое приложение
+	EmbedderProvider string   // ollama | openai | noop
+	EmbedderBaseURL  string   // ollama/openai: base URL; noop — не используется
+	EmbedderModel    string   // ollama/openai: модель эмбеддинга; noop — не используется
+	ReasonerProvider string   // deepseek | cliproxy | noop
+	ReasonerBaseURL  string   // cliproxy: base URL; deepseek — дефолт провайдера, в TOML не пишется; noop — не используется
+	ReasonerModel    string   // deepseek/cliproxy: модель reasoner; noop — не используется
+	StoreDriver      string   // "" (== sqlite) | sqlite | postgres
+	StorePath        string   // только если StoreDriver sqlite: путь к файлу БД
+	PostgresHost     string   // только если StoreDriver == "postgres"
+	PostgresPort     int      // только если StoreDriver == "postgres"; 0 — дефолт defaultPostgresPort
+	PostgresUser     string   // только если StoreDriver == "postgres"
+	PostgresDBName   string   // только если StoreDriver == "postgres"
+	PostgresSSLMode  string   // только если StoreDriver == "postgres"
+	PostgresPassword string   // только если StoreDriver == "postgres"; в TOML не попадает никогда — только в .env
+	OpenAIKey        string   // только если EmbedderProvider == "openai"
+	DeepseekKey      string   // только если ReasonerProvider == "deepseek"
+	CLIProxyKey      string   // только если ReasonerProvider == "cliproxy"
+	Hooks            string   // "" | session-start | session-start+prompt-submit | none (см. hooksOptions)
 	Force            bool
 }
 
@@ -893,7 +924,7 @@ func runInit(args []string, out io.Writer) error {
 	project := fs.String("project", "", "имя проекта (дефолт — базовое имя каталога -dir)")
 	dir := fs.String("dir", ".", "каталог, в который скаффолдить артефакты")
 	force := fs.Bool("force", false, "перезаписывать существующие файлы скиллов SKILL.md (agentmemory.toml/mcp-конфиг всегда синхронизируются, .env всегда мержится — -force на них не влияет)")
-	agent := fs.String("agent", "", fmt.Sprintf("агентское приложение (%s); дефолт %s", strings.Join(agentKeys(), ", "), defaultAgentKey))
+	agent := fs.String("agent", "", fmt.Sprintf("агентские приложения через запятую (%s), напр. claude,opencode; дефолт %s", strings.Join(agentKeys(), ", "), defaultAgentKey))
 	embedderProvider := fs.String("embedder-provider", "", fmt.Sprintf("провайдер эмбеддинга (%s); дефолт %s", strings.Join(embedderProviderOptions, ", "), defaultEmbedderProvider))
 	embedderURL := fs.String("embedder-url", "", "base URL эмбеддера (дефолт зависит от провайдера)")
 	embedderModel := fs.String("embedder-model", "", "модель эмбеддинга (дефолт зависит от провайдера)")
@@ -936,7 +967,7 @@ func runInit(args []string, out io.Writer) error {
 		Project:          *project,
 		Dir:              *dir,
 		Force:            *force,
-		Agent:            *agent,
+		Agents:           parseAgentList(*agent),
 		EmbedderProvider: *embedderProvider,
 		EmbedderBaseURL:  cmp.Or(*embedderURL, *ollamaURL),
 		EmbedderModel:    cmp.Or(*embedderModel, *ollamaModel),
@@ -1014,8 +1045,8 @@ func applyInitDefaults(cfg initConfig) initConfig {
 	if cfg.Dir == "" {
 		cfg.Dir = "."
 	}
-	if cfg.Agent == "" {
-		cfg.Agent = defaultAgentKey
+	if len(cfg.Agents) == 0 {
+		cfg.Agents = []string{defaultAgentKey}
 	}
 	if cfg.EmbedderProvider == "" {
 		cfg.EmbedderProvider = defaultEmbedderProvider
@@ -1160,9 +1191,8 @@ func doInit(cfg initConfig, out io.Writer) error {
 		}
 	}
 
-	target, ok := agentRegistry[cfg.Agent]
-	if !ok {
-		return fmt.Errorf("неизвестное агентское приложение %q — поддерживаются: %s", cfg.Agent, strings.Join(agentKeys(), ", "))
+	if err := validateAgentKeys(cfg.Agents); err != nil {
+		return err
 	}
 
 	project, err := resolveProjectName(cfg.Project, cfg.Dir)
@@ -1240,18 +1270,29 @@ func doInit(cfg initConfig, out io.Writer) error {
 	// Cordis целиком, вместе со строкой моста хуков. Всё, что различается по
 	// харнессам, закрыто agentTarget.scaffold; -force на запись сервера не
 	// влияет нигде (источник истины — параметры текущего прогона init).
-	harnessHint, err := target.scaffold(cfg.Dir, project, command, cfg, out)
-	if err != nil {
-		return err
-	}
-
-	for _, spec := range target.skills {
-		skillPath := filepath.Join(target.skillsDir(cfg.Dir), spec.dirName, "SKILL.md")
-		if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
-			return fmt.Errorf("создание каталога %q: %w", filepath.Dir(skillPath), err)
+	//
+	// Выбрано несколько приложений — каждое получает свой набор артефактов: у
+	// них раздельные MCP-конфиги и корни скиллов, поэтому прогоны не
+	// пересекаются. Выбор хуков (cfg.Hooks) общий для всех, кто их умеет.
+	var harnessHints strings.Builder
+	labels := make([]string, 0, len(cfg.Agents))
+	for _, key := range cfg.Agents {
+		target := agentRegistry[key]
+		labels = append(labels, target.label)
+		hint, err := target.scaffold(cfg.Dir, project, command, cfg, out)
+		if err != nil {
+			return fmt.Errorf("%s: %w", target.label, err)
 		}
-		if err := writeScaffoldFile(skillPath, spec.render(project), cfg.Force, out); err != nil {
-			return err
+		harnessHints.WriteString(hint)
+
+		for _, spec := range target.skills {
+			skillPath := filepath.Join(target.skillsDir(cfg.Dir), spec.dirName, "SKILL.md")
+			if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
+				return fmt.Errorf("создание каталога %q: %w", filepath.Dir(skillPath), err)
+			}
+			if err := writeScaffoldFile(skillPath, spec.render(project), cfg.Force, out); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1302,7 +1343,11 @@ func doInit(cfg initConfig, out io.Writer) error {
 	}
 
 	fmt.Fprintf(out, "проект: %s\n", project)
-	fmt.Fprintf(out, "агент: %s\n", target.label)
+	if len(labels) == 1 {
+		fmt.Fprintf(out, "агент: %s\n", labels[0])
+	} else {
+		fmt.Fprintf(out, "агенты: %s\n", strings.Join(labels, ", "))
+	}
 	fmt.Fprintf(out, "эмбеддинг: %s\n", cfg.EmbedderProvider)
 	fmt.Fprintf(out, "reasoner: %s\n", cfg.ReasonerProvider)
 	// Хранилище печатается через StoreConfig.Target() — один формат с логом
@@ -1340,7 +1385,7 @@ func doInit(cfg initConfig, out io.Writer) error {
 	// конкретного харнесса (одобрение сервера у Claude Code, ручное подключение
 	// оверлея у dsh), которое вернул его scaffold.
 	fmt.Fprintln(out, "дальше: убедись, что memo доступен — `go install` кладёт его на PATH (см. `make install`), и перезапусти агентское приложение в этом каталоге.")
-	fmt.Fprint(out, harnessHint)
+	fmt.Fprint(out, harnessHints.String())
 	return nil
 }
 
