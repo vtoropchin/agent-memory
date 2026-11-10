@@ -50,12 +50,13 @@ make install
 memo init
 ```
 
-В интерактивном режиме спросит агентское приложение (`claude`, `opencode` или `dsh`), имя
+В интерактивном режиме спросит агентские приложения — можно отметить сразу несколько
+(`claude`, `opencode`, `dsh`; пробел ставит галочку, Enter подтверждает), — имя
 проекта, адрес и модель ollama, ключ DeepSeek и модель reasoner (по желанию), а затем
 хранилище — файл SQLite или общая база PostgreSQL, см.
 [переезд на PostgreSQL](#общая-база-команды-переезд-на-postgresql) — и разложит:
 
-- MCP-конфиг: `.mcp.json` для Claude Code, `opencode.json` для opencode или проектный
+- MCP-конфиг под каждое выбранное приложение: `.mcp.json` для Claude Code, `opencode.json` для opencode, проектный
   patch-оверлей `.dsh/memo.cordis.yml` для DeepSeek Harness (см.
   [подключение оверлея](#deepseek-harness-dsh-проектный-оверлей));
 - два скила — «Протокол работы с памятью» (`memo`) и разовый bootstrap
@@ -200,7 +201,7 @@ Bootstrap закрывает этот разрыв: запусти его **од
 | `-project` | имя проекта (дефолт — базовое имя каталога `-dir`) |
 | `-dir` | каталог, в который скаффолдить артефакты (дефолт `.`) |
 | `-force` | перезаписывать существующие файлы скиллов SKILL.md (agentmemory.toml/mcp-конфиг всегда синхронизируются, `.env` всегда мержится — `-force` на них не влияет) |
-| `-agent` | `claude`, `opencode` или `dsh` (DeepSeek Harness; дефолт `claude`) |
+| `-agent` | `claude`, `opencode`, `dsh` (DeepSeek Harness) или несколько через запятую, напр. `claude,opencode` (дефолт `claude`) |
 | `-ollama-url` | base URL ollama (дефолт `http://localhost:11434`) |
 | `-ollama-model` | модель эмбеддингов ollama (дефолт `bge-m3`) |
 | `-store` | путь к файлу SQLite (дефолт `~/.agentmemory/memory.db`) |

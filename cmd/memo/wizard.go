@@ -30,15 +30,25 @@ import (
 // этой задачи. Возвращает ошибку huh.ErrUserAborted, если пользователь вышел
 // (Ctrl+C/Esc) — runInit превращает её в понятное сообщение.
 func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConfig, error) {
-	if cfg.Agent == "" {
-		agent := defaultAgentKey
-		if err := huh.NewSelect[string]().
-			Title("Агентское приложение").
+	if len(cfg.Agents) == 0 {
+		// Мультивыбор: пробел ставит/снимает галочку, Enter подтверждает.
+		// Дефолтный агент отмечен заранее — Enter без правок даёт прежний
+		// результат одиночного select.
+		agents := []string{defaultAgentKey}
+		if err := huh.NewMultiSelect[string]().
+			Title("Агентские приложения").
+			Description("пробел — отметить/снять, Enter — подтвердить").
 			Options(agentSelectOptions()...).
-			Value(&agent).Run(); err != nil {
+			Validate(func(v []string) error {
+				if len(v) == 0 {
+					return fmt.Errorf("отметь хотя бы одно приложение")
+				}
+				return nil
+			}).
+			Value(&agents).Run(); err != nil {
 			return cfg, err
 		}
-		cfg.Agent = agent
+		cfg.Agents = agents
 	}
 
 	if cfg.Project == "" {
@@ -191,14 +201,15 @@ func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConf
 		clearPostgresFields(&cfg)
 	}
 
-	// Ambient-режим через хуки харнесса (задача 7.2) — спрашиваем только у
-	// харнессов, которые их умеют (agentTarget.hooksLabel: Claude Code и dsh —
-	// второй через мост dsh-hooks-claude-code); у opencode хуков нет, его
-	// scaffold сам честно сообщит об этом в выводе.
-	if target, ok := agentRegistry[cfg.Agent]; ok && target.hooksLabel != "" && cfg.Hooks == "" {
+	// Ambient-режим через хуки харнесса (задача 7.2) — спрашиваем, только если
+	// среди выбранных есть харнесс, который их умеет (agentTarget.hooksLabel:
+	// Claude Code и dsh — второй через мост dsh-hooks-claude-code); у opencode
+	// хуков нет, его scaffold сам честно сообщит об этом в выводе. Выбор один
+	// на всех выбранных харнессов с хуками.
+	if labels := hooksLabels(cfg.Agents); len(labels) > 0 && cfg.Hooks == "" {
 		hooks := hooksSessionStart
 		if err := huh.NewSelect[string]().
-			Title(fmt.Sprintf("Подключить автоматический recall через %s (ambient-режим)", target.hooksLabel)).
+			Title(fmt.Sprintf("Подключить автоматический recall через %s (ambient-режим)", strings.Join(labels, " и "))).
 			Options(
 				huh.NewOption(hooksSessionStart, hooksSessionStart),
 				huh.NewOption(hooksBoth, hooksBoth),
@@ -222,6 +233,18 @@ func agentSelectOptions() []huh.Option[string] {
 		opts = append(opts, huh.NewOption(fmt.Sprintf("%s (%s)", agentRegistry[k].label, k), k))
 	}
 	return opts
+}
+
+// hooksLabels возвращает hooksLabel выбранных приложений, которые умеют хуки,
+// в порядке выбора; неизвестные ключи пропускаются (их отклонит doInit).
+func hooksLabels(agents []string) []string {
+	var labels []string
+	for _, key := range agents {
+		if target, ok := agentRegistry[key]; ok && target.hooksLabel != "" {
+			labels = append(labels, target.hooksLabel)
+		}
+	}
+	return labels
 }
 
 // providerSelectOptions строит варианты select-промпта провайдера (эмбеддинга
