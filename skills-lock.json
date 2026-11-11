@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "skills": {
+    "adapt": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "c619a3241e5a43ed055bd3d95a57512f0d9a66a02202127ba4070a04e6995294"
+    },
+    "architectural-boundaries": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "b84451d3f5068892ba951e803c5331807e93aab8977d42855cd9105f1eb4f1d5"
+    },
+    "clean-architecture": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "c2ba99fafdf36b1716adc67fb3d16c0d1ce8ee1513964ad49f6262c93323da09"
+    },
+    "code-organization": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "f15a9783a85d69b9b49bdb3229da2e479fafa6f1ea408905896f812c254141e2"
+    },
+    "component-structure": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "8a95e77adeaf3269e12ca7e03b1e5c97d3c22036436b07eadbaaf9e700953f8a"
+    },
+    "details-and-deferral": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "55a99c3c57147dcbd9ea0ee2920c71d260a9dc09df224d54546b2dc418346cb9"
+    },
+    "dev": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "f1043cdd00cc043346c67050c2a879290b9b99cee4e6139de1ef5bdda57f2ba1"
+    },
+    "i-have-adhd": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "4a321882cd5cb4cf002cf5ad678c14cd0bbb383ab47c6ca166e6ddd5328de80f"
+    },
+    "orchestrate": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "01e67e8002b079625cc6410fe1fecbe19524729e3f123d6c043d0f5c64774f32"
+    },
+    "session-worker": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "1b4374d487ce589a0cb5d176bc57d52ff8aceba107b7157e0f14a61c818398b2"
+    },
+    "solid-design": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "69bbcf306abf6b4ee7ccb4f9d15feb67a079b8a23427b629cd8dfd2d52aed35d"
+    },
+    "testable-architecture": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "2a5f9e709fb8a64b9e82b49e6dbd31def69d29626a5004a33a4189a9dbd1f095"
+    },
+    "use-cases-and-entities": {
+      "source": "../Skills/skills",
+      "sourceType": "local",
+      "computedHash": "b5aa4b80d2c2566214f5d21aa3729e79943e5e0cb4779cd862de87c1ee171d19"
+    }
+  }
+}
