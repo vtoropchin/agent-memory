@@ -947,20 +947,30 @@ func TestInstallDshPatch_KeepsUnpairedMarker(t *testing.T) {
 
 // TestReplaceDshBlock проверяет замену блока оверлея в слое профиля: блок
 // другого проекта не трогается, незакрытый маркер — ошибка без замены (иначе
-// init мог бы «доесть» строки пользователя до конца файла).
+// init мог бы «доесть» строки пользователя до конца файла), а блок, шаблон
+// которого не распознан, не меняется вовсе.
 func TestReplaceDshBlock(t *testing.T) {
-	block := dshBlockStart("/p") + "\n- insert: []\n" + dshBlockEnd("/p") + "\n"
-	other := dshBlockStart("/other") + "\n- insert: [x]\n" + dshBlockEnd("/other") + "\n"
+	block := renderDshBlock("/opt/memo", "/p", initConfig{}, false)
+	oldBlock := renderDshBlock("/opt/memo-old", "/p", initConfig{}, false)
+	other := renderDshBlock("/opt/memo", "/other", initConfig{}, false)
 
-	got, found, err := replaceDshBlock(other+dshBlockStart("/p")+"\nold\n"+dshBlockEnd("/p")+"\n", "/p", block)
+	got, found, preserved, err := replaceDshBlock(other+oldBlock, "/p", block)
 	if err != nil || !found || got != other+block {
 		t.Errorf("замена: found=%v err=%v\n%s", found, err, got)
 	}
-	if _, found, err := replaceDshBlock(other, "/p", block); err != nil || found {
+	if len(preserved) != 0 {
+		t.Errorf("в корректном блоке нашлись чужие строки: %q", preserved)
+	}
+	if _, found, _, err := replaceDshBlock(other, "/p", block); err != nil || found {
 		t.Errorf("слой без блока проекта: found=%v err=%v", found, err)
 	}
-	if _, _, err := replaceDshBlock(dshBlockStart("/p")+"\n- id: user\n", "/p", block); err == nil {
+	if _, _, _, err := replaceDshBlock(dshBlockStart("/p")+"\n- id: user\n", "/p", block); err == nil {
 		t.Errorf("незакрытый маркер не дал ошибки")
+	}
+	// Блок чужой формы (не шаблон memo) не принадлежит init: файл не меняется.
+	alien := dshBlockStart("/p") + "\n- id: user\n" + dshBlockEnd("/p") + "\n"
+	if _, _, _, err := replaceDshBlock(alien, "/p", block); err == nil {
+		t.Errorf("блок с нераспознанным шаблоном заменён без ошибки")
 	}
 }
 

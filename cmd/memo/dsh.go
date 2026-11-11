@@ -292,7 +292,7 @@ func syncDshProfileCopies(dir, block string, out io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("чтение %q: %w", path, err)
 		}
-		updated, found, err := replaceDshBlock(string(raw), dir, block)
+		updated, found, preserved, err := replaceDshBlock(string(raw), dir, block)
 		if err != nil {
 			fmt.Fprintf(out, "warning: %s: %v — блок не обновлён\n", path, err)
 			continue
@@ -307,6 +307,7 @@ func syncDshProfileCopies(dir, block string, out io.Writer) error {
 		if err := os.WriteFile(path, []byte(updated), info.Mode().Perm()); err != nil {
 			return fmt.Errorf("запись %q: %w", path, err)
 		}
+		dshWarnPreserved(out, path, preserved)
 		fmt.Fprintf(out, "обновлён блок memo в %s\n", path)
 	}
 	return nil
@@ -314,26 +315,31 @@ func syncDshProfileCopies(dir, block string, out io.Writer) error {
 
 // replaceDshBlock заменяет в тексте patch-слоя блок проекта dir (строки от
 // dshBlockStart до dshBlockEnd включительно) на block. found — был ли блок;
-// маркер начала без маркера конца — ошибка (замена «до конца файла» съела бы
-// строки пользователя).
-func replaceDshBlock(text, dir, block string) (updated string, found bool, err error) {
-	lines := strings.SplitAfter(text, "\n")
-	start := -1
-	for i, line := range lines {
-		switch strings.TrimRight(line, "\r\n") {
-		case dshBlockStart(dir):
-			start = i
-		case dshBlockEnd(dir):
-			if start < 0 {
-				continue
-			}
-			return strings.Join(lines[:start], "") + block + strings.Join(lines[i+1:], ""), true, nil
+// preserved — строки внутри блока, которых memo не писала: они сохраняются
+// (после нового блока), а вызывающий предупреждает о них, чтобы сторонняя
+// операция, дописанная в блок, не пропала молча. Маркер начала без маркера
+// конца и нераспознанный шаблон блока — ошибка без замены: «замена до конца
+// файла» съела бы строки пользователя, а блок чужой формы memo не принадлежит.
+func replaceDshBlock(text, dir, block string) (updated string, found bool, preserved []string, err error) {
+	spans, err := dshOverlaySpans(text)
+	if err != nil {
+		return "", false, nil, err
+	}
+	absDir := dshAbsDir(dir)
+	for _, span := range spans {
+		if span.dir != absDir {
+			continue
 		}
+		var b strings.Builder
+		b.WriteString(text[:span.from])
+		b.WriteString(block)
+		for _, line := range span.foreign {
+			b.WriteString(line)
+		}
+		b.WriteString(text[span.to:])
+		return b.String(), true, span.foreign, nil
 	}
-	if start >= 0 {
-		return "", false, fmt.Errorf("маркер %q без парного %q", dshBlockStart(dir), dshBlockEnd(dir))
-	}
-	return text, false, nil
+	return text, false, nil, nil
 }
 
 // dshHookCommand собирает команду хука для конфига dsh: тот же `memo hook`, но
@@ -439,6 +445,12 @@ func dshPatchLayerPath(home string) string { return filepath.Join(home, "cordis.
 //
 // Слой с непарным маркером не трогается (как и в syncDshProfileCopies): это
 // чужая правка, и «замена до конца файла» съела бы строки пользователя.
+//
+// memo владеет только своим блоком: строки внутри блока, которых memo не
+// писала (сторонняя операция, дописанная перед закрывающим маркером), не
+// удаляются — они остаются на месте, а init печатает предупреждение. Блок, чей
+// шаблон не распознан (вставлен не memo или в другой форме), не трогается
+// вовсе: файл не меняется, печатается предупреждение.
 func installDshPatch(dir, block string, out io.Writer) (bool, error) {
 	home, err := dshHome()
 	if err != nil {
@@ -470,9 +482,17 @@ func installDshPatch(dir, block string, out io.Writer) (bool, error) {
 	absDir := dshAbsDir(dir)
 	var rest strings.Builder
 	var replaced []string
+	var preserved []string
 	last := 0
 	for _, span := range spans {
 		rest.WriteString(text[last:span.from])
+		// Строки вне шаблона остаются на своём месте: маркеры — комментарии
+		// YAML, поэтому снятие блока не меняет их смысла, а перенос в конец
+		// файла переставил бы операции слоя.
+		for _, line := range span.foreign {
+			rest.WriteString(line)
+			preserved = append(preserved, line)
+		}
 		last = span.to
 		if span.dir != absDir {
 			replaced = append(replaced, span.dir)
@@ -500,6 +520,7 @@ func installDshPatch(dir, block string, out io.Writer) (bool, error) {
 		return false, fmt.Errorf("запись %q: %w", path, err)
 	}
 
+	dshWarnPreserved(out, path, preserved)
 	if len(replaced) == 0 {
 		fmt.Fprintf(out, "  блок memo подключён: %s\n", path)
 	} else {
@@ -513,33 +534,47 @@ func installDshPatch(dir, block string, out io.Writer) (bool, error) {
 }
 
 // dshOverlaySpan — границы вставленного блока оверлея в тексте patch-слоя:
-// from — смещение строки-маркера начала, to — сразу за строкой-маркером конца.
+// from — смещение строки-маркера начала, to — сразу за строкой-маркером конца;
+// foreign — строки между маркерами, не принадлежащие шаблону блока memo.
 type dshOverlaySpan struct {
-	dir  string
-	from int
-	to   int
+	dir     string
+	from    int
+	to      int
+	foreign []string
 }
+
+// dshBlockGeneratedPrefix — начало строки-комментария, которую memo пишет
+// первой в блоке. По нему (и по строке "- insert:" в нулевой колонке) блок
+// отличается от чужого: слой с блоком другой формы не трогается.
+const dshBlockGeneratedPrefix = "# сгенерировано memo init"
 
 // dshOverlaySpans находит в тексте patch-слоя все блоки оверлея — в том числе
 // вставленные для других проектов: при подключении своего блока их нужно
-// снять, иначе они перекроют друг друга по id. Непарный маркер — ошибка:
-// подставлять чужой блок «до конца файла» нельзя.
+// снять, иначе они перекроют друг друга по id. У каждого блока отделяются
+// строки вне шаблона (foreign): их владелец — не memo, и удалять их нельзя.
+// Непарный маркер и нераспознанный шаблон блока — ошибка: подставлять чужой
+// блок «до конца файла» нельзя, а блок чужой формы memo не принадлежит.
 func dshOverlaySpans(text string) ([]dshOverlaySpan, error) {
 	var spans []dshOverlaySpan
+	lines := strings.SplitAfter(text, "\n")
 	offset := 0
-	openAt := -1
+	openAt, openLine := -1, -1
 	openDir := ""
-	for _, line := range strings.SplitAfter(text, "\n") {
+	for i, line := range lines {
 		trimmed := strings.TrimRight(line, "\r\n")
 		if dir, ok := strings.CutPrefix(trimmed, dshMarkerStartPrefix); ok && strings.TrimSpace(dir) != "" {
 			if openAt >= 0 {
 				return nil, fmt.Errorf("маркер %q без парного %q", dshBlockStart(openDir), dshBlockEnd(openDir))
 			}
-			openAt, openDir = offset, strings.TrimSpace(dir)
+			openAt, openLine, openDir = offset, i, strings.TrimSpace(dir)
 		} else if dir, ok := strings.CutPrefix(trimmed, dshMarkerEndPrefix); ok && strings.TrimSpace(dir) != "" {
 			if openAt >= 0 {
-				spans = append(spans, dshOverlaySpan{dir: openDir, from: openAt, to: offset + len(line)})
-				openAt, openDir = -1, ""
+				foreign, ok := dshSplitBlockContent(lines[openLine+1 : i])
+				if !ok {
+					return nil, fmt.Errorf("блок %q: шаблон блока memo не распознан", dshBlockStart(openDir))
+				}
+				spans = append(spans, dshOverlaySpan{dir: openDir, from: openAt, to: offset + len(line), foreign: foreign})
+				openAt, openLine, openDir = -1, -1, ""
 			}
 		}
 		offset += len(line)
@@ -548,4 +583,55 @@ func dshOverlaySpans(text string) ([]dshOverlaySpan, error) {
 		return nil, fmt.Errorf("маркер %q без парного %q", dshBlockStart(openDir), dshBlockEnd(openDir))
 	}
 	return spans, nil
+}
+
+// dshSplitBlockContent разбирает строки между маркерами блока: шаблон блока —
+// комментарий dshBlockGeneratedPrefix, затем "- insert:" в нулевой колонке,
+// затем строки с отступом (поля записи, env-плейсхолдеры, строка моста хуков).
+// Первая непустая строка в нулевой колонке после шаблона — чужое для memo
+// содержимое: она и всё после неё возвращаются как foreign, чтобы вызывающий
+// сохранил их и предупредил. ok=false — шаблон не распознан, файл трогать
+// нельзя.
+func dshSplitBlockContent(lines []string) (foreign []string, ok bool) {
+	i := 0
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	if i == len(lines) || !strings.HasPrefix(strings.TrimRight(lines[i], "\r\n"), dshBlockGeneratedPrefix) {
+		return nil, false
+	}
+	i++
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	if i == len(lines) || strings.TrimRight(lines[i], "\r\n") != "- insert:" {
+		return nil, false
+	}
+	i++
+	for i < len(lines) {
+		line := strings.TrimRight(lines[i], "\r\n")
+		if line != "" && line[0] != ' ' && line[0] != '\t' {
+			break
+		}
+		i++
+	}
+	return lines[i:], true
+}
+
+// dshWarnPreserved печатает предупреждение о строках внутри блока memo, которых
+// memo не писала: init сохраняет их как есть, но не обновляет. Молча удалять их
+// нельзя — в блоке могла оказаться сторонняя операция patch-слоя.
+func dshWarnPreserved(out io.Writer, path string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	first := ""
+	for _, line := range lines {
+		if s := strings.TrimSpace(line); s != "" {
+			first = s
+			break
+		}
+	}
+	fmt.Fprintf(out, "warning: %s: внутри блока memo есть строки вне шаблона (%d) — сохранены как есть (первая: %q)\n",
+		path, len(lines), first)
 }
