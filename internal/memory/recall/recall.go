@@ -503,7 +503,11 @@ func estimateTokens(s string) int {
 // счётчиком, чтобы строка не разрасталась. Для задачи Summary — её
 // заголовок и он обязателен (write.ErrTaskSummaryRequired), поэтому
 // многокилобайтный content задачи в бриф не просачивается; полный текст агент
-// забирает по id (memory_get).
+// забирает по id (memory_get). Поэтому каждая строка (любого kind) кончается
+// хвостом «· id `<ULID>`»: без него бриф — тупик, найденную запись нельзя ни
+// прочитать (memory_get), ни изменить (memory_update), ни закрыть
+// (memory_forget), ни сослаться на неё (links) — все эти инструменты адресуют
+// запись только по id.
 func formatLine(m memory.Memory, blockers []string) string {
 	text := m.Content
 	if m.Summary != nil && strings.TrimSpace(*m.Summary) != "" {
@@ -534,9 +538,10 @@ func formatLine(m memory.Memory, blockers []string) string {
 		if m.Branch != "" {
 			fmt.Fprintf(&b, " · ветка %s", m.Branch)
 		}
+		fmt.Fprintf(&b, " · id `%s`", m.Id)
 		return b.String()
 	}
-	return fmt.Sprintf("- %s [★%d]", text, m.Importance)
+	return fmt.Sprintf("- %s [★%d] · id `%s`", text, m.Importance, m.Id)
 }
 
 // maxBlockersInLine — сколько блокеров называть по имени в строке брифа;
@@ -667,10 +672,8 @@ func composeBody(included []briefItem, collapsed int) string {
 // числа токенов по ЭТОМУ ЖЕ фактическому тексту, а не по сумме частей порознь —
 // именно так этот текст выйдет пользователю. Заголовок самореферентен (сам
 // сообщает число токенов всего брифа), поэтому оценка считается в два прохода:
-// сперва по черновику с заголовком-плейсхолдером (число токенов в самом заголовке
-// не разъезжается больше чем на пару цифр между черновиком и финалом — при эвристике
-// runes/4 это меняет итог не более чем на доли токена), затем в заголовок
-// подставляется посчитанное число. Используется и для измерения стоимости в
+// сперва по черновику с заголовком-плейсхолдером, затем в заголовок подставляется
+// посчитанное число и оценка уточняется до неподвижной точки (см. тело). Используется и для измерения стоимости в
 // selectByBudget, и для финальной сборки в buildBrief — единая точка правды.
 // explain=true добавляет заголовку пометку "(explain)" (задача 8.1) — сами строки
 // записей к этому моменту уже несут explain-довесок (см. selectByBudget), здесь
@@ -682,17 +685,28 @@ func composeMarkdown(included []briefItem, collapsed int, explain bool) (string,
 		suffix = " (explain)"
 	}
 
-	draftHeader := fmt.Sprintf("## Релевантная память (%d записей, ~%d токенов)%s", len(included), 0, suffix)
-	draft := draftHeader
-	if body != "" {
-		draft = draftHeader + "\n\n" + body
+	render := func(tokens int) string {
+		header := fmt.Sprintf("## Релевантная память (%d записей, ~%d токенов)%s", len(included), tokens, suffix)
+		if body == "" {
+			return header
+		}
+		return header + "\n\n" + body
 	}
-	approxTokens := estimateTokens(draft)
 
-	header := fmt.Sprintf("## Релевантная память (%d записей, ~%d токенов)%s", len(included), approxTokens, suffix)
-	md := header
-	if body != "" {
-		md = header + "\n\n" + body
+	// Подставленное число само меняет длину заголовка на пару символов и при
+	// целочисленном делении может перешагнуть границу токена — поэтому оценка
+	// досчитывается до неподвижной точки. Сходится за 1–2 шага: длина числа
+	// растёт на цифру лишь при десятикратном росте оценки; потолок итераций —
+	// страховка от зацикливания на границе разрядов.
+	approxTokens := estimateTokens(render(0))
+	md := render(approxTokens)
+	for i := 0; i < 4; i++ {
+		next := estimateTokens(md)
+		if next == approxTokens {
+			break
+		}
+		approxTokens = next
+		md = render(approxTokens)
 	}
 	return md, approxTokens
 }

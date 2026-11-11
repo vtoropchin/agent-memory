@@ -148,8 +148,9 @@ func TestRecall_TaskLineShowsTypeAndBranch(t *testing.T) {
 		Content: "Полный текст эпика про доску задач", Summary: strPtr("Kanban-доска"),
 		Importance: 4, CreatedAt: 1, UpdatedAt: 1,
 	})
+	taskID := newID(t)
 	putMemory(t, ctx, s, memory.Memory{
-		Id: newID(t), Kind: memory.KindTask, Scope: scope, Status: memory.StatusTodo,
+		Id: taskID, Kind: memory.KindTask, Scope: scope, Status: memory.StatusTodo,
 		Type:    memory.TaskTypeTask,
 		Content: "Полный текст обычной задачи про доску", Summary: strPtr("Колонка done"),
 		Importance: 3, CreatedAt: 2, UpdatedAt: 2,
@@ -168,7 +169,7 @@ func TestRecall_TaskLineShowsTypeAndBranch(t *testing.T) {
 	// Обычная задача (тип task — дефолт) без ветки печатается как раньше: ни
 	// "(task)", ни хвоста с веткой (проверка по строке целиком, а не по
 	// вхождению — заголовок секции "### Tasks (task)" содержит те же скобки).
-	if !strings.Contains("\n"+brief.Markdown+"\n", "\n- [todo] Колонка done [★3]\n") {
+	if !strings.Contains("\n"+brief.Markdown+"\n", "\n- [todo] Колонка done [★3] · id `"+taskID+"`\n") {
 		t.Errorf("обычная задача без ветки печатается как раньше, got:\n%s", brief.Markdown)
 	}
 }

@@ -25,7 +25,7 @@ func buildInstructions(scope config.ScopeConfig) string {
 	b.WriteString("- links (в memory_save и memory_update) — связь либо строка-id (rel=related), либо объект {\"id\":..,\"rel\":..} с типом: related|supersedes|causes|part_of|blocked_by; links в memory_update ДОБАВЛЯЕТ связи, не заменяет их; снять связь — unlinks (те же пары id+rel) в memory_update.\n")
 	b.WriteString("- memory_update — правка существующего факта (содержание, важность, теги, links/unlinks).\n")
 	b.WriteString("- memory_forget — мягкое удаление (тумстоун): запись перестаёт участвовать в recall, история сохраняется.\n")
-	b.WriteString("- memory_get — прочитать запись целиком по id (полный content); memory_recall показывает только краткую форму.\n")
+	b.WriteString("- memory_get — прочитать запись целиком по id (полный content); memory_recall показывает только краткую форму, а id записи — хвостом строки брифа (· id `…`): его же передавай в memory_get/memory_update/memory_forget и links.\n")
 	b.WriteString("- kind=debt — техдолг: известная проблема, отложенная осознанно; в отличие от episodic сам не затухает — закрывай явно через memory_forget(id, replaced_by=<id записи о фиксе>).\n")
 	b.WriteString("- kind=task — задача агента вместо файла TODO: content — полный текст задачи (что сделать, границы, критерий приёмки), summary ОБЯЗАТЕЛЕН и служит заголовком в брифе, importance — приоритет.\n")
 	b.WriteString("- status задачи — стадия kanban-доски: backlog — сырая идея | todo — готова к работе (по умолчанию) | doing — в работе | review — ревью кода (PR открыт) | testing — проверка/тестирование | release — влито, ждёт релиза | done — в релизе. Переходы назад допустимы; стадии blocked нет — блокировка это связь (см. ниже).\n")
