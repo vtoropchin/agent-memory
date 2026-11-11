@@ -1340,3 +1340,28 @@ func TestCandidates_MatchesRecallOrderAndSet(t *testing.T) {
 		}
 	}
 }
+
+// TestRecall_LineCarriesID: строка брифа любого kind кончается id записи —
+// без него найденное нельзя прочитать (memory_get), изменить или закрыть.
+func TestRecall_LineCarriesID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	scope := "project:line-id"
+
+	id := newID(t)
+	putMemory(t, ctx, s, memory.Memory{
+		Id: id, Kind: memory.KindSemantic, Scope: scope,
+		Content: "Сборка через make build", Importance: 4, CreatedAt: 1, UpdatedAt: 1,
+	})
+
+	r := New(s, config.RecallConfig{DefaultTokenBudget: 800, Weights: defaultWeights()}, reason.NewNoop(), embed.NewNoop(),
+		WithNow(func() int64 { return 1000 }))
+	brief, err := r.Recall(ctx, memory.Query{Text: "сборка", Scope: scope})
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	want := "\n- Сборка через make build [★4] · id `" + id + "`\n"
+	if !strings.Contains("\n"+brief.Markdown+"\n", want) {
+		t.Errorf("ожидал строку %q:\n%s", want, brief.Markdown)
+	}
+}
