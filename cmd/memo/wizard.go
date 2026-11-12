@@ -154,6 +154,19 @@ func promptInitTUI(ctx context.Context, out io.Writer, cfg initConfig) (initConf
 		if err := promptReasonerModel(ctx, out, &cfg, cfg.ReasonerBaseURL, cfg.CLIProxyKey, "", "CLIProxyAPI"); err != nil {
 			return cfg, err
 		}
+	case "ollama":
+		if cfg.ReasonerBaseURL == "" {
+			url := defaultOllamaBaseURL
+			if err := huh.NewInput().
+				Title("base URL Ollama для чат-модели (Enter — " + defaultOllamaBaseURL + ")").
+				Value(&url).Run(); err != nil {
+				return cfg, err
+			}
+			cfg.ReasonerBaseURL = cmp.Or(strings.TrimSpace(url), defaultOllamaBaseURL)
+		}
+		if err := promptReasonerModel(ctx, out, &cfg, cfg.ReasonerBaseURL, "", "", "Ollama"); err != nil {
+			return cfg, err
+		}
 	}
 
 	// Петля вокруг выбора бэкенда хранилища + его настройки — по образцу петли
@@ -553,27 +566,27 @@ func promptOpenAIEmbedder(ctx context.Context, out io.Writer, cfg *initConfig) e
 	return nil
 }
 
-// promptReasonerModel спрашивает модель OpenAI-совместимого reasoner'а
-// (DeepSeek, CLIProxyAPI) — по образцу promptOpenAIEmbedder, но отвечает ТОЛЬКО
-// за выбор модели: ключ и base URL уже взяты в promptInitTUI. Логика выбора: если
-// модель уже задана (флагом) — не переспрашивает; если ключ не введён (пропущен)
-// — сеть не дёргаем, сразу ручной ввод с дефолтом def; иначе запрашивает список
-// через fetchChatModels (таймаут fetchModelsTimeout) — ошибка запроса или пустой
-// список тоже откатываются на ручной ввод с тем же дефолтом, успех — select из
-// полученных моделей (первая преселекчена). Пустой def (у CLIProxyAPI модели
-// зависят от подключённых аккаунтов) делает ручной ввод обязательным.
+// promptReasonerModel предлагает список моделей сервера или ручной ввод.
+// Для Ollama выбирают чат-модель из списка установленных моделей.
 func promptReasonerModel(ctx context.Context, out io.Writer, cfg *initConfig, baseURL, key, def, label string) error {
 	if cfg.ReasonerModel != "" {
 		return nil
 	}
-	title := "модель reasoner (" + label + ")"
-	if key == "" {
+	title := "чат-модель reasoner (" + label + ")"
+	ollama := cfg.ReasonerProvider == "ollama"
+	if !ollama && key == "" {
 		fmt.Fprintln(out, "ключ не введён — список моделей запросить нечем, введи имя модели вручную")
 		return promptModelManual(&cfg.ReasonerModel, def, title)
 	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, fetchModelsTimeout)
-	models, err := fetchChatModels(fetchCtx, baseURL, key)
+	var models []string
+	var err error
+	if ollama {
+		models, err = fetchOllamaModels(fetchCtx, baseURL)
+	} else {
+		models, err = fetchChatModels(fetchCtx, baseURL, key)
+	}
 	cancel()
 	if err != nil {
 		fmt.Fprintf(out, "не удалось получить список моделей %s (%v) — введи имя модели вручную\n", label, err)

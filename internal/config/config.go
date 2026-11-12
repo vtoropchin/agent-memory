@@ -93,8 +93,8 @@ type EmbedderConfig struct {
 
 // ReasonerConfig — настройки Reasoner. Ключ провайдера читается из env, не отсюда.
 type ReasonerConfig struct {
-	Provider string `toml:"provider"` // noop | deepseek | cliproxy
-	// BaseURL — корень OpenAI-совместимого API; пусто — дефолт провайдера
+	Provider string `toml:"provider"` // noop | deepseek | cliproxy | ollama
+	// BaseURL — корень API; пусто — дефолт провайдера
 	// (выбирает cmd/memo, по образцу EmbedderConfig.BaseURL).
 	BaseURL string `toml:"base_url"`
 	Model   string `toml:"model"`

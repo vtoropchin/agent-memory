@@ -262,13 +262,9 @@ func openStore(cfg config.StoreConfig) (store.Store, error) {
 }
 
 // newReasoner создаёт Reasoner по конфигу. "" и "noop" отключают LLM-слой.
-// Остальные провайдеры (deepseek, cliproxy) — OpenAI-совместимый chat с
-// провайдер-специфичными env-ключом, base URL и моделью из реестра
-// reasonerProviders (init.go); reasoner.base_url/model в конфиге перекрывают дефолт. Без ключа в env или
-// с пустой model — деградация до Noop (сервер должен стартовать — DESIGN.md §15):
-// оба случая означают «LLM-слой не готов», а не ошибку конфигурации.
-// Неизвестный provider — ошибка при старте, это опечатка в конфиге, а не
-// runtime-деградация.
+// Ollama использует свой API, DeepSeek и CLIProxyAPI — OpenAI-совместимый.
+// Отсутствие обязательного ключа или модели переводит reasoner в Noop.
+// Неизвестный провайдер считается ошибкой конфигурации.
 func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 	if cfg.Provider == "" || cfg.Provider == "noop" {
 		return reason.NewNoop(), nil
@@ -278,7 +274,7 @@ func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 		return nil, fmt.Errorf("неизвестный reasoner.provider %q", cfg.Provider)
 	}
 	key := os.Getenv(p.envKey)
-	if key == "" {
+	if p.envKey != "" && key == "" {
 		log.Printf("memo: reasoner.provider=%s, но %s пуст — суммаризация отключена", p.key, p.envKey)
 		return reason.NewNoop(), nil
 	}
@@ -286,6 +282,9 @@ func newReasoner(cfg config.ReasonerConfig) (reason.Reasoner, error) {
 	if model == "" {
 		log.Printf("memo: reasoner.provider=%s, но reasoner.model пуст — суммаризация отключена", p.key)
 		return reason.NewNoop(), nil
+	}
+	if p.key == "ollama" {
+		return reason.NewOllama(reasonerBaseURL(cfg, p), model)
 	}
 	return reason.NewOpenAI(reasonerBaseURL(cfg, p), model, key)
 }

@@ -76,6 +76,8 @@ model    = "bge-m3"                        # любая ollama-модель; dim
 #            Codex по подписке). Ключ — один из api-keys его конфига — в env
 #            CLIPROXY_API_KEY (или .env), модель обязательна: список —
 #            GET <base_url>/models. base_url по умолчанию http://127.0.0.1:8317/v1.
+# ollama   — установленная чат-модель через /api/chat без API-ключа.
+#            base_url по умолчанию http://localhost:11434; model обязательна.
 # base_url — опционально у любого провайдера; пусто = дефолт провайдера.
 provider = "deepseek"
 model    = "deepseek-chat"
@@ -90,6 +92,12 @@ model    = "deepseek-chat"
 # provider = "cliproxy"
 # base_url = "http://127.0.0.1:8317/v1"
 # model    = "gemini-3-flash"
+#
+# Альтернатива — Ollama:
+# [reasoner]
+# provider = "ollama"
+# base_url = "http://localhost:11434"
+# model    = "qwen3.5:9b"
 
 [recall]
 default_token_budget = 800

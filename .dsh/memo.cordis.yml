@@ -17,8 +17,6 @@
         args:
           - '-config'
           - '/Users/vladimir/Programming/AgentMemory'
-        env:
-          DEEPSEEK_API_KEY: !!js process.env.DEEPSEEK_API_KEY ?? ''
     - id: memo-hooks
       name: '@deepseek-ai/dsh-hooks-claude-code'
       config:

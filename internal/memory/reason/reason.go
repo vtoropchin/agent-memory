@@ -4,7 +4,7 @@ package reason
 
 import "context"
 
-// Reasoner — текстовый процессор памяти поверх chat-модели (DeepSeek, CLIProxyAPI).
+// Reasoner — текстовый процессор памяти поверх чат-модели.
 type Reasoner interface {
 	Complete(ctx context.Context, prompt string) (string, error)
 }

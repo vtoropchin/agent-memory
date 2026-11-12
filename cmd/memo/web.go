@@ -186,7 +186,7 @@ type webInstance struct {
 	StoreTarget       string // путь к файлу или postgres://host:port/db — без пароля (config.StoreConfig.Target)
 	EmbedderProvider  string // noop | ollama | openai
 	EmbedderModel     string
-	ReasonerProvider  string // noop | deepseek | cliproxy
+	ReasonerProvider  string // noop | deepseek | cliproxy | ollama
 	ReasonerModel     string
 	ReasonerAvailable bool
 	SyncEnvDir        string // каталог локальной БД: .env с паролями общих баз синхронизации

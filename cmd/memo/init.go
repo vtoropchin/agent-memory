@@ -144,6 +144,7 @@ var embedderProviders = []providerSpec{
 var reasonerProviders = []providerSpec{
 	{key: "deepseek", label: "deepseek", envKey: deepseekAPIKeyEnv, baseURL: defaultDeepSeekBaseURL, defaultModel: defaultDeepSeekModel},
 	{key: "cliproxy", label: "cliproxy (локальный CLIProxyAPI: Gemini, Claude, Codex по подписке)", envKey: cliproxyAPIKeyEnv, baseURL: defaultCLIProxyBaseURL},
+	{key: "ollama", label: "ollama (локальная чат-модель)", baseURL: defaultOllamaBaseURL},
 	{key: "noop", label: "noop (без LLM)"},
 }
 
@@ -402,6 +403,12 @@ func renderReasonerTomlBlock(cfg initConfig) string {
 	switch cfg.ReasonerProvider {
 	case "noop":
 		return "# Без LLM-суммаризации/консолидации (DESIGN.md §15).\nprovider = \"noop\"\n"
+	case "ollama":
+		return fmt.Sprintf(`# Чат-модель Ollama для суммаризации и консолидации.
+provider = "ollama"
+base_url = "%s"
+model    = "%s"
+`, escapeTOMLString(cfg.ReasonerBaseURL), escapeTOMLString(cfg.ReasonerModel))
 	case "cliproxy":
 		return fmt.Sprintf(`# Локальный CLIProxyAPI (OpenAI-совместимый прокси к Gemini/Claude/Codex по
 # подписке). Ключ — один из api-keys его конфига — берётся из env CLIPROXY_API_KEY
@@ -595,9 +602,9 @@ type initConfig struct {
 	EmbedderProvider string   // ollama | openai | noop
 	EmbedderBaseURL  string   // ollama/openai: base URL; noop — не используется
 	EmbedderModel    string   // ollama/openai: модель эмбеддинга; noop — не используется
-	ReasonerProvider string   // deepseek | cliproxy | noop
-	ReasonerBaseURL  string   // cliproxy: base URL; deepseek — дефолт провайдера, в TOML не пишется; noop — не используется
-	ReasonerModel    string   // deepseek/cliproxy: модель reasoner; noop — не используется
+	ReasonerProvider string   // deepseek | cliproxy | ollama | noop
+	ReasonerBaseURL  string   // корень API; noop — не используется
+	ReasonerModel    string   // чат-модель reasoner; noop — не используется
 	StoreDriver      string   // "" (== sqlite) | sqlite | postgres
 	StorePath        string   // только если StoreDriver sqlite: путь к файлу БД
 	PostgresHost     string   // только если StoreDriver == "postgres"
@@ -937,8 +944,8 @@ func runInit(args []string, out io.Writer) error {
 	ollamaURL := fs.String("ollama-url", "", "алиас -embedder-url (для embedder-provider=ollama, дефолт "+defaultOllamaBaseURL+")")
 	ollamaModel := fs.String("ollama-model", "", "алиас -embedder-model (для embedder-provider=ollama, дефолт "+defaultOllamaModel+")")
 	reasonerProvider := fs.String("reasoner-provider", "", fmt.Sprintf("провайдер reasoner (%s); дефолт %s", strings.Join(reasonerProviderOptions, ", "), defaultReasonerProvider))
-	reasonerURL := fs.String("reasoner-url", "", "base URL reasoner (для reasoner-provider=cliproxy, дефолт "+defaultCLIProxyBaseURL+")")
-	reasonerModel := fs.String("reasoner-model", "", "модель reasoner (для deepseek дефолт "+defaultDeepSeekModel+"; для cliproxy обязательна без интерактивного ввода — список: GET <base URL>/models)")
+	reasonerURL := fs.String("reasoner-url", "", "base URL reasoner (cliproxy: "+defaultCLIProxyBaseURL+"; ollama: "+defaultOllamaBaseURL+")")
+	reasonerModel := fs.String("reasoner-model", "", "чат-модель reasoner (для deepseek дефолт "+defaultDeepSeekModel+"; для cliproxy и ollama обязательна без интерактивного ввода)")
 	storeDriver := fs.String("store-driver", "", fmt.Sprintf("бэкенд хранилища (%s); дефолт %s", strings.Join(storeDriverOptions, ", "), storeDriverSQLite))
 	storePath := fs.String("store", "", "путь к файлу SQLite — только при -store-driver="+storeDriverSQLite+" (дефолт "+defaultStorePath+")")
 	postgresHost := fs.String("postgres-host", "", "адрес сервера PostgreSQL (обязателен при -store-driver="+storeDriverPostgres+")")
@@ -1087,12 +1094,9 @@ func applyInitDefaults(cfg initConfig) initConfig {
 		if cfg.ReasonerModel == "" {
 			cfg.ReasonerModel = defaultDeepSeekModel
 		}
-	case "cliproxy":
-		// Дефолтной модели нет: набор зависит от аккаунтов, подключённых к
-		// прокси, — пустую модель отвергает doInit.
-		if cfg.ReasonerBaseURL == "" {
-			cfg.ReasonerBaseURL = defaultCLIProxyBaseURL
-		}
+	case "cliproxy", "ollama":
+		provider, _ := providerByKey(reasonerProviders, cfg.ReasonerProvider)
+		cfg.ReasonerBaseURL = cmp.Or(cfg.ReasonerBaseURL, provider.baseURL)
 	default: // "noop" — base_url/model reasoner'у не нужны
 		cfg.ReasonerBaseURL = ""
 		cfg.ReasonerModel = ""
@@ -1175,6 +1179,9 @@ func doInit(cfg initConfig, out io.Writer) error {
 	cfg = applyInitDefaults(cfg)
 	if cfg.ReasonerProvider == "cliproxy" && cfg.ReasonerModel == "" {
 		return fmt.Errorf("для reasoner-provider=cliproxy задай -reasoner-model — список моделей прокси: GET %s/models", cfg.ReasonerBaseURL)
+	}
+	if cfg.ReasonerProvider == "ollama" && strings.TrimSpace(cfg.ReasonerModel) == "" {
+		return fmt.Errorf("для reasoner-provider=ollama задай -reasoner-model — установленные модели: GET %s/api/tags", strings.TrimRight(cfg.ReasonerBaseURL, "/"))
 	}
 
 	// Валидация хранилища — ПОСЛЕ applyInitDefaults, в отличие от провайдеров

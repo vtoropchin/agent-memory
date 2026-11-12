@@ -202,6 +202,20 @@ func TestReasonerSection_CLIProxy(t *testing.T) {
 	}
 }
 
+func TestReasonerSection_Ollama(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" || r.Header.Get("Authorization") != "" {
+			t.Errorf("expected native Ollama chat without authorization, got %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"message":{"content":"ок"},"done":true}`))
+	}))
+	defer srv.Close()
+	cfg := config.ReasonerConfig{Provider: "ollama", BaseURL: srv.URL, Model: "qwen3.5:9b"}
+	if sec := reasonerSection(context.Background(), cfg, true); sec.Status != statusOK {
+		t.Errorf("Status = %s, хочу ok; detail=%q", sec.Status, sec.Detail)
+	}
+}
+
 func TestBuildDoctorReport_OllamaDownIsBroken(t *testing.T) {
 	dbPath, st := newDoctorTestStore(t)
 	putDoctorMemory(t, st, nil)

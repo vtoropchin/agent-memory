@@ -219,9 +219,9 @@ Bootstrap закрывает этот разрыв: запусти его **од
 | `-ollama-url` | base URL ollama (дефолт `http://localhost:11434`) |
 | `-ollama-model` | модель эмбеддингов ollama (дефолт `bge-m3`) |
 | `-store` | путь к файлу SQLite (дефолт `~/.agentmemory/memory.db`) |
-| `-reasoner-provider` | `deepseek` (дефолт), `cliproxy` или `noop` |
-| `-reasoner-url` | base URL reasoner'а (для `cliproxy`, дефолт `http://127.0.0.1:8317/v1`) |
-| `-reasoner-model` | модель reasoner'а (для `deepseek` дефолт `deepseek-chat`; для `cliproxy` обязательна под `-no-input`) |
+| `-reasoner-provider` | `deepseek` (дефолт), `cliproxy`, `ollama` или `noop` |
+| `-reasoner-url` | корень API reasoner (Ollama: `http://localhost:11434`, CLIProxyAPI: `http://127.0.0.1:8317/v1`) |
+| `-reasoner-model` | чат-модель (для `deepseek` дефолт `deepseek-chat`; для `cliproxy` и `ollama` обязательна под `-no-input`) |
 | `-deepseek-key` | ключ DeepSeek — пишется в `<dir>/.env` (попадёт в историю shell, если задан флагом) |
 | `-cliproxy-key` | ключ CLIProxyAPI — пишется в `<dir>/.env` как `CLIPROXY_API_KEY` |
 | `-no-input` | не спрашивать интерактивно — только флаги и дефолты |
@@ -462,7 +462,7 @@ MVP: только SQLite+FTS5, без вектора и без LLM).
   пароль PostgreSQL — **не в этом файле**, а в `MEMO_POSTGRES_PASSWORD`.
 - `[embedder]` — `noop | ollama | openai`; при `ollama` `dim` определяется автоматически
   пробным эмбеддингом при старте, руками не задаётся.
-- `[reasoner]` — `noop | deepseek | cliproxy`, `model`, опционально `base_url`; ключ **не в этом файле**.
+- `[reasoner]` — `noop | deepseek | cliproxy | ollama`, `model`, опционально `base_url`. Ключи DeepSeek и CLIProxyAPI задаются в окружении или `.env`.
 - `[recall]` — дефолтный токен-бюджет брифа и веса ранжирования (relevance/importance/recency/access).
 - `[maint]` — интервалы фоновых джобов (decay, consolidation).
 - `[scope]` — имя текущего проекта (мультипроектность через общий файл БД + scope) и
@@ -472,6 +472,24 @@ MVP: только SQLite+FTS5, без вектора и без LLM).
 `#`-комментарии и кавычки); shell-env приоритетнее `.env`, в TOML они не пишутся
 никогда. Это `DEEPSEEK_API_KEY`/`CLIPROXY_API_KEY` (Reasoner), `OPENAI_API_KEY` (embedder `openai`) и
 `MEMO_POSTGRES_PASSWORD` (хранилище `postgres`).
+
+### Локальный reasoner через Ollama
+
+Скачайте чат-модель, например `ollama pull qwen3.5:9b`, и выберите Ollama
+в `memo init` или задайте в существующем `agentmemory.toml`:
+
+```toml
+[reasoner]
+provider = "ollama"
+base_url = "http://localhost:11434"
+model = "qwen3.5:9b"
+```
+
+`memo` обращается напрямую к `/api/chat` без API-ключа и запрашивает ответ
+с `think: false`. Для проверки выполните `memo doctor -live`. Таймаут этой
+пробы для Ollama — 90 секунд, чтобы учесть очередь и загрузку модели. Сводка и
+консолидация могут ждать ответ до 120 секунд. Модель поиска задаётся отдельно в
+`[embedder]`.
 
 ### Reasoner через CLIProxyAPI
 

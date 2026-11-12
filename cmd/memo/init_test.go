@@ -1616,6 +1616,32 @@ func TestDoInit_CLIProxyWithoutModelIsError(t *testing.T) {
 	}
 }
 
+func TestRunInit_OllamaReasoner(t *testing.T) {
+	dir := t.TempDir()
+	args := []string{
+		"-no-input", "-project", "myproj", "-dir", dir,
+		"-embedder-provider", "noop", "-reasoner-provider", "ollama",
+	}
+	var out strings.Builder
+	if err := runInit(args, &out); err == nil || !strings.Contains(err.Error(), "-reasoner-model") {
+		t.Fatalf("runInit без модели = %v, хочу подсказку про -reasoner-model", err)
+	}
+	if err := runInit(append(args, "-reasoner-model", "qwen3.5:9b"), &out); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(filepath.Join(dir, "agentmemory.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.ReasonerConfig{Provider: "ollama", BaseURL: defaultOllamaBaseURL, Model: "qwen3.5:9b"}
+	if cfg.Reasoner != want {
+		t.Errorf("Reasoner = %+v, хочу %+v", cfg.Reasoner, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Errorf("ollama не требует .env, stat error = %v", err)
+	}
+}
+
 // TestRenderReasonerTomlBlock_CoversRegistry — у каждого провайдера реестра своя
 // ветка рендера (provider в TOML совпадает с ключом), а у каждого, кроме noop,
 // есть дефолтный base URL: иначе reason.NewOpenAI отказал бы и memo не стартовал.
@@ -2035,7 +2061,7 @@ func TestProviderRegistries_OptionsAndEnvKeysMatchExpected(t *testing.T) {
 	if strings.Join(embedderProviderOptions, ",") != strings.Join(wantEmbedderOptions, ",") {
 		t.Errorf("embedderProviderOptions = %v, хочу %v", embedderProviderOptions, wantEmbedderOptions)
 	}
-	wantReasonerOptions := []string{"deepseek", "cliproxy", "noop"}
+	wantReasonerOptions := []string{"deepseek", "cliproxy", "ollama", "noop"}
 	if strings.Join(reasonerProviderOptions, ",") != strings.Join(wantReasonerOptions, ",") {
 		t.Errorf("reasonerProviderOptions = %v, хочу %v", reasonerProviderOptions, wantReasonerOptions)
 	}
@@ -2058,6 +2084,7 @@ func TestProviderRegistries_OptionsAndEnvKeysMatchExpected(t *testing.T) {
 	wantReasonerEnvKeys := map[string]string{
 		"deepseek": deepseekAPIKeyEnv,
 		"cliproxy": cliproxyAPIKeyEnv,
+		"ollama":   "",
 		"noop":     "",
 	}
 	for key, wantEnv := range wantReasonerEnvKeys {

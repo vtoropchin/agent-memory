@@ -138,8 +138,8 @@
   `sqlite-vec`) и PostgreSQL (общая база команды: метаданные + `tsvector`/GIN + вектор
   pgvector/HNSW). Подробности различий — §4.
 - **Embedder** — опциональный семантический вектор (локальный ollama). Деградирует до FTS5.
-- **Reasoner** — OpenAI-совместимый chat (DeepSeek или локальный CLIProxyAPI) для
-  суммаризации выдачи и консолидации (LLM-операции).
+- **Reasoner** — чат-модель Ollama, DeepSeek или CLIProxyAPI для суммаризации
+  выдачи и консолидации.
 - **Sync** (Этап 19, §7.1) — фоновая двусторонняя синхронизация наборов проектов
   локальной SQLite с общими PostgreSQL-базами; работает рядом с Writer/Maint поверх своих
   портов, а не через `Store`.
@@ -512,7 +512,7 @@ INSERT INTO sync_meta VALUES (1, gen_random_uuid()::text);   -- идентичн
     store/              — интерфейс Store + реализации: SQLite (FTS5 + sqlite-vec, дефолт)
                           и PostgreSQL (tsvector/GIN + pgvector/HNSW, общая база команды)
     embed/              — интерфейс Embedder (noop | ollama | openai)
-    reason/             — интерфейс Reasoner + OpenAI-совместимый chat (DeepSeek, CLIProxyAPI)
+    reason/             — интерфейс Reasoner, адаптеры Ollama и OpenAI-совместимого API
     write/              — ingest: дедуп, классификация, связывание
     recall/             — гибридный поиск (RRF) + ранжирование + сборка брифа
     maint/              — джобы: decay, consolidation, reindex, dedup-sweep
@@ -948,19 +948,21 @@ Chat-модель в роли текстового процессора памя
 - консолидация кластеров `episodic` в обобщённые `semantic`;
 - дедуп-суждения в спорных случаях.
 
-Адаптер один — `reason.OpenAI` (`POST {base_url}/chat/completions`, Bearer-ключ);
-провайдеры различаются только base URL, env-ключом и моделью, которые выбирает
-composition root по реестру `reasonerProviders` (`cmd/memo/init.go`):
+Composition root выбирает адаптер и настройки по реестру `reasonerProviders`
+(`cmd/memo/init.go`). DeepSeek и CLIProxyAPI используют `reason.OpenAI`
+(`POST {base_url}/chat/completions`, Bearer-ключ). Ollama использует
+`reason.Ollama` (`POST {base_url}/api/chat`, `think: false`).
 
 | `provider` | Дефолтный `base_url` | Ключ (env) | Модель |
 |---|---|---|---|
 | `deepseek` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` | дефолт `deepseek-chat` |
 | `cliproxy` | `http://127.0.0.1:8317/v1` | `CLIPROXY_API_KEY` | обязательна: набор зависит от аккаунтов прокси (`GET {base_url}/models`) |
+| `ollama` | `http://localhost:11434` | — | обязательна: установленная чат-модель (`GET {base_url}/api/tags`) |
 
 `cliproxy` — локальный [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI):
 OpenAI-совместимый прокси к Gemini/Claude/Codex по подписке; ключ — один из `api-keys`
 его конфига. `reasoner.base_url` в TOML перекрывает дефолт провайдера. Без ключа или
-модели — деградация до Noop (§15). Для эмбеддингов reasoner **не используется**.
+модели — деградация до Noop (§15). Для Ollama ключ не требуется. Для эмбеддингов reasoner **не используется**.
 
 ---
 
@@ -1530,7 +1532,8 @@ MCP-серверу полностью унаследованное окруже�
 **`memo init` — выбор провайдеров (задача 11.1).** Интерактивный (TTY) прогон — select
 стрелками: embedder `ollama` (дефолт, база + реально установленные модели через
 `GET /api/tags`) / `openai` (токен → `GET /v1/models`, фильтр по `embedding` в id) / `noop`;
-reasoner `deepseek` (дефолт) / `cliproxy` (base URL → ключ → `GET {base_url}/models`) / `noop`. Для `ollama` визард диагностирует окружение и
+reasoner `deepseek` (дефолт) / `cliproxy` (base URL → ключ → `GET {base_url}/models`) /
+`ollama` (base URL → `GET /api/tags`, выбор чат-модели) / `noop`. Для эмбеддера Ollama визард диагностирует окружение и
 различает 4 состояния: happy (сервер отвечает, есть распознанная embedding-модель) → select
 только из embedding-моделей; no-models / not-running / not-installed → печатает причину,
 рекомендации моделей с обоснованием и ОС-специфичные инструкции установки/запуска, затем меню

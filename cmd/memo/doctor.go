@@ -23,7 +23,6 @@ import (
 
 	"agentmemory/internal/config"
 	"agentmemory/internal/memory/embed"
-	"agentmemory/internal/memory/reason"
 	"agentmemory/internal/memory/store"
 )
 
@@ -32,6 +31,9 @@ import (
 // команды (context.Background(), doctor не слушает сигналы — однократный
 // быстрый прогон) таймаута не имеет.
 const probeTimeout = 5 * time.Second
+
+// The local model may be cold or serving another request.
+const ollamaReasonerProbeTimeout = 90 * time.Second
 
 // status — состояние одной секции отчёта doctor.
 type status int
@@ -130,7 +132,7 @@ func runDoctor(args []string, out io.Writer) (exitCode int, err error) {
 	configPath := fs.String("config", "", "путь к TOML-конфигу или каталогу проекта с agentmemory.toml (опционально; если задан — обязан существовать)")
 	dbPath := fs.String("db", "", "путь к файлу SQLite, переопределяет store.path из конфига (опционально)")
 	jsonOut := fs.Bool("json", false, "печатать машиночитаемый JSON вместо человекочитаемого списка секций")
-	live := fs.Bool("live", false, "выполнить пробный запрос к Reasoner (DeepSeek/CLIProxyAPI) — у облачного провайдера стоит денег, по умолчанию выключено")
+	live := fs.Bool("live", false, "выполнить пробный запрос к настроенному Reasoner — у облачного провайдера стоит денег, по умолчанию выключено")
 	_ = fs.Parse(args) // flag.ExitOnError сам завершает процесс при ошибке разбора/-h
 
 	cfg, err := config.Load(*configPath)
@@ -601,8 +603,8 @@ func embedderLivenessSection(ctx context.Context, cfg config.EmbedderConfig) sec
 
 // reasonerSection — секция 6: ключ в env/.env найден? provider известен?
 // Живой запрос к LLM НЕ выполняется по умолчанию (у облачных провайдеров стоит
-// денег) — только под -live, минимальным пробным запросом с таймаутом
-// probeTimeout. Пустой ключ/модель — предупреждение (Reasoner=Noop — полноценно
+// денег) — только под -live, минимальным пробным запросом. Для Ollama таймаут
+// учитывает холодную загрузку модели. Пустой обязательный ключ или модель — предупреждение (Reasoner=Noop — полноценно
 // поддерживаемая деградация, DESIGN.md §15), а не поломка. Провайдер, env-ключ и
 // base URL — из того же реестра reasonerProviders, что у newReasoner.
 func reasonerSection(ctx context.Context, cfg config.ReasonerConfig, live bool) section {
@@ -614,8 +616,7 @@ func reasonerSection(ctx context.Context, cfg config.ReasonerConfig, live bool) 
 	if !ok {
 		return section{Name: name, Status: statusFail, Detail: fmt.Sprintf("неизвестный reasoner.provider %q", cfg.Provider)}
 	}
-	key := os.Getenv(p.envKey)
-	if key == "" {
+	if p.envKey != "" && os.Getenv(p.envKey) == "" {
 		return section{Name: name, Status: statusWarn, Detail: fmt.Sprintf("%s не найден (env/.env) — суммаризация/консолидация деградируют до Noop", p.envKey)}
 	}
 	model := reasonerModel(cfg, p)
@@ -624,14 +625,18 @@ func reasonerSection(ctx context.Context, cfg config.ReasonerConfig, live bool) 
 	}
 	baseURL := reasonerBaseURL(cfg, p)
 	if !live {
-		return section{Name: name, Status: statusOK, Detail: fmt.Sprintf("provider=%s, ключ найден, model=%s, %s (живой запрос не выполнялся — используйте -live)", p.key, model, baseURL)}
+		return section{Name: name, Status: statusOK, Detail: fmt.Sprintf("provider=%s, model=%s, %s (живой запрос не выполнялся — используйте -live)", p.key, model, baseURL)}
 	}
 
-	r, err := reason.NewOpenAI(baseURL, model, key)
+	r, err := newReasoner(cfg)
 	if err != nil {
 		return section{Name: name, Status: statusFail, Detail: fmt.Sprintf("создание клиента: %v", err)}
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	timeout := probeTimeout
+	if p.key == "ollama" {
+		timeout = ollamaReasonerProbeTimeout
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if _, err := r.Complete(probeCtx, "Ответь одним словом: ок."); err != nil {
 		return section{Name: name, Status: statusFail, Detail: fmt.Sprintf("живой запрос к %s не удался: %v — суммаризация/консолидация деградируют до Noop", p.key, err)}
