@@ -36,7 +36,7 @@ func TestDoInit_MultipleAgents(t *testing.T) {
 	t.Setenv("DSH_HOME", t.TempDir()) // init читает patch-слои dsh — не настоящий ~/.dsh
 	dir := t.TempDir()
 	var out strings.Builder
-	cfg := initConfig{Project: "myproj", Dir: dir, Agents: []string{"claude", "opencode", "dsh"}, Hooks: hooksSessionStart}
+	cfg := initConfig{Project: "myproj", Dir: dir, Agents: []string{"claude", "opencode", "dsh", "codex"}, Hooks: hooksSessionStart}
 	if err := doInit(cfg, &out); err != nil {
 		t.Fatalf("doInit: %v", err)
 	}
@@ -49,6 +49,7 @@ func TestDoInit_MultipleAgents(t *testing.T) {
 		filepath.Join(".opencode", "skills", "memo-bootstrap", "SKILL.md"),
 		filepath.Join(".dsh", "memo.cordis.yml"),
 		filepath.Join(".dsh", dshHooksName),
+		filepath.Join(".codex", "config.toml"),
 		filepath.Join(".agents", "skills", "memo", "SKILL.md"),
 		"agentmemory.toml",
 	} {
@@ -56,7 +57,7 @@ func TestDoInit_MultipleAgents(t *testing.T) {
 			t.Errorf("%s не создан: %v", rel, err)
 		}
 	}
-	if !strings.Contains(out.String(), "агенты: Claude Code, opencode, DeepSeek Harness") {
+	if !strings.Contains(out.String(), "агенты: Claude Code, opencode, DeepSeek Harness, Codex") {
 		t.Errorf("сводка не перечисляет всех агентов:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "одобри проектный MCP-сервер") {
@@ -82,11 +83,12 @@ func TestDoInit_UnknownAgentInList(t *testing.T) {
 // запятую в неинтерактивном прогоне.
 func TestRunInit_AgentListFlag(t *testing.T) {
 	dir := t.TempDir()
-	args := []string{"-dir", dir, "-project", "myproj", "-agent", "claude,opencode", "-no-input", "-reasoner-provider", "noop", "-embedder-provider", "noop"}
+	args := []string{"-dir", dir, "-project", "myproj", "-agent", "claude,opencode,codex", "-no-input", "-reasoner-provider", "noop", "-embedder-provider", "noop"}
 	if err := runInit(args, &strings.Builder{}); err != nil {
 		t.Fatalf("runInit: %v", err)
 	}
-	for _, rel := range []string{".mcp.json", "opencode.json"} {
+	for _, rel := range []string{".mcp.json", "opencode.json", ".codex/config.toml",
+		".agents/skills/memo/SKILL.md", ".agents/skills/memo-bootstrap/SKILL.md"} {
 		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
 			t.Errorf("%s не создан: %v", rel, err)
 		}

@@ -9,5 +9,6 @@ bin/
 .opencode/
 .claude/
 .mcp.json
+.codex/config.toml
 agentmemory.toml
 opencode.json

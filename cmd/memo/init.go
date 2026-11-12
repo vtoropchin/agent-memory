@@ -471,9 +471,7 @@ var memorySkills = []skillSpec{
 
 // agentTarget описывает одно агентское приложение и то, как оно раскладывает
 // артефакты AgentMemory в проекте: запись MCP-сервера memo (и, если харнесс
-// умеет хуки, конфиг ambient-режима) и скилы. В agentRegistry — claude (Claude
-// Code), opencode и dsh (DeepSeek Harness); структура рассчитана на то, чтобы
-// добавить следующее приложение ещё одной записью.
+// умеет хуки, конфиг ambient-режима) и скилы.
 type agentTarget struct {
 	label string // человекочитаемое имя для промптов/вывода
 
@@ -507,6 +505,14 @@ var agentRegistry = map[string]agentTarget{
 		hooksLabel: "хуки Claude Code",
 		skillsDir: func(dir string) string {
 			return filepath.Join(dir, ".claude", "skills")
+		},
+		skills: memorySkills,
+	},
+	"codex": {
+		label:    "Codex",
+		scaffold: scaffoldCodex,
+		skillsDir: func(dir string) string {
+			return filepath.Join(dir, ".agents", "skills")
 		},
 		skills: memorySkills,
 	},
@@ -1271,11 +1277,11 @@ func doInit(cfg initConfig, out io.Writer) error {
 	// харнессам, закрыто agentTarget.scaffold; -force на запись сервера не
 	// влияет нигде (источник истины — параметры текущего прогона init).
 	//
-	// Выбрано несколько приложений — каждое получает свой набор артефактов: у
-	// них раздельные MCP-конфиги и корни скиллов, поэтому прогоны не
-	// пересекаются. Выбор хуков (cfg.Hooks) общий для всех, кто их умеет.
+	// У приложений раздельные MCP-конфиги, но корень скиллов может совпадать.
+	// Выбор хуков (cfg.Hooks) общий для всех, кто их умеет.
 	var harnessHints strings.Builder
 	labels := make([]string, 0, len(cfg.Agents))
+	writtenSkills := make(map[string]bool)
 	for _, key := range cfg.Agents {
 		target := agentRegistry[key]
 		labels = append(labels, target.label)
@@ -1287,12 +1293,16 @@ func doInit(cfg initConfig, out io.Writer) error {
 
 		for _, spec := range target.skills {
 			skillPath := filepath.Join(target.skillsDir(cfg.Dir), spec.dirName, "SKILL.md")
+			if writtenSkills[skillPath] {
+				continue
+			}
 			if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
 				return fmt.Errorf("создание каталога %q: %w", filepath.Dir(skillPath), err)
 			}
 			if err := writeScaffoldFile(skillPath, spec.render(project), cfg.Force, out); err != nil {
 				return err
 			}
+			writtenSkills[skillPath] = true
 		}
 	}
 

@@ -51,12 +51,13 @@ memo init
 ```
 
 В интерактивном режиме спросит агентские приложения — можно отметить сразу несколько
-(`claude`, `opencode`, `dsh`; пробел ставит галочку, Enter подтверждает), — имя
+(`claude`, `codex`, `opencode`, `dsh`; пробел ставит галочку, Enter подтверждает), — имя
 проекта, адрес и модель ollama, ключ DeepSeek и модель reasoner (по желанию), а затем
 хранилище — файл SQLite или общая база PostgreSQL, см.
 [переезд на PostgreSQL](#общая-база-команды-переезд-на-postgresql) — и разложит:
 
-- MCP-конфиг под каждое выбранное приложение: `.mcp.json` для Claude Code, `opencode.json` для opencode, проектный
+- MCP-конфиг под каждое выбранное приложение: `.mcp.json` для Claude Code,
+  `.codex/config.toml` для Codex, `opencode.json` для opencode, проектный
   patch-оверлей `.dsh/memo.cordis.yml` для DeepSeek Harness (см.
   [подключение оверлея](#deepseek-harness-dsh-проектный-оверлей));
 - два скила — «Протокол работы с памятью» (`memo`) и разовый bootstrap
@@ -70,8 +71,25 @@ memo init
 memo init -project myproject -agent claude -no-input
 ```
 
-После этого агентское приложение само поднимает `memo` как MCP-сервер `memo` — у всех трёх
-харнессов: у DeepSeek Harness `memo init` подключает оверлей к домашнему patch-слою сам.
+После этого агентское приложение само поднимает MCP-сервер `memo`. Для DeepSeek Harness
+установщик также подключает оверлей к домашнему patch-слою.
+
+### Codex
+
+```sh
+memo init -project myproject -agent codex -no-input
+```
+
+Открой новый сеанс Codex CLI или desktop в доверенном проекте. Codex читает сервер
+`memo` из `.codex/config.toml` и оба скила из `.agents/skills`. Для проверки вызови
+`/mcp` в Codex CLI, затем попроси агента выполнить `memory_recall` через скил `memo`.
+[Документация Codex по MCP](https://developers.openai.com/codex/mcp)
+
+В проектном MCP-конфиге указаны абсолютные пути к бинарнику и рабочему каталогу сервера.
+После переноса проекта или бинарника повтори `memo init` с настройками своего проекта.
+Установщик обновляет помеченный блок `memo`, сохраняя остальные настройки и комментарии.
+Если `mcp_servers.memo` уже задан вручную, установщик сохранит файл и сообщит о конфликте.
+В Codex скил `memo` вызывает recall через MCP, хуки установщик не добавляет.
 
 ### DeepSeek Harness (`dsh`): проектный оверлей
 
@@ -114,7 +132,7 @@ localhost.
 
 - Claude Code — `.claude/skills/memo/SKILL.md`
 - opencode — `.opencode/skills/memo/SKILL.md`
-- DeepSeek Harness — `.agents/skills/memo/SKILL.md` (общий корень конвенции agents)
+- Codex и DeepSeek Harness — `.agents/skills/memo/SKILL.md`
 
 Тело скила одно для всех приложений (различаются только путь файла и формат MCP-конфига),
 и агентское приложение подхватывает его само — по полю `description` оно понимает, когда
@@ -197,7 +215,7 @@ Bootstrap закрывает этот разрыв: запусти его **од
 | `-project` | имя проекта (дефолт — базовое имя каталога `-dir`) |
 | `-dir` | каталог, в который скаффолдить артефакты (дефолт `.`) |
 | `-force` | перезаписывать существующие файлы скиллов SKILL.md (agentmemory.toml/mcp-конфиг всегда синхронизируются, `.env` всегда мержится — `-force` на них не влияет) |
-| `-agent` | `claude`, `opencode`, `dsh` (DeepSeek Harness) или несколько через запятую, напр. `claude,opencode` (дефолт `claude`) |
+| `-agent` | `claude`, `codex`, `opencode`, `dsh` (DeepSeek Harness) или несколько через запятую, напр. `claude,codex` (дефолт `claude`) |
 | `-ollama-url` | base URL ollama (дефолт `http://localhost:11434`) |
 | `-ollama-model` | модель эмбеддингов ollama (дефолт `bge-m3`) |
 | `-store` | путь к файлу SQLite (дефолт `~/.agentmemory/memory.db`) |
